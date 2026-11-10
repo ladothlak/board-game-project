@@ -506,12 +506,19 @@ describe("Strategy 4: scanPublisherSite", () => {
 
   it("applies language filtering to homepage candidates", async () => {
     const homeUrl = "https://publisher.com";
+    // Exact-match regex: only the bare homepage URL (with or without a trailing
+    // slash) hits this route — sub-page URLs must not match it as a substring.
+    const homeRoute = /^https:\/\/publisher\.com\/?$/;
     const enUrl = "https://publisher.com/zorblatt/ENG/rules.pdf"; // English tag → rejected for "de"
     const deUrl = "https://publisher.com/zorblatt/GER/rules.pdf"; // German tag → accepted
+    // The homepage links to a rules sub-page where the PDF candidates live.
+    // enUrl is listed first, so the language filter must reject it before deUrl.
+    const subUrl = "https://publisher.com/rules";
     setFetchRouting([
       [enUrl, pdfResponse],
       [deUrl, pdfResponse],
-      [homeUrl, () => htmlWithLinks([enUrl, deUrl])],
+      [homeRoute, () => htmlWithLabeledLinks([{ href: subUrl, label: "Rules" }])],
+      [subUrl, () => htmlWithLinks([enUrl, deUrl])],
       ["hasbro.com", htmlResponse],
     ]);
 
