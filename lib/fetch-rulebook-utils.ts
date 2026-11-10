@@ -5,6 +5,9 @@
  * unit-tested in isolation (no Next.js runtime, no network I/O required).
  */
 
+import dns from "dns";
+import net from "net";
+
 export const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
@@ -210,7 +213,9 @@ export async function isValidPdf(url: string): Promise<boolean> {
   try {
     // Resolve file-share URLs (Dropbox, Drive) to direct download links.
     const resolved = resolveFileShareUrl(url) ?? url;
-    const res = await fetch(resolved, {
+    // Guarded fetch: the SSRF guard rejects private/internal hosts before any
+    // network I/O. A blocked URL throws SsrfBlockedError, caught below → false.
+    const res = await safeFetch(resolved, {
       method: "GET",
       headers: { "User-Agent": UA },
       signal: AbortSignal.timeout(15_000),
@@ -370,4 +375,183 @@ export function isLanguageCompatible(url: string, desired?: string): boolean {
   const detected = detectLanguage(url);
   if (!detected) return true; // No tag found — can't determine, allow it.
   return detected === desired.toLowerCase();
+}
+
+// ─── SSRF Guard ────────────────────────────────────────────────────────────────
+
+/** Thrown when a URL is blocked by the SSRF guard. Maps to HTTP 403. */
+export class SsrfBlockedError extends Error {
+  constructor(url: string) {
+    super(`Blocked URL (points to a private/internal address): ${url}`);
+    this.name = "SsrfBlockedError";
+  }
+}
+
+/**
+ * Check if an IPv4 address is in a private/reserved range that must be blocked
+ * to prevent SSRF attacks.
+ *
+ * Blocked: RFC1918 private ranges (10/8, 172.16/12, 192.168/16), link-local
+ *   169.254/16 (includes the cloud metadata endpoint 169.254.169.254), and the
+ *   loopback range 127/8 EXCEPT 127.0.0.1 (allowed for this self-hosted app).
+ * Allowed: all public/unspecified addresses and 127.0.0.1.
+ */
+export function isPrivateIPv4(ip: string): boolean {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) {
+    return true; // fail closed on malformed input
+  }
+  const [a, b] = parts;
+  if (a === 10) return true;                                       // 10.0.0.0/8
+  if (a === 172 && b >= 16 && b <= 31) return true;                 // 172.16.0.0/12
+  if (a === 192 && b === 168) return true;                          // 192.168.0.0/16
+  if (a === 169 && b === 254) return true;                          // 169.254.0.0/16 (link-local / cloud metadata)
+  if (a === 127 && !(b === 0 && parts[2] === 0 && parts[3] === 1)) return true; // 127.0.0.0/8 minus 127.0.0.1
+  return false;
+}
+
+/**
+ * Expand an IPv6 address into its eight 16-bit groups. Returns null if the
+ * address is malformed. Handles "::" compression and a trailing dotted-decimal
+ * IPv4 (the IPv4-mapped form, e.g. ::ffff:10.0.0.1).
+ */
+function expandIPv6(ip: string): number[] | null {
+  const addr = ip.toLowerCase().split("%")[0]; // strip zone id, e.g. fe80::1%eth0
+  let parts = addr.split(":");
+
+  // Expand a trailing dotted-decimal IPv4 into two 16-bit hex groups.
+  const last = parts[parts.length - 1];
+  if (last.includes(".")) {
+    const nums = last.split(".").map(Number);
+    if (nums.length !== 4 || nums.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    parts.pop();
+    // Push as HEX strings so the shared parseInt(h, 16) parse loop reads them
+    // back correctly (a decimal "2560" would be misread as 0x2560).
+    parts.push(((nums[0] << 8) | nums[1]).toString(16), ((nums[2] << 8) | nums[3]).toString(16));
+  }
+
+  let groups: string[];
+  const emptyCount = parts.filter((s) => s === "").length;
+  if (emptyCount >= 1) {
+    // "::" compression present.
+    const firstEmptyIdx = parts.indexOf("");
+    const leftParts = parts.slice(0, firstEmptyIdx);
+    const rightParts = parts.slice(firstEmptyIdx + 1).filter((s) => s !== "");
+    if (leftParts.length + rightParts.length > 7) return null;
+    const missing = 8 - leftParts.length - rightParts.length;
+    groups = [...leftParts, ...Array(missing).fill("0"), ...rightParts];
+  } else {
+    groups = parts;
+    if (groups.length !== 8) return null;
+  }
+
+  const out: number[] = [];
+  for (const h of groups) {
+    const val = parseInt(h, 16);
+    if (Number.isNaN(val) || val < 0 || val > 0xffff) return null;
+    out.push(val);
+  }
+  return out;
+}
+
+/**
+ * Check if an IPv6 address is in a private/reserved range that must be blocked.
+ * Blocked: ::1 (loopback), fc00::/7 (unique local), and IPv4-mapped
+ *   ::ffff:0:0/96 addresses whose embedded IPv4 is itself private.
+ */
+export function isPrivateIPv6(ip: string): boolean {
+  const groups = expandIPv6(ip);
+  if (!groups) return true; // fail closed on malformed input
+
+  // ::1 (loopback).
+  if (
+    groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 &&
+    groups[4] === 0 && groups[5] === 0 && groups[6] === 0 && groups[7] === 1
+  ) {
+    return true;
+  }
+
+  // fc00::/7 (unique local): top 7 bits of the first group are 1111110.
+  if ((groups[0] & 0xfe00) === 0xfc00) return true;
+
+  // ::ffff:0:0/96 (IPv4-mapped): first 96 bits are 0:0:0:0:0:ffff and the last
+  // 32 bits form an IPv4 address — evaluate that embedded IPv4 as IPv4.
+  if (
+    groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 &&
+    groups[4] === 0 && groups[5] === 0xffff
+  ) {
+    const ipv4 = `${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.${groups[7] & 0xff}`;
+    return isPrivateIPv4(ipv4);
+  }
+
+  return false;
+}
+
+/**
+ * SSRF guard: verify that a URL's host resolves only to public (non-internal)
+ * IP addresses before it may be fetched server-side.
+ *
+ * - Literal IP hosts are checked directly (no DNS lookup).
+ * - Domain names are resolved via DNS (A + AAAA); ALL resolved addresses must be
+ *   public, otherwise the URL is rejected (fail closed).
+ * - `localhost` and `127.0.0.1` are allowed for this self-hosted app.
+ * - Cloud metadata (169.254.x.x) and RFC1918 private ranges are always blocked.
+ *
+ * Resolves to true if the URL is safe to fetch, false otherwise.
+ */
+export async function isSafeUrl(url: string): Promise<boolean> {
+  let hostname: string;
+  try {
+    const parsed = new URL(url);
+    hostname = parsed.hostname;
+  } catch {
+    return false; // can't parse → fail closed
+  }
+
+  // Strip brackets from an IPv6 literal host (e.g. "[::1]" → "::1").
+  const host = hostname.startsWith("[") && hostname.endsWith("]")
+    ? hostname.slice(1, -1)
+    : hostname;
+
+  if (!host) return false; // empty host → fail closed
+
+  // Allow self-hosted dev/testing targets.
+  if (host === "localhost" || host === "127.0.0.1") return true;
+
+  const ipVersion = net.isIP(host);
+  if (ipVersion === 4) return !isPrivateIPv4(host);
+  if (ipVersion === 6) return !isPrivateIPv6(host);
+
+  // Domain name → resolve via DNS and check ALL A + AAAA records.
+  const ips: string[] = [];
+  try {
+    const v4 = await dns.promises.lookup(host, { family: 4, all: true });
+    ips.push(...v4.map((r) => r.address));
+  } catch {
+    /* no A records */
+  }
+  try {
+    const v6 = await dns.promises.lookup(host, { family: 6, all: true });
+    ips.push(...v6.map((r) => r.address));
+  } catch {
+    /* no AAAA records */
+  }
+
+  if (ips.length === 0) return false; // resolution failed → fail closed
+
+  for (const ip of ips) {
+    if (ip.includes(":") ? isPrivateIPv6(ip) : isPrivateIPv4(ip)) return false;
+  }
+  return true;
+}
+
+/**
+ * Guarded fetch: runs the SSRF guard before issuing the request. Throws
+ * SsrfBlockedError if the URL points to a private/internal address, so callers
+ * never touch the network with a blocked host.
+ */
+export async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
+  const safe = await isSafeUrl(url);
+  if (!safe) throw new SsrfBlockedError(url);
+  return fetch(url, init);
 }
