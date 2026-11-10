@@ -5,8 +5,7 @@ import { spawn } from "child_process";
 import { getGame, invalidateGamesCache } from "@/lib/games";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
-
-const MAX_PDF_SIZE = 100 * 1024 * 1024; // 100 MB
+import { MAX_PDF_SIZE } from "@/lib/fetch-rulebook-utils";
 
 /**
  * Replace a game's rulebook PDF and re-digest all LLM-generated content.

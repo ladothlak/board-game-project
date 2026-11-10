@@ -4,8 +4,7 @@ import path from "path";
 import { listGames, invalidateGamesCache } from "@/lib/games";
 import { digestRulebook } from "@/lib/digest-rulebook.mjs";
 import { renderCoverFromPdf } from "@/lib/render-cover.mjs";
-
-const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
+import { MAX_PDF_SIZE as MAX_FILE_SIZE } from "@/lib/fetch-rulebook-utils";
 
 function slugify(title: string): string {
   return title

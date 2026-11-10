@@ -5,8 +5,7 @@ import { spawn } from "child_process";
 import { getGame, invalidateGamesCache } from "@/lib/games";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
-
-const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
+import { MAX_PDF_SIZE as MAX_FILE_SIZE } from "@/lib/fetch-rulebook-utils";
 
 /**
  * POST — Add an expansion to a game.
