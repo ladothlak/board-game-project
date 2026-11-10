@@ -1,4 +1,4 @@
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 
 export interface Suggestion {
@@ -57,68 +57,70 @@ export function invalidateGamesCache(): void {
   _cacheTime = 0;
 }
 
-function readAllGames(): GameMeta[] {
-  if (!fs.existsSync(gamesDir)) return [];
-  const slugs = fs
-    .readdirSync(gamesDir, { withFileTypes: true })
-    .filter((e) => e.isDirectory())
-    .map((e) => e.name);
+async function readAllGames(): Promise<GameMeta[]> {
+  let slugs: string[] = [];
+  try {
+    slugs = (await fs.readdir(gamesDir, { withFileTypes: true }))
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return []; // no games directory yet
+  }
 
   const games: GameMeta[] = [];
   for (const slug of slugs) {
     const metaPath = path.join(gamesDir, slug, "meta.json");
-    if (!fs.existsSync(metaPath)) continue;
+    let meta: any;
     try {
-      const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
-      // Attach the personal rating if one exists (stored in rating.json).
-      const ratingPath = path.join(gamesDir, slug, "rating.json");
-      if (fs.existsSync(ratingPath)) {
-        try {
-          const r = JSON.parse(fs.readFileSync(ratingPath, "utf8"));
-          if (Number.isFinite(r.stars)) meta.rating = r.stars;
-        } catch {
-          /* ignore malformed rating */
-        }
-      }
-      games.push({ slug, ...meta });
+      meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
     } catch (e) {
       console.error(`Failed to read ${metaPath}:`, e);
+      continue;
     }
+    // Attach the personal rating if one exists (stored in rating.json).
+    const ratingPath = path.join(gamesDir, slug, "rating.json");
+    try {
+      const r = JSON.parse(await fs.readFile(ratingPath, "utf8"));
+      if (Number.isFinite(r.stars)) meta.rating = r.stars;
+    } catch {
+      /* ignore malformed rating */
+    }
+    games.push({ slug, ...meta });
   }
   return games;
 }
 
-export function listGames(): GameMeta[] {
+export async function listGames(): Promise<GameMeta[]> {
   const now = Date.now();
   if (_cache && now - _cacheTime < CACHE_TTL) {
     return _cache.filter((g) => !g.hidden).sort((a, b) => a.title.localeCompare(b.title));
   }
-  const all = readAllGames();
+  const all = await readAllGames();
   _cache = all;
   _cacheTime = now;
   return all.filter((g) => !g.hidden).sort((a, b) => a.title.localeCompare(b.title));
 }
 
 /** The games currently hidden from the shelf (data intact on disk). */
-export function listHiddenGames(): GameMeta[] {
+export async function listHiddenGames(): Promise<GameMeta[]> {
   const now = Date.now();
   if (_cache && now - _cacheTime < CACHE_TTL) {
     return _cache.filter((g) => g.hidden).sort((a, b) => a.title.localeCompare(b.title));
   }
-  const all = readAllGames();
+  const all = await readAllGames();
   _cache = all;
   _cacheTime = now;
   return all.filter((g) => g.hidden).sort((a, b) => a.title.localeCompare(b.title));
 }
 
-export function getGame(slug: string): GameMeta | null {
+export async function getGame(slug: string): Promise<GameMeta | null> {
   // Guard against path traversal via the slug.
   if (!/^[a-z0-9-]+$/.test(slug)) return null;
   const now = Date.now();
   if (_cache && now - _cacheTime < CACHE_TTL) {
     return _cache.find((g) => g.slug === slug) ?? null;
   }
-  const all = readAllGames();
+  const all = await readAllGames();
   _cache = all;
   _cacheTime = now;
   return all.find((g) => g.slug === slug) ?? null;

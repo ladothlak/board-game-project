@@ -68,7 +68,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: guard.reason }, { status: 400 });
   }
 
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) {
     logRequest({ ip, route: "/api/chat", method: "POST", status: 404, durationMs: Date.now() - start });
     return NextResponse.json({ error: "Unknown game" }, { status: 404 });
@@ -110,10 +110,10 @@ export async function POST(req: Request) {
   let compareContext = "";
   let compareTitle = "";
   if (compareSlug && compareSlug !== slug) {
-    const other = getGame(compareSlug);
+    const other = await getGame(compareSlug);
     if (other) {
       compareTitle = other.title;
-      const otherChunks = loadIndex().filter((c) => c.slug === compareSlug);
+      const otherChunks = (await loadIndex()).filter((c) => c.slug === compareSlug);
       const otherTop = retrieve(otherChunks, question, 3);
       compareContext = otherTop
         .map((c) => `--- ${compareTitle}, page ${c.page} ---\n${c.text}`)

@@ -4,7 +4,7 @@ import { digestRulebook } from "@/lib/digest-rulebook.mjs";
 
 export async function GET(_req: Request, ctx: { params: Promise<{ slug: string }> }) {
   const { slug } = await ctx.params;
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) {
     return NextResponse.json({ error: "Unknown game" }, { status: 404 });
   }
@@ -22,7 +22,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ slug: string }
  */
 export async function POST(_req: Request, ctx: { params: Promise<{ slug: string }> }) {
   const { slug } = await ctx.params;
-  if (!getGame(slug)) {
+  if (!(await getGame(slug))) {
     return NextResponse.json({ error: "Unknown game" }, { status: 404 });
   }
   void digestRulebook(slug).catch((e) =>

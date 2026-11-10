@@ -61,7 +61,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ status: "blocked" }, { status: 200 });
   }
 
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) {
     return NextResponse.json({ status: "not_found" }, { status: 404 });
   }

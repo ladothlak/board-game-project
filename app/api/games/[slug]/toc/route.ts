@@ -10,9 +10,9 @@ import { loadIndex, pageToc } from "@/lib/retrieve";
  */
 export async function GET(_req: Request, ctx: { params: Promise<{ slug: string }> }) {
   const { slug } = await ctx.params;
-  if (!getGame(slug)) {
+  if (!(await getGame(slug))) {
     return NextResponse.json({ error: "Unknown game" }, { status: 404 });
   }
-  const chunks = loadIndex().filter((c) => c.slug === slug);
+  const chunks = (await loadIndex()).filter((c) => c.slug === slug);
   return NextResponse.json({ toc: pageToc(chunks) });
 }

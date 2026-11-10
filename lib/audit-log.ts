@@ -1,4 +1,4 @@
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 
 /**
@@ -13,10 +13,10 @@ const LOG_FILE = path.join(LOG_DIR, "audit.log");
 
 // Ensure the log directory exists (lazy, once).
 let ensured = false;
-function ensureDir() {
+async function ensureDir() {
   if (ensured) return;
   try {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
+    await fs.mkdir(LOG_DIR, { recursive: true });
   } catch {
     /* ignore — logging is best-effort */
   }
@@ -37,11 +37,11 @@ interface AuditEntry {
  * Append a single audit entry. Fire-and-forget: never throws, never blocks
  * the request. Safe to call from any route handler.
  */
-export function logRequest(entry: Omit<AuditEntry, "ts">) {
+export async function logRequest(entry: Omit<AuditEntry, "ts">) {
   try {
-    ensureDir();
+    await ensureDir();
     const line = JSON.stringify({ ts: new Date().toISOString(), ...entry });
-    fs.appendFileSync(LOG_FILE, line + "\n");
+    await fs.appendFile(LOG_FILE, line + "\n");
   } catch {
     /* best-effort — never crash the server for logging */
   }

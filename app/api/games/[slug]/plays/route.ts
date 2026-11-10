@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 import { getGame } from "@/lib/games";
 import { requireAuth } from "@/lib/auth";
@@ -9,15 +9,14 @@ interface Play {
   players?: number;
 }
 
-function playsPath(slug: string): string | null {
-  if (!getGame(slug)) return null;
+async function playsPath(slug: string): Promise<string | null> {
+  if (!(await getGame(slug))) return null;
   return path.join(process.cwd(), "content", "games", slug, "plays.json");
 }
 
-function readPlays(p: string): Play[] {
-  if (!fs.existsSync(p)) return [];
+async function readPlays(p: string): Promise<Play[]> {
   try {
-    const data = JSON.parse(fs.readFileSync(p, "utf8"));
+    const data = JSON.parse(await fs.readFile(p, "utf8"));
     return Array.isArray(data.plays) ? data.plays : [];
   } catch {
     return [];
@@ -29,9 +28,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ slug: string }>
   if (denied) return denied;
 
   const { slug } = await ctx.params;
-  const p = playsPath(slug);
+  const p = await playsPath(slug);
   if (!p) return NextResponse.json({ error: "Unknown game" }, { status: 404 });
-  const plays = readPlays(p).sort((a, b) => b.date.localeCompare(a.date));
+  const plays = (await readPlays(p)).sort((a, b) => b.date.localeCompare(a.date));
   return NextResponse.json({ plays });
 }
 
@@ -41,7 +40,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ slug: string }
   if (denied) return denied;
 
   const { slug } = await ctx.params;
-  const p = playsPath(slug);
+  const p = await playsPath(slug);
   if (!p) return NextResponse.json({ error: "Unknown game" }, { status: 404 });
 
   let body: { players?: number };
@@ -55,9 +54,9 @@ export async function POST(req: Request, ctx: { params: Promise<{ slug: string }
       ? Math.floor(Number(body.players))
       : undefined;
 
-  const plays = readPlays(p);
+  const plays = await readPlays(p);
   plays.push({ date: new Date().toISOString(), players });
   plays.sort((a, b) => b.date.localeCompare(a.date));
-  fs.writeFileSync(p, JSON.stringify({ plays: plays.slice(0, 500), updatedAt: new Date().toISOString() }, null, 2));
+  await fs.writeFile(p, JSON.stringify({ plays: plays.slice(0, 500), updatedAt: new Date().toISOString() }, null, 2));
   return NextResponse.json({ plays: plays.slice(0, 500) });
 }

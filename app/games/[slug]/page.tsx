@@ -21,7 +21,7 @@ export default async function GamePage({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) notFound();
 
   // Assets are served on demand from content/games/<slug>/ (not via the
@@ -110,7 +110,7 @@ export default async function GamePage({
       <Expansions slug={slug} expansions={game.expansions ?? []} />
 
       {/* Below-fold sections (lazy-loaded client component). */}
-      <BelowFold slug={slug} title={game.title} game={game} games={listGames()} />
+      <BelowFold slug={slug} title={game.title} game={game} games={await listGames()} />
       </div>
     </CoverTint>
   );

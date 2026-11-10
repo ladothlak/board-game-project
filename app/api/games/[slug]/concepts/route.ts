@@ -13,12 +13,12 @@ export async function GET(
   { params }: { params: Promise<{ slug: string }> }
 ) {
   const { slug } = await params;
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) {
     return NextResponse.json({ error: "Game not found" }, { status: 404 });
   }
 
-  const stored = readConcepts(slug);
+  const stored = await readConcepts(slug);
   if (stored) {
     return NextResponse.json(stored);
   }
@@ -32,7 +32,7 @@ export async function POST(
   { params }: { params: Promise<{ slug: string }> }
 ) {
   const { slug } = await params;
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) {
     return NextResponse.json({ error: "Game not found" }, { status: 404 });
   }
@@ -47,7 +47,7 @@ export async function POST(
 
   try {
     const concepts = await generateConcepts(slug, apiKey);
-    writeConcepts(slug, concepts);
+    await writeConcepts(slug, concepts);
     return NextResponse.json({
       game: slug,
       generatedAt: new Date().toISOString(),

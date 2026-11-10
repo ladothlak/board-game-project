@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 import { getGame, invalidateGamesCache } from "@/lib/games";
 import { generatePairs } from "@/lib/generate-pairs";
@@ -12,7 +12,7 @@ export async function GET(
   { params }: { params: Promise<{ slug: string }> }
 ) {
   const { slug } = await params;
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) {
     logRequest({ ip: "", route: `/api/games/${slug}/pairs`, method: "GET", status: 404, durationMs: Date.now() - start });
     return NextResponse.json({ error: "Game not found" }, { status: 404 });
@@ -36,9 +36,9 @@ export async function GET(
     if (pairs.length > 0) {
       // Persist to meta.json.
       const metaPath = path.join(process.cwd(), "content", "games", slug, "meta.json");
-      const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+      const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
       meta.pairsWith = pairs;
-      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+      await fs.writeFile(metaPath, JSON.stringify(meta, null, 2));
       invalidateGamesCache();
     }
     logRequest({ ip: "", route: `/api/games/${slug}/pairs`, method: "GET", status: 200, durationMs: Date.now() - start });

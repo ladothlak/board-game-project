@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 import { getGame, invalidateGamesCache } from "@/lib/games";
 
@@ -14,7 +14,7 @@ export async function POST(
   ctx: { params: Promise<{ slug: string }> }
 ) {
   const { slug } = await ctx.params;
-  if (!getGame(slug)) {
+  if (!(await getGame(slug))) {
     return NextResponse.json({ error: "Unknown game" }, { status: 404 });
   }
 
@@ -29,24 +29,24 @@ export async function POST(
 
   if (body.mode === "hide") {
     const metaPath = path.join(dir, "meta.json");
-    const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+    const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
     meta.hidden = true;
-    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+    await fs.writeFile(metaPath, JSON.stringify(meta, null, 2));
     invalidateGamesCache();
     return NextResponse.json({ mode: "hide", hidden: true });
   }
 
   if (body.mode === "restore") {
     const metaPath = path.join(dir, "meta.json");
-    const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+    const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
     delete meta.hidden;
-    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+    await fs.writeFile(metaPath, JSON.stringify(meta, null, 2));
     invalidateGamesCache();
     return NextResponse.json({ mode: "restore", hidden: false });
   }
 
   if (body.mode === "delete") {
-    fs.rmSync(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true });
     invalidateGamesCache();
     return NextResponse.json({ mode: "delete", deleted: true });
   }

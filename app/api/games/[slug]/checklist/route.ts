@@ -7,10 +7,10 @@ import { readChecklist, writeChecklist, generateChecklist } from "@/lib/generate
  */
 export async function GET(_req: Request, ctx: { params: Promise<{ slug: string }> }) {
   const { slug } = await ctx.params;
-  if (!getGame(slug)) {
+  if (!(await getGame(slug))) {
     return NextResponse.json({ error: "Unknown game" }, { status: 404 });
   }
-  const checklist = readChecklist(slug);
+  const checklist = await readChecklist(slug);
   return NextResponse.json(checklist ? { steps: checklist.steps } : { steps: null });
 }
 
@@ -20,7 +20,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ slug: string }
  */
 export async function POST(req: Request, ctx: { params: Promise<{ slug: string }> }) {
   const { slug } = await ctx.params;
-  if (!getGame(slug)) {
+  if (!(await getGame(slug))) {
     return NextResponse.json({ error: "Unknown game" }, { status: 404 });
   }
 
@@ -32,7 +32,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ slug: string }
     /* no body is fine — defaults to non-forced */
   }
 
-  const existing = readChecklist(slug);
+  const existing = await readChecklist(slug);
   if (existing && !force) {
     return NextResponse.json({ steps: existing.steps });
   }
@@ -45,6 +45,6 @@ export async function POST(req: Request, ctx: { params: Promise<{ slug: string }
     );
   }
 
-  writeChecklist(slug, checklist);
+  await writeChecklist(slug, checklist);
   return NextResponse.json({ steps: checklist.steps });
 }

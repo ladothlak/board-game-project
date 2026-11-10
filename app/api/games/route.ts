@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 import { listGames, invalidateGamesCache } from "@/lib/games";
 import { digestRulebook } from "@/lib/digest-rulebook.mjs";
@@ -43,21 +43,21 @@ export async function POST(req: Request) {
   if (!baseSlug) {
     return NextResponse.json({ error: "Title could not be converted to a slug" }, { status: 400 });
   }
-  const taken = new Set(listGames().map((g) => g.slug));
+  const taken = new Set((await listGames()).map((g) => g.slug));
   let slug = baseSlug;
   let n = 2;
   while (taken.has(slug)) slug = `${baseSlug}-${n++}`;
 
   const dir = path.join(process.cwd(), "content", "games", slug);
-  fs.mkdirSync(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true });
 
   // Save the rulebook; save a cover if one was provided, or render one from page 1.
   const pdfPath = path.join(dir, "rules.pdf");
-  fs.writeFileSync(pdfPath, Buffer.from(await pdf.arrayBuffer()));
+  await fs.writeFile(pdfPath, Buffer.from(await pdf.arrayBuffer()));
 
   let hasCover = !!cover && cover.size > 0;
   if (hasCover && cover) {
-    fs.writeFileSync(path.join(dir, "cover.jpg"), Buffer.from(await cover.arrayBuffer()));
+    await fs.writeFile(path.join(dir, "cover.jpg"), Buffer.from(await cover.arrayBuffer()));
   } else {
     // No cover provided — render the first page of the rulebook as the cover.
     try {
@@ -82,7 +82,7 @@ export async function POST(req: Request) {
       .map((t) => t.trim().toLowerCase())
       .filter(Boolean),
   };
-  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2));
+  await fs.writeFile(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2));
   invalidateGamesCache();
 
   // Fire-and-forget: digest the rulebook (search index + LLM description).

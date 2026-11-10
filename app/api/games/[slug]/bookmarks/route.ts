@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 import { getGame } from "@/lib/games";
 
@@ -8,15 +8,14 @@ interface Bookmark {
   label: string;
 }
 
-function bookmarksPath(slug: string): string | null {
-  if (!getGame(slug)) return null;
+async function bookmarksPath(slug: string): Promise<string | null> {
+  if (!(await getGame(slug))) return null;
   return path.join(process.cwd(), "content", "games", slug, "bookmarks.json");
 }
 
-function readBookmarks(p: string): Bookmark[] {
-  if (!fs.existsSync(p)) return [];
+async function readBookmarks(p: string): Promise<Bookmark[]> {
   try {
-    const data = JSON.parse(fs.readFileSync(p, "utf8"));
+    const data = JSON.parse(await fs.readFile(p, "utf8"));
     return Array.isArray(data.bookmarks) ? data.bookmarks : [];
   } catch {
     return [];
@@ -25,9 +24,9 @@ function readBookmarks(p: string): Bookmark[] {
 
 export async function GET(_req: Request, ctx: { params: Promise<{ slug: string }> }) {
   const { slug } = await ctx.params;
-  const p = bookmarksPath(slug);
+  const p = await bookmarksPath(slug);
   if (!p) return NextResponse.json({ error: "Unknown game" }, { status: 404 });
-  return NextResponse.json({ bookmarks: readBookmarks(p) });
+  return NextResponse.json({ bookmarks: await readBookmarks(p) });
 }
 
 /**
@@ -36,7 +35,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ slug: string }
  */
 export async function POST(req: Request, ctx: { params: Promise<{ slug: string }> }) {
   const { slug } = await ctx.params;
-  const p = bookmarksPath(slug);
+  const p = await bookmarksPath(slug);
   if (!p) return NextResponse.json({ error: "Unknown game" }, { status: 404 });
 
   let body: { page?: number; label?: string };
@@ -51,21 +50,21 @@ export async function POST(req: Request, ctx: { params: Promise<{ slug: string }
   }
   const label = (body.label ?? "").trim().slice(0, 200);
 
-  const bookmarks = readBookmarks(p).filter((b) => b.page !== page);
+  const bookmarks = (await readBookmarks(p)).filter((b) => b.page !== page);
   bookmarks.push({ page, label });
   bookmarks.sort((a, b) => a.page - b.page);
-  fs.writeFileSync(p, JSON.stringify({ bookmarks, updatedAt: new Date().toISOString() }, null, 2));
+  await fs.writeFile(p, JSON.stringify({ bookmarks, updatedAt: new Date().toISOString() }, null, 2));
   return NextResponse.json({ bookmarks });
 }
 
 /** Remove the bookmark for a single page (?page=N). */
 export async function DELETE(req: Request, ctx: { params: Promise<{ slug: string }> }) {
   const { slug } = await ctx.params;
-  const p = bookmarksPath(slug);
+  const p = await bookmarksPath(slug);
   if (!p) return NextResponse.json({ error: "Unknown game" }, { status: 404 });
   const page = Number(new URL(req.url).searchParams.get("page"));
 
-  const bookmarks = readBookmarks(p).filter((b) => b.page !== page);
-  fs.writeFileSync(p, JSON.stringify({ bookmarks, updatedAt: new Date().toISOString() }, null, 2));
+  const bookmarks = (await readBookmarks(p)).filter((b) => b.page !== page);
+  await fs.writeFile(p, JSON.stringify({ bookmarks, updatedAt: new Date().toISOString() }, null, 2));
   return NextResponse.json({ bookmarks });
 }

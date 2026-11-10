@@ -4,7 +4,7 @@
 // safety net for "delete everything" and hardware loss: run it regularly.
 
 import { execFileSync } from "node:child_process";
-import fs from "node:fs";
+import fs from "node:fs/promises";
 import path from "node:path";
 
 const root = process.cwd();
@@ -17,13 +17,21 @@ const targets = [
 ];
 
 // Only back up what actually exists.
-const present = targets.filter((t) => fs.existsSync(t));
+const present = [];
+for (const t of targets) {
+  try {
+    await fs.access(t);
+    present.push(t);
+  } catch {
+    /* target missing */
+  }
+}
 if (present.length === 0) {
   console.error("Nothing to back up (no content/games/ or search index found).");
   process.exit(1);
 }
 
-fs.mkdirSync(backupDir, { recursive: true });
+await fs.mkdir(backupDir, { recursive: true });
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 const archiveName = `parlor-${stamp}.tar.gz`;
@@ -36,14 +44,17 @@ execFileSync("tar", ["-czf", archivePath, "-C", root, ...relTargets], { stdio: "
 console.log(`Wrote ${archiveName}`);
 
 // Prune old archives beyond KEEP.
-const existing = fs
-  .readdirSync(backupDir)
+const existing = (await fs.readdir(backupDir))
   .filter((f) => f.startsWith("parlor-") && f.endsWith(".tar.gz"))
   .sort()
   .reverse(); // newest first (timestamp in name sorts chronologically)
 
 for (const old of existing.slice(KEEP)) {
   const p = path.join(backupDir, old);
-  fs.rmSync(p);
+  try {
+    await fs.rm(p);
+  } catch {
+    /* already gone */
+  }
   console.log(`Pruned ${old}`);
 }

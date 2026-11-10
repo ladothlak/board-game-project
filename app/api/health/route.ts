@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 import { listGames } from "@/lib/games";
 
@@ -24,17 +24,15 @@ export async function GET() {
 
   let indexMtime: string | null = null;
   const indexPath = path.join(process.cwd(), "public", "search-index.json");
-  if (fs.existsSync(indexPath)) {
-    try {
-      indexMtime = new Date(fs.statSync(indexPath).mtimeMs).toISOString();
-    } catch {
-      indexMtime = null;
-    }
+  try {
+    indexMtime = new Date((await fs.stat(indexPath)).mtimeMs).toISOString();
+  } catch {
+    indexMtime = null;
   }
 
   return NextResponse.json({
     provider,
     indexMtime,
-    gameCount: listGames().length,
+    gameCount: (await listGames()).length,
   });
 }

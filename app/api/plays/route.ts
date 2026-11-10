@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 import { listGames } from "@/lib/games";
 import { requireAuth } from "@/lib/auth";
@@ -14,11 +14,10 @@ export async function GET(req: Request) {
   if (denied) return denied;
 
   const lastPlayed: Record<string, string> = {};
-  for (const g of listGames()) {
+  for (const g of await listGames()) {
     const p = path.join(process.cwd(), "content", "games", g.slug, "plays.json");
-    if (!fs.existsSync(p)) continue;
     try {
-      const data = JSON.parse(fs.readFileSync(p, "utf8"));
+      const data = JSON.parse(await fs.readFile(p, "utf8"));
       const plays: { date: string }[] = Array.isArray(data.plays) ? data.plays : [];
       if (plays.length > 0) {
         lastPlayed[g.slug] = plays

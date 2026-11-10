@@ -1,4 +1,4 @@
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 import { getGame } from "./games";
 import { loadIndex, retrieve, pageToc } from "./retrieve";
@@ -19,11 +19,10 @@ function checklistPath(slug: string): string {
 }
 
 /** Read a previously generated checklist, or null if none exists. */
-export function readChecklist(slug: string): Checklist | null {
+export async function readChecklist(slug: string): Promise<Checklist | null> {
   const p = checklistPath(slug);
-  if (!fs.existsSync(p)) return null;
   try {
-    const data = JSON.parse(fs.readFileSync(p, "utf8"));
+    const data = JSON.parse(await fs.readFile(p, "utf8"));
     if (Array.isArray(data.steps) && data.steps.length > 0) {
       return { steps: data.steps, generatedAt: data.generatedAt ?? "" };
     }
@@ -33,10 +32,10 @@ export function readChecklist(slug: string): Checklist | null {
   }
 }
 
-export function writeChecklist(slug: string, checklist: Checklist) {
+export async function writeChecklist(slug: string, checklist: Checklist) {
   const p = checklistPath(slug);
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(checklist, null, 2));
+  await fs.mkdir(path.dirname(p), { recursive: true });
+  await fs.writeFile(p, JSON.stringify(checklist, null, 2));
 }
 
 /** Ask the local model for the setup steps; returns the raw content. */
@@ -98,10 +97,10 @@ function parseSteps(raw: string): string[] | null {
 export async function generateChecklist(slug: string): Promise<Checklist | null> {
   const key = process.env.UNSLOTH_API_KEY;
   if (!key) return null;
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) return null;
 
-  const chunks = loadIndex().filter((c) => c.slug === slug);
+  const chunks = (await loadIndex()).filter((c) => c.slug === slug);
   if (chunks.length === 0) return null;
 
   // Setup-relevant excerpts plus a whole-book page map for orientation.

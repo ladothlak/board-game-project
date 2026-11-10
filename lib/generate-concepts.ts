@@ -1,4 +1,4 @@
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 import { getGame } from "./games";
 import { loadIndex, pageMap } from "./retrieve";
@@ -31,10 +31,10 @@ export async function generateConcepts(
   slug: string,
   apiKey: string
 ): Promise<Concept[]> {
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) throw new Error(`Unknown game: ${slug}`);
 
-  const chunks = loadIndex().filter((c) => c.slug === slug);
+  const chunks = (await loadIndex()).filter((c) => c.slug === slug);
   if (chunks.length === 0) throw new Error(`No rulebook index for ${slug}`);
 
   // Build a per-page map so the LLM knows what each page covers.
@@ -116,26 +116,25 @@ Return ONLY a JSON array. No markdown, no explanation.`;
 }
 
 /** Read stored concepts from disk. */
-export function readConcepts(slug: string): ConceptsFile | null {
+export async function readConcepts(slug: string): Promise<ConceptsFile | null> {
   const p = path.join(process.cwd(), "content", "games", slug, "concepts.json");
-  if (!fs.existsSync(p)) return null;
   try {
-    return JSON.parse(fs.readFileSync(p, "utf8"));
+    return JSON.parse(await fs.readFile(p, "utf8"));
   } catch {
     return null;
   }
 }
 
 /** Write generated concepts to disk. */
-export function writeConcepts(slug: string, concepts: Concept[]) {
+export async function writeConcepts(slug: string, concepts: Concept[]) {
   const dir = path.join(process.cwd(), "content", "games", slug);
-  fs.mkdirSync(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true });
   const file: ConceptsFile = {
     game: slug,
     generatedAt: new Date().toISOString(),
     concepts,
   };
-  fs.writeFileSync(
+  await fs.writeFile(
     path.join(dir, "concepts.json"),
     JSON.stringify(file, null, 2)
   );
