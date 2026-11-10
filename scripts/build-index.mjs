@@ -64,6 +64,7 @@ if (!fs.existsSync(gamesDir)) {
           title: meta.title ?? slug,
           page: i + 1,
           text: clean,
+          isExpansion: false,
         });
       }
     });

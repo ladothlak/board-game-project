@@ -119,7 +119,7 @@ describe("buildRagContext", () => {
   it("boosts chunks of a mentioned enabled expansion to the top", async () => {
     vi.mocked(loadIndex).mockReturnValue([
       ...CHUNKS,
-      { id: "g-exp-doom", slug: SLUG, title: "Doom", page: 10, text: "The Doom expansion adds terrifying new enemies." },
+      { id: "g-exp-doom", slug: SLUG, title: "Doom", page: 10, text: "The Doom expansion adds terrifying new enemies.", isExpansion: true },
     ]);
     stubLlm({ expansion: ["doom rules", "expansion enemies"] });
 
