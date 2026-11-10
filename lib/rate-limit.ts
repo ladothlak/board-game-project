@@ -49,24 +49,22 @@ export function checkRate(ip: string, route: string, limit: number, windowMs: nu
 /**
  * Determine a trustworthy client identifier for rate limiting.
  *
- * `x-forwarded-for` and `x-real-ip` are set by the client, so trusting them
- * unconditionally lets any user rotate their own "IP" on every request and
- * bypass the per-IP budget. We therefore only use `x-forwarded-for` when the
- * request has passed through a trusted reverse proxy, indicated by the
- * server-set `x-request-id` header (which clients do not set). Direct
- * connections all share one fixed identifier: nobody can rotate their
- * identity, and total abuse is still bounded by the per-route budget.
+ * Every request header that could identify a client — `x-forwarded-for`,
+ * `x-real-ip`, `host` — is set by the client, so reading any of them lets an
+ * attacker rotate their own "IP" on every request and get a fresh per-IP
+ * bucket each time, bypassing the budget. A previous revision tried to detect
+ * a trusted reverse proxy via the `x-request-id` header, but that header is
+ * ALSO client-settable, so it was spoofable in exactly the same way.
  *
- * Note: we deliberately do NOT fall back to the `host` header — it is also
- * client-settable and would be rotatable in the same way.
+ * This deployment is self-hosted with NO reverse proxy in front of the app,
+ * so there is no trustworthy server-set signal to key on at all. We therefore
+ * return a single fixed identifier for every request: nobody can rotate their
+ * identity, and total abuse is bounded by the per-route budget. It is
+ * unspoofable by construction because it reads no headers whatsoever.
+ *
+ * If a reverse proxy is added in the future, this can be revisited (e.g., an
+ * env-var gate where the proxy strips client-set headers before forwarding).
  */
-export function getClientIp(req: Request): string {
-  if (req.headers.get("x-request-id") !== null) {
-    const forwarded = req.headers.get("x-forwarded-for");
-    if (forwarded) {
-      // The leftmost entry is the original client IP.
-      return forwarded.split(",")[0].trim();
-    }
-  }
+export function getClientIp(_req: Request): string {
   return "direct";
 }

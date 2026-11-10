@@ -6,40 +6,20 @@ function makeRequest(headers: Record<string, string> = {}) {
 }
 
 describe("getClientIp", () => {
-  it("returns a fixed identifier for direct connections even when x-forwarded-for is set", () => {
-    // The whole point of the fix: a client cannot rotate its own "IP"
-    // by setting x-forwarded-for on each request.
+  it("always returns the fixed identifier, regardless of client-set IP headers", () => {
+    // The whole point of the fix: a client cannot rotate its own "IP" by
+    // setting x-forwarded-for (or any other header) on each request. We read
+    // no headers at all, so this is unspoofable by construction.
     expect(getClientIp(makeRequest({ "x-forwarded-for": "1.2.3.4" }))).toBe("direct");
     expect(getClientIp(makeRequest({ "x-forwarded-for": "5.6.7.8" }))).toBe("direct");
   });
 
-  it("does not trust x-real-ip on direct connections", () => {
+  it("does not trust x-real-ip", () => {
     expect(getClientIp(makeRequest({ "x-real-ip": "9.9.9.9" }))).toBe("direct");
   });
 
   it("returns the fixed identifier when no IP headers are present at all", () => {
     expect(getClientIp(makeRequest())).toBe("direct");
-  });
-
-  it("uses x-forwarded-for only when a trusted proxy indicator is present", () => {
-    const req = makeRequest({
-      "x-request-id": "abc123",
-      "x-forwarded-for": "10.0.0.1",
-    });
-    expect(getClientIp(req)).toBe("10.0.0.1");
-  });
-
-  it("takes the leftmost (original client) entry of a comma-separated x-forwarded-for", () => {
-    const req = makeRequest({
-      "x-request-id": "abc123",
-      "x-forwarded-for": "10.0.0.1, 172.16.0.1, 192.168.0.1",
-    });
-    expect(getClientIp(req)).toBe("10.0.0.1");
-  });
-
-  it("falls back to the fixed identifier when behind a proxy but x-forwarded-for is missing", () => {
-    const req = makeRequest({ "x-request-id": "abc123" });
-    expect(getClientIp(req)).toBe("direct");
   });
 });
 
