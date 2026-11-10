@@ -301,7 +301,7 @@ async function webSearchForPdf(gameName: string, publisherName?: string, exclude
 
         // Extract .pdf links from the page.
         for (const m of html.matchAll(/href=["']([^"']*\.pdf[^"']*)["']/gi)) {
-          const pdfUrl = m[1].startsWith("http") ? m[1] : new URL(m[1], r.url).toString();
+          const pdfUrl = decodeHtmlEntities(m[1].startsWith("http") ? m[1] : new URL(m[1], r.url).toString());
           if (!candidates.includes(pdfUrl) && !excluded?.has(pdfUrl)) {
             candidates.push(pdfUrl);
           }
@@ -309,7 +309,7 @@ async function webSearchForPdf(gameName: string, publisherName?: string, exclude
 
         // Also check for Dropbox/Drive direct download patterns.
         for (const m of html.matchAll(/href=["']([^"']*(?:dropbox|drive\.google)[^"']*)["']/gi)) {
-          const fileUrl = m[1].startsWith("http") ? m[1] : new URL(m[1], r.url).toString();
+          const fileUrl = decodeHtmlEntities(m[1].startsWith("http") ? m[1] : new URL(m[1], r.url).toString());
           if (!candidates.includes(fileUrl) && !excluded?.has(fileUrl)) {
             candidates.push(fileUrl);
           }
@@ -444,12 +444,28 @@ async function scanPublisherSite(publisherUrl: string, gameName?: string, exclud
 // ─── File Share URL Resolver ──────────────────────────────────────────────────
 
 /**
+ * Decode common HTML entities in a URL string.
+ * URLs extracted from HTML often contain &amp; instead of &, etc.
+ */
+function decodeHtmlEntities(url: string): string {
+  return url
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'");
+}
+
+/**
  * Resolve Dropbox/Google Drive share links to direct download URLs.
  * Returns the resolved URL or null if it's not a recognized file-share pattern.
  */
 function resolveFileShareUrl(url: string): string | null {
   try {
-    const parsed = new URL(url);
+    // Normalize HTML entities that may have slipped through.
+    const cleanUrl = decodeHtmlEntities(url);
+    const parsed = new URL(cleanUrl);
 
     // Dropbox: www.dropbox.com/scl/fo/<id>/<token>?params → ensure dl=1 for direct download.
     // The GET request follows the redirect chain to the actual file server.
@@ -525,9 +541,19 @@ async function isValidPdf(url: string): Promise<boolean> {
 function isUrlForBaseGame(url: string, gameName: string): boolean {
   const normalized = gameName.toLowerCase().replace(/[:\s-]+/g, "_").replace(/[^a-z0-9_]/g, "");
 
+  // Common rulebook descriptor words that indicate a base-game rulebook,
+  // not an expansion. e.g., "scythe_rules.pdf" is the base game.
+  const RULEBOOK_DESCRIPTORS = new Set([
+    "rules", "rulebook", "manual", "guide", "complete", "player", "aid",
+    "howtoplay", "instructions", "book", "pdf",
+  ]);
+
   try {
     const parsed = new URL(url);
-    const pathSegments = parsed.pathname.split("/").filter(Boolean);
+    // Decode URL-encoded characters (e.g., %20 → space) for proper matching.
+    const pathSegments = parsed.pathname.split("/").filter(Boolean).map(s => {
+      try { return decodeURIComponent(s); } catch { return s; }
+    });
 
     // Find the segment that contains the normalized game name.
     let foundSegment = false;
@@ -547,6 +573,16 @@ function isUrlForBaseGame(url: string, gameName: string): boolean {
         if (segNoExt.startsWith(normalized) && segNoExt.length - normalized.length <= 3) {
           break;
         }
+        // Rulebook descriptor: segment is "<game_name>_<descriptor>" where the
+        // descriptor is a known rulebook word. e.g., "scythe_rules", "nemesis_manual".
+        if (segNoExt.startsWith(normalized)) {
+          const suffix = segNoExt.slice(normalized.length);
+          // Strip separator characters (_ - space) and check the remainder.
+          const cleaned = suffix.replace(/^[_\-\s]+/, "").replace(/[^a-z0-9]/g, "");
+          if (RULEBOOK_DESCRIPTORS.has(cleaned)) {
+            break;
+          }
+        }
         // The segment contains the game name plus extra words → expansion folder.
         // e.g., "nemesis_voidseeders" or "nemesis_lockdown".
         return false;
@@ -558,8 +594,15 @@ function isUrlForBaseGame(url: string, gameName: string): boolean {
       const filename = pathSegments[pathSegments.length - 1]?.toLowerCase() ?? "";
       const fileNoExt = filename.replace(/\.pdf$/i, "");
       if (fileNoExt === normalized) return true;
-      // If the filename starts with the game name followed by extra words → expansion.
-      if (fileNoExt.startsWith(normalized + "_") || fileNoExt.startsWith(normalized + " ")) {
+      // If the filename starts with the game name:
+      if (fileNoExt.startsWith(normalized)) {
+        const suffix = fileNoExt.slice(normalized.length);
+        // Short name variant (≤ 3 chars): "clue" → "cluedo".
+        if (suffix.replace(/[^a-z0-9]/g, "").length <= 3) return true;
+        // Rulebook descriptor: "scythe_rules", "nemesis_manual".
+        const cleaned = suffix.replace(/^[_\-\s]+/, "").replace(/[^a-z0-9]/g, "");
+        if (RULEBOOK_DESCRIPTORS.has(cleaned)) return true;
+        // Otherwise, extra words → expansion.
         return false;
       }
       // If the filename doesn't contain the game name at all, reject it —
@@ -569,13 +612,19 @@ function isUrlForBaseGame(url: string, gameName: string): boolean {
       return true;
     }
 
-    // A segment matched exactly. Now check the filename for expansion indicators.
+    // A segment matched. Now check the filename for expansion indicators.
     const filename = pathSegments[pathSegments.length - 1]?.toLowerCase() ?? "";
     const fileNoExt = filename.replace(/\.pdf$/i, "");
 
-    // If the filename contains the game name followed by additional words, it's an expansion.
-    // e.g., "nemesis_voidseeders_rulebook_280x280mm_it.pdf"
-    if (fileNoExt.startsWith(normalized + "_") || fileNoExt.startsWith(normalized + " ")) {
+    // If the filename starts with the game name:
+    if (fileNoExt.startsWith(normalized)) {
+      const suffix = fileNoExt.slice(normalized.length);
+      // Short name variant (≤ 3 chars): "clue" → "cluedo", "risk" → "riskclassic".
+      if (suffix.replace(/[^a-z0-9]/g, "").length <= 3) return true;
+      // Rulebook descriptor: "scythe_rules", "nemesis_manual".
+      const cleaned = suffix.replace(/^[_\-\s]+/, "").replace(/[^a-z0-9]/g, "");
+      if (RULEBOOK_DESCRIPTORS.has(cleaned)) return true;
+      // e.g., "nemesis_voidseeders_rulebook_280x280mm_it.pdf"
       return false;
     }
 
@@ -806,7 +855,8 @@ export async function POST(req: Request) {
     }
 
     // Download the PDF.
-    const pdfRes = await fetch(pdfUrl, {
+    const downloadUrl = decodeHtmlEntities(resolveFileShareUrl(pdfUrl) ?? pdfUrl);
+    const pdfRes = await fetch(downloadUrl, {
       headers: { "User-Agent": UA },
       signal: AbortSignal.timeout(120_000),
       redirect: "follow",
@@ -816,7 +866,10 @@ export async function POST(req: Request) {
     }
 
     const contentType = pdfRes.headers.get("content-type") ?? "";
-    if (!contentType.includes("pdf") && !pdfUrl.endsWith(".pdf")) {
+    // Accept PDF content-types OR URLs that end in .pdf.
+    // Dropbox/Drive serve files as application/binary, so we can't rely on content-type alone.
+    const looksLikePdf = contentType.includes("pdf") || pdfUrl.endsWith(".pdf") || contentType.includes("binary") || contentType.includes("octet-stream");
+    if (!looksLikePdf) {
       throw new Error("Found a link but it isn't a PDF file.");
     }
 
