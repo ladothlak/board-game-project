@@ -774,3 +774,308 @@ describe("persistFinding (learning persistence)", () => {
     expect(res2.headers.get("X-Pdf-Url")).toBe(zorbPdfUrl);
   });
 });
+
+// ─── isExpansion Bypass ────────────────────────────────────────────────────────
+
+describe("isExpansion bypass", () => {
+  // "NEMESIS_VOIDSEEDERS" is an expansion folder: for gameName "Nemesis" the
+  // segment contains the base name plus extra words, so isUrlForBaseGame
+  // rejects it. Only isExpansion=true can get it through.
+  const expansionUrl = "https://example.com/NEMESIS_VOIDSEEDERS/ENG/rulebook.pdf";
+
+  it("accepts an expansion folder URL that would fail the base-game check (Strategy 3)", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url: expansionUrl }] } })],
+      [expansionUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Nemesis", isExpansion: true, publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(expansionUrl);
+  });
+
+  it("rejects the same expansion URL when isExpansion is not set", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url: expansionUrl }] } })],
+      [expansionUrl, pdfResponse], // would be a valid PDF if the check allowed it
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Nemesis", publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(404);
+    // The base-game check rejected the candidate before any validation fetch.
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("NEMESIS_VOIDSEEDERS"))).toBe(false);
+  });
+
+  it("accepts an expansion filename containing the base game name", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    // "nemesis_voidseeders_rulebook.pdf" starts with the base name plus extra
+    // words → isUrlForBaseGame rejects it without the flag.
+    const url = "https://example.com/nemesis_voidseeders_rulebook.pdf";
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url }] } })],
+      [url, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Nemesis", isExpansion: true, publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(url);
+  });
+
+  it("bypasses validation for cached URLs (Strategy 1)", async () => {
+    const cachedUrl = "https://zorb.com/Zorblatt_Exansion/ENG/rules.pdf";
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({ games: { zorblatt: cachedUrl }, publishers: {} }));
+    setFetchRouting([
+      ["wikipedia.org", () => new Response("nf", { status: 404 })],
+      [cachedUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", isExpansion: true });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(cachedUrl);
+    expect(res.headers.get("X-Found-Via")).toBe("known");
+  });
+
+  it("rejects a cached expansion URL when isExpansion is not set", async () => {
+    const cachedUrl = "https://zorb.com/Zorblatt_Exansion/ENG/rules.pdf";
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({ games: { zorblatt: cachedUrl }, publishers: {} }));
+    setFetchRouting([
+      ["wikipedia.org", () => new Response("nf", { status: 404 })],
+      [cachedUrl, pdfResponse], // would be a valid PDF if the check allowed it
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt" });
+
+    expect(res.status).toBe(404);
+    // The cached URL was rejected by the base-game check before any validation fetch.
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("Zorblatt_Exansion"))).toBe(false);
+  });
+
+  it("bypasses validation for probe URLs (Strategy 2)", async () => {
+    // A hyphenated name produces a folder ("NemesisLockdown") that no longer
+    // matches the normalized game name ("nemesis_lockdown"), so every probe
+    // candidate fails isUrlForBaseGame without the flag.
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(
+      JSON.stringify({
+        games: {},
+        publishers: {
+          "awaken realms": {
+            baseUrl: "https://awakenrealms.com/images/download/",
+            domain: "awakenrealms.com",
+          },
+        },
+      })
+    );
+    const probeUrl = "https://awakenrealms.com/images/download/NemesisLockdown/ENG/rulebook.pdf";
+    setFetchRouting([
+      [probeUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Nemesis-Lockdown", isExpansion: true, publisherName: "Awaken Realms" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(probeUrl);
+    expect(res.headers.get("X-Found-Via")).toBe("probe");
+  });
+
+  it("rejects probe URLs when isExpansion is not set", async () => {
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(
+      JSON.stringify({
+        games: {},
+        publishers: {
+          "awaken realms": {
+            baseUrl: "https://awakenrealms.com/images/download/",
+            domain: "awakenrealms.com",
+          },
+        },
+      })
+    );
+    setFetchRouting([["hasbro.com", htmlResponse]]);
+
+    const res = await post({ gameName: "Nemesis-Lockdown", publisherName: "Awaken Realms" });
+
+    expect(res.status).toBe(404);
+    // Every probe candidate was rejected by the base-game check before any fetch.
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("NemesisLockdown"))).toBe(false);
+  });
+});
+
+// ─── End-to-End Language Filtering ──────────────────────────────────────────────
+
+describe("end-to-end language filtering", () => {
+  it("skips English-only PDFs when the user selects 'de' (Strategy 3)", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    const enUrl = "https://example.com/zorblatt/ENG/rules.pdf"; // English tag → skipped for "de"
+    const deUrl = "https://example.com/zorblatt/GER/rules.pdf"; // German tag → accepted
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url: enUrl }, { url: deUrl }] } })],
+      [enUrl, pdfResponse], // would be a valid PDF if the language matched
+      [deUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Some Publisher", language: "de" });
+
+    expect(res.status).toBe(200);
+    // The English candidate is skipped in favor of the German one.
+    expect(res.headers.get("X-Pdf-Url")).toBe(deUrl);
+  });
+
+  it("skips German-only PDFs when the user selects 'en' (Strategy 3)", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    const deUrl = "https://example.com/zorblatt/GER/rules.pdf"; // German tag → rejected for "en"
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url: deUrl }] } })],
+      [deUrl, pdfResponse], // would be a valid PDF if the language matched
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Some Publisher", language: "en" });
+
+    expect(res.status).toBe(404);
+  });
+
+  it("allows URLs with no language tag regardless of the selection (Strategy 4)", async () => {
+    const homeUrl = "https://publisher.com";
+    // No language tag anywhere in the URL → can't determine → allowed.
+    const pdfUrl = "https://publisher.com/zorblatt/rules.pdf";
+    setFetchRouting([
+      [pdfUrl, pdfResponse],
+      [homeUrl, () => htmlWithLinks([pdfUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherUrl: homeUrl, publisherName: "Some Publisher", language: "de" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(pdfUrl);
+  });
+
+  it("rejects a mismatched language tag (Strategy 4)", async () => {
+    const homeUrl = "https://publisher.com";
+    // German-only PDF, but the user asked for English → rejected.
+    const deUrl = "https://publisher.com/zorblatt/GER/rules.pdf";
+    setFetchRouting([
+      [deUrl, pdfResponse], // would be a valid PDF if the language matched
+      [homeUrl, () => htmlWithLinks([deUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherUrl: homeUrl, publisherName: "Some Publisher", language: "en" });
+
+    expect(res.status).toBe(404);
+  });
+
+  it("falls through to 404 when every candidate is filtered out by language (Strategy 1)", async () => {
+    // The cached URL is English-only; with language "de" Strategy 1 rejects it,
+    // and no other strategy can surface a German rulebook.
+    const cachedUrl = "https://zorb.com/zorblatt/ENG/rules.pdf";
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({ games: { zorblatt: cachedUrl }, publishers: {} }));
+    setFetchRouting([
+      ["wikipedia.org", () => new Response("nf", { status: 404 })],
+      [cachedUrl, pdfResponse], // would be a valid PDF if the language matched
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", language: "de" });
+
+    expect(res.status).toBe(404);
+    // The cached URL was rejected by the language filter before any validation fetch.
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("zorblatt/ENG"))).toBe(false);
+  });
+
+  it("accepts a matching language tag from the cache (Strategy 1)", async () => {
+    const cachedUrl = "https://zorb.com/zorblatt/GER/rules.pdf";
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({ games: { zorblatt: cachedUrl }, publishers: {} }));
+    setFetchRouting([
+      ["wikipedia.org", () => new Response("nf", { status: 404 })],
+      [cachedUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", language: "de" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(cachedUrl);
+    expect(res.headers.get("X-Found-Via")).toBe("known");
+  });
+
+  it("never fetches an English URL when the user selects 'de' (Strategy 2)", async () => {
+    // With language "de" the probe only builds /GER/ candidates, so an English
+    // URL that would be a valid PDF is never even fetched.
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(
+      JSON.stringify({
+        games: {},
+        publishers: { "zorb games": { baseUrl: "https://zorb.com/downloads/", domain: "zorb.com" } },
+      })
+    );
+    const enUrl = "https://zorb.com/downloads/Zorblatt/ENG/rulebook.pdf"; // would be a valid PDF
+    setFetchRouting([
+      [enUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Zorb Games", language: "de" });
+
+    expect(res.status).toBe(404);
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/ENG/"))).toBe(false);
+  });
+
+  it("accepts the requested language folder from the probe (Strategy 2)", async () => {
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(
+      JSON.stringify({
+        games: {},
+        publishers: { "zorb games": { baseUrl: "https://zorb.com/downloads/", domain: "zorb.com" } },
+      })
+    );
+    const deUrl = "https://zorb.com/downloads/Zorblatt/GER/rulebook.pdf";
+    setFetchRouting([
+      [deUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Zorb Games", language: "de" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(deUrl);
+    expect(res.headers.get("X-Found-Via")).toBe("probe");
+  });
+
+  it("does not treat 'IT_LIVES' in a filename as an Italian tag", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    // "it" is only the first filename token followed by a non-descriptor word,
+    // so detectLanguage must return null — not "it".
+    const url = "https://example.com/zorblatt/IT_LIVES.pdf";
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url }] } })],
+      [url, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Some Publisher", language: "de" });
+
+    // If "it" were falsely detected as Italian, this candidate would be
+    // rejected for "de" and the request would 404.
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(url);
+  });
+});
