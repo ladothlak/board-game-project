@@ -49,6 +49,25 @@ function htmlResponse(): Response {
   });
 }
 
+function jsonResponse(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+/** HTML page with plain (unlabeled) links — sufficient for PDF-link extraction. */
+function htmlWithLinks(links: string[]): Response {
+  const body = links.map((l) => `<a href="${l}">link</a>`).join("");
+  return new Response(body, { status: 200, headers: { "Content-Type": "text/html" } });
+}
+
+/** HTML page with labeled links — needed for sub-page discovery (label must match rule/download/etc.). */
+function htmlWithLabeledLinks(links: Array<{ href: string; label: string }>): Response {
+  const body = links.map(({ href, label }) => `<a href="${href}">${label}</a>`).join("");
+  return new Response(body, { status: 200, headers: { "Content-Type": "text/html" } });
+}
+
 /** Route the mocked fetch by URL substring/regex. Unmatched URLs get a 404. */
 function setFetchRouting(routes: Array<[string | RegExp, () => Response]>): void {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
@@ -205,5 +224,300 @@ describe("POST /api/games/fetch-rulebook", () => {
     const res = await post({ gameName: "Nemesis", directUrl });
 
     expect(res.status).toBe(502);
+  });
+});
+
+// ─── Strategy 3: Targeted Web Search (Brave API) ──────────────────────────────
+
+describe("Strategy 3: webSearchForPdf (Brave Search)", () => {
+  it("selects a direct PDF from Brave search results", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    const pdfUrl = "https://example.com/zorblatt/rules.pdf";
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url: pdfUrl }] } })],
+      [pdfUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(pdfUrl);
+    expect(res.headers.get("X-Found-Via")).toBe("search");
+  });
+
+  it("follows HTML results to find PDF links on publisher pages", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    const pageUrl = "https://example.com/zorblatt";
+    const pdfUrl = "https://example.com/zorblatt/rules.pdf";
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url: pageUrl }] } })],
+      [pdfUrl, pdfResponse],
+      [pageUrl, () => htmlWithLinks([pdfUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(pdfUrl);
+    expect(res.headers.get("X-Found-Via")).toBe("search");
+  });
+
+  it("resolves Dropbox links found on followed pages", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    const pageUrl = "https://example.com/zorblatt";
+    // The path contains the game name so it passes the base-game check;
+    // resolveFileShareUrl appends ?dl=1 for the validation/download fetches.
+    const dropboxUrl = "https://www.dropbox.com/scl/fo/zorblatt/rulebook.pdf";
+    const resolvedDropbox = "https://www.dropbox.com/scl/fo/zorblatt/rulebook.pdf?dl=1";
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url: pageUrl }] } })],
+      [resolvedDropbox, pdfResponse],
+      [pageUrl, () => htmlWithLinks([dropboxUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(200);
+    // The original (unresolved) Dropbox URL is what gets reported.
+    expect(res.headers.get("X-Pdf-Url")).toBe(dropboxUrl);
+  });
+
+  it("skips the strategy immediately when no Brave API key is configured", async () => {
+    // BRAVE_SEARCH_API_KEY is "" from beforeEach. Even though Brave *would*
+    // return a valid PDF, the strategy is skipped without a key → 404.
+    const pdfUrl = "https://example.com/zorblatt/rules.pdf";
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url: pdfUrl }] } })],
+      [pdfUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(404);
+  });
+
+  it("returns null gracefully when the Brave API errors", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    setFetchRouting([
+      ["api.search.brave.com", () => new Response("server error", { status: 500 })],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(404);
+  });
+
+  it("skips candidates that are in the excluded set", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    const excludedUrl = "https://example.com/zorblatt/excluded-rules.pdf";
+    const validUrl = "https://example.com/zorblatt/rules.pdf";
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url: excludedUrl }, { url: validUrl }] } })],
+      [validUrl, pdfResponse],
+      [excludedUrl, pdfResponse], // would be valid if not excluded
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Some Publisher", excludeUrls: [excludedUrl] });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(validUrl);
+  });
+
+  it("skips candidates whose detected language does not match the requested one", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    const enUrl = "https://example.com/zorblatt/ENG/rules.pdf"; // English tag → rejected for "fr"
+    const frUrl = "https://example.com/zorblatt/FRE/rules.pdf"; // French tag → accepted
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url: enUrl }, { url: frUrl }] } })],
+      [enUrl, pdfResponse],
+      [frUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Some Publisher", language: "fr" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(frUrl);
+  });
+
+  it("accepts expansion URLs when isExpansion is true (bypassing the base-game check)", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    // "Nemesis_Lockdown" is an expansion folder — isUrlForBaseGame would reject it,
+    // but isExpansion=true bypasses that check.
+    const expansionUrl = "https://example.com/Nemesis_Lockdown/ENG/rulebook.pdf";
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url: expansionUrl }] } })],
+      [expansionUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Nemesis", isExpansion: true, publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(expansionUrl);
+  });
+
+  it("selects the first valid PDF when multiple candidates exist", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    const firstUrl = "https://example.com/zorblatt/first.pdf";
+    const secondUrl = "https://example.com/zorblatt/second.pdf";
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url: firstUrl }, { url: secondUrl }] } })],
+      [firstUrl, pdfResponse],
+      [secondUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(firstUrl);
+  });
+
+  it("returns null when all candidates fail PDF validation", async () => {
+    vi.stubEnv("BRAVE_SEARCH_API_KEY", "test-key");
+    const badUrl = "https://example.com/zorblatt/bad.pdf";
+    setFetchRouting([
+      ["api.search.brave.com", () => jsonResponse({ web: { results: [{ url: badUrl }] } })],
+      [badUrl, htmlResponse], // Not a PDF.
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── Strategy 4: Publisher Site Scan ──────────────────────────────────────────
+
+describe("Strategy 4: scanPublisherSite", () => {
+  it("finds a rulebook PDF linked directly on the publisher homepage", async () => {
+    const homeUrl = "https://publisher.com";
+    const pdfUrl = "https://publisher.com/zorblatt/rules.pdf";
+    setFetchRouting([
+      [pdfUrl, pdfResponse],
+      [homeUrl, () => htmlWithLinks([pdfUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherUrl: homeUrl, publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(pdfUrl);
+    expect(res.headers.get("X-Found-Via")).toBe("scan");
+  });
+
+  it("follows sub-pages to find a rulebook PDF", async () => {
+    const homeUrl = "https://publisher.com";
+    const subUrl = "https://publisher.com/rules";
+    const pdfUrl = "https://publisher.com/zorblatt/rules.pdf";
+    setFetchRouting([
+      [pdfUrl, pdfResponse],
+      [subUrl, () => htmlWithLinks([pdfUrl])],
+      [homeUrl, () => htmlWithLabeledLinks([{ href: subUrl, label: "Rules" }])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherUrl: homeUrl, publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(pdfUrl);
+  });
+
+  it("tries common path patterns when no links are found on the site", async () => {
+    const homeUrl = "https://publisher.com";
+    // No PDF links and no sub-page links on the homepage, so the strategy falls
+    // back to guessing paths like /rules/<slug>.pdf.
+    const commonUrl = "https://publisher.com/rules/zorblatt.pdf";
+    setFetchRouting([
+      [commonUrl, pdfResponse],
+      [homeUrl, () => htmlResponse()],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherUrl: homeUrl, publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(commonUrl);
+  });
+
+  it("skips excluded PDF links on the homepage", async () => {
+    const homeUrl = "https://publisher.com";
+    // The only PDF link on the site is in the excluded set → nothing found.
+    const excludedUrl = "https://publisher.com/zorblatt/excluded-rules.pdf";
+    setFetchRouting([
+      [excludedUrl, pdfResponse], // would be valid if not excluded
+      [homeUrl, () => htmlWithLinks([excludedUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({
+      gameName: "Zorblatt",
+      publisherUrl: homeUrl,
+      publisherName: "Some Publisher",
+      excludeUrls: [excludedUrl],
+    });
+
+    expect(res.status).toBe(404);
+  });
+
+  it("skips unreachable sub-pages gracefully", async () => {
+    const homeUrl = "https://publisher.com";
+    const subUrl = "https://publisher.com/rules";
+    setFetchRouting([
+      [subUrl, () => new Response("server error", { status: 500 })],
+      [homeUrl, () => htmlWithLabeledLinks([{ href: subUrl, label: "Rules" }])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherUrl: homeUrl, publisherName: "Some Publisher" });
+
+    // The sub-page is unreachable and no common path works → 404.
+    expect(res.status).toBe(404);
+  });
+
+  it("resolves Dropbox links found on sub-pages", async () => {
+    const homeUrl = "https://publisher.com";
+    const subUrl = "https://publisher.com/rules";
+    // The path contains the game name so it passes the base-game check;
+    // resolveFileShareUrl appends ?dl=1 for the validation/download fetches.
+    const dropboxUrl = "https://www.dropbox.com/scl/fo/zorblatt/rulebook.pdf";
+    const resolvedDropbox = "https://www.dropbox.com/scl/fo/zorblatt/rulebook.pdf?dl=1";
+    setFetchRouting([
+      [resolvedDropbox, pdfResponse],
+      [subUrl, () => htmlWithLinks([dropboxUrl])],
+      [homeUrl, () => htmlWithLabeledLinks([{ href: subUrl, label: "Rules" }])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherUrl: homeUrl, publisherName: "Some Publisher" });
+
+    expect(res.status).toBe(200);
+    // The original (unresolved) Dropbox URL is what gets reported.
+    expect(res.headers.get("X-Pdf-Url")).toBe(dropboxUrl);
+  });
+
+  it("applies language filtering to homepage candidates", async () => {
+    const homeUrl = "https://publisher.com";
+    const enUrl = "https://publisher.com/zorblatt/ENG/rules.pdf"; // English tag → rejected for "de"
+    const deUrl = "https://publisher.com/zorblatt/GER/rules.pdf"; // German tag → accepted
+    setFetchRouting([
+      [enUrl, pdfResponse],
+      [deUrl, pdfResponse],
+      [homeUrl, () => htmlWithLinks([enUrl, deUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherUrl: homeUrl, publisherName: "Some Publisher", language: "de" });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(deUrl);
   });
 });
