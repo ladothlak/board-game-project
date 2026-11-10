@@ -552,6 +552,66 @@ export async function isSafeUrl(url: string): Promise<boolean> {
 }
 
 /**
+ * Maximum HTML page size in bytes. Legitimate rulebook/publisher pages are
+ * typically 50–200 KB; a multi-gigabyte payload from a malicious or buggy
+ * server would exhaust server memory, so the read is capped well above any
+ * real HTML page.
+ */
+export const MAX_HTML_SIZE = 1024 * 1024; // 1 MB
+
+/** Thrown when an HTML page exceeds MAX_HTML_SIZE. Callers should skip the candidate. */
+export class HtmlTooLargeError extends Error {
+  constructor() {
+    super(`HTML page exceeds maximum size (${MAX_HTML_SIZE / (1024 * 1024)} MB)`);
+    this.name = "HtmlTooLargeError";
+  }
+}
+
+/**
+ * Fetch a URL and read its body as a UTF-8 string, enforcing a maximum size.
+ *
+ * Uses safeFetch for SSRF protection, then streams the body in chunks via
+ * res.body.getReader() so memory usage stays bounded. If the accumulated byte
+ * count exceeds maxSize, the reader is cancelled and HtmlTooLargeError is thrown.
+ *
+ * Callers should catch HtmlTooLargeError and skip the candidate gracefully.
+ */
+export async function fetchTextWithLimit(url: string, maxSize: number, init?: RequestInit): Promise<string> {
+  const res = await safeFetch(url, init);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  if (!res.body) return "";
+
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalSize = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalSize += value.length;
+      if (totalSize > maxSize) {
+        await reader.cancel();
+        throw new HtmlTooLargeError();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  // Concatenate and decode as UTF-8.
+  const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
+  const buffer = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return new TextDecoder("utf-8").decode(buffer);
+}
+
+/**
  * Guarded fetch: runs the SSRF guard before issuing the request. Throws
  * SsrfBlockedError if the URL points to a private/internal address, so callers
  * never touch the network with a blocked host.

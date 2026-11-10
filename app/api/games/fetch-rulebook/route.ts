@@ -18,6 +18,8 @@ import {
   isSafeUrl,
   safeFetch,
   SsrfBlockedError,
+  fetchTextWithLimit,
+  MAX_HTML_SIZE,
 } from "@/lib/fetch-rulebook-utils";
 
 /**
@@ -305,12 +307,10 @@ async function webSearchForPdf(gameName: string, publisherName?: string, exclude
 
       // Fetch the page and look for PDF links.
       try {
-        const pageRes = await safeFetch(r.url, {
+        const html = await fetchTextWithLimit(r.url, MAX_HTML_SIZE, {
           headers: { "User-Agent": UA, "Accept": "text/html" },
           signal: AbortSignal.timeout(10_000),
         });
-        if (!pageRes.ok) continue;
-        const html = await pageRes.text();
 
         // Extract .pdf links from the page.
         for (const m of html.matchAll(/href=["']([^"']*\.pdf[^"']*)["']/gi)) {
@@ -360,12 +360,10 @@ const PDF_LINK_PATTERNS = [
 async function scanPublisherSite(publisherUrl: string, gameName?: string, excluded?: Set<string>, isExpansion = false, language?: string): Promise<string | null> {
   const check = (url: string) => (isExpansion || isUrlForBaseGame(url, gameName ?? "")) && isLanguageCompatible(url, language);
   try {
-    const homeRes = await safeFetch(publisherUrl, {
+    const html = await fetchTextWithLimit(publisherUrl, MAX_HTML_SIZE, {
       headers: { "User-Agent": UA, "Accept": "text/html" },
       signal: AbortSignal.timeout(20_000),
     });
-    if (!homeRes.ok) return null;
-    const html = await homeRes.text();
 
     // 1. Scan for rulebook PDF links directly on the page.
     for (const pattern of PDF_LINK_PATTERNS) {
@@ -406,12 +404,10 @@ async function scanPublisherSite(publisherUrl: string, gameName?: string, exclud
     for (const subUrl of subPageUrls.slice(0, 3)) {
       if (excluded?.has(subUrl)) continue;
       try {
-        const subRes = await safeFetch(subUrl, {
+        const subHtml = await fetchTextWithLimit(subUrl, MAX_HTML_SIZE, {
           headers: { "User-Agent": UA, "Accept": "text/html" },
           signal: AbortSignal.timeout(10_000),
         });
-        if (!subRes.ok) continue;
-        const subHtml = await subRes.text();
 
         // Look for PDF links on the sub-page.
         for (const m of subHtml.matchAll(/href=["']([^"']*\.pdf[^"']*)["']/gi)) {

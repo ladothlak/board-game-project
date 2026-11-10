@@ -6,6 +6,9 @@ import {
   detectLanguage,
   isLanguageCompatible,
   isValidPdf,
+  fetchTextWithLimit,
+  MAX_HTML_SIZE,
+  HtmlTooLargeError,
 } from "../fetch-rulebook-utils";
 
 // ─── Shared fetch mock helpers ────────────────────────────────────────────────
@@ -294,5 +297,64 @@ describe("isLanguageCompatible", () => {
 
   it("compares the desired language case-insensitively", () => {
     expect(isLanguageCompatible("https://x.com/Nemesis/ENG/rulebook.pdf", "EN")).toBe(true);
+  });
+});
+
+// ─── fetchTextWithLimit ────────────────────────────────────────────────────────
+
+describe("fetchTextWithLimit", () => {
+  it("returns the full body as a UTF-8 string when within the limit", async () => {
+    const html = "<!DOCTYPE html><html><body><h1>Hello</h1></body></html>";
+    mockFetch.mockResolvedValue(new Response(html, { status: 200 }));
+
+    const result = await fetchTextWithLimit("https://x.com/page", MAX_HTML_SIZE);
+    expect(result).toBe(html);
+  });
+
+  it("decodes multi-byte UTF-8 characters correctly", async () => {
+    // "café" contains a multi-byte character (é = 0xC3 0xA9 in UTF-8).
+    const html = "<p>café</p>";
+    mockFetch.mockResolvedValue(new Response(html, { status: 200 }));
+
+    const result = await fetchTextWithLimit("https://x.com/page", MAX_HTML_SIZE);
+    expect(result).toBe("<p>café</p>");
+  });
+
+  it("throws HtmlTooLargeError when the body exceeds maxSize", async () => {
+    // A body just over the limit (1 MB + 64 bytes).
+    const oversized = new Uint8Array(MAX_HTML_SIZE + 64);
+    oversized.set(new TextEncoder().encode("<html>"));
+    mockFetch.mockResolvedValue(new Response(oversized, { status: 200 }));
+
+    await expect(fetchTextWithLimit("https://x.com/page", MAX_HTML_SIZE)).rejects.toThrow(HtmlTooLargeError);
+  });
+
+  it("throws on non-OK HTTP status", async () => {
+    mockFetch.mockResolvedValue(new Response("not found", { status: 404 }));
+
+    await expect(fetchTextWithLimit("https://x.com/page", MAX_HTML_SIZE)).rejects.toThrow("HTTP 404");
+  });
+
+  it("returns an empty string for a bodyless response", async () => {
+    mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
+
+    const result = await fetchTextWithLimit("https://x.com/page", MAX_HTML_SIZE);
+    expect(result).toBe("");
+  });
+
+  it("resolves to an empty string when the response has no body stream", async () => {
+    // A Response with a string body still has a readable stream, so this is
+    // covered by the first test. This edge case ensures no crash.
+    mockFetch.mockResolvedValue(new Response("", { status: 200 }));
+
+    const result = await fetchTextWithLimit("https://x.com/page", MAX_HTML_SIZE);
+    expect(result).toBe("");
+  });
+
+  it("respects a custom maxSize smaller than the default", async () => {
+    // A 10-byte body with a 5-byte limit.
+    mockFetch.mockResolvedValue(new Response("hello world", { status: 200 }));
+
+    await expect(fetchTextWithLimit("https://x.com/page", 5)).rejects.toThrow(HtmlTooLargeError);
   });
 });
