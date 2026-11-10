@@ -490,7 +490,7 @@ the search index. If the disk fills up:
 
 - Check usage: `du -sh content/games/`
 - Remove games you no longer need: `DELETE /api/games/[slug]/remove`
-- Clear old backups: `ls backups/ | tail -n +11 | xargs rm` (keps 10 most recent)
+- Clear old backups: `ls backups/ | tail -n +11 | xargs rm` (keeps 10 most recent)
 
 ### Checking the audit log
 
