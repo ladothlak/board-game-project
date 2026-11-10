@@ -12,7 +12,7 @@
  * strategy succeeds.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { readFile, writeFile } from "fs/promises";
 import { POST } from "../route";
 import { checkRate } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
@@ -23,12 +23,9 @@ vi.mock("@/lib/rate-limit", () => ({
 vi.mock("@/lib/audit-log", () => ({
   logRequest: vi.fn(),
 }));
-vi.mock("fs", () => ({
-  existsSync: vi.fn(() => false),
-  readFileSync: vi.fn(() => {
-    throw new Error("ENOENT");
-  }),
-  writeFileSync: vi.fn(),
+vi.mock("fs/promises", () => ({
+  readFile: vi.fn(() => Promise.reject(new Error("ENOENT"))),
+  writeFile: vi.fn(() => Promise.resolve()),
 }));
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
@@ -91,20 +88,16 @@ function post(body: unknown): Promise<Response> {
   return POST(new Request("http://localhost/api/games/fetch-rulebook", init));
 }
 
-const mockedExistsSync = vi.mocked(existsSync);
-const mockedReadFileSync = vi.mocked(readFileSync);
-const mockedWriteFileSync = vi.mocked(writeFileSync);
+const mockedReadFile = vi.mocked(readFile);
+const mockedWriteFile = vi.mocked(writeFile);
 
 beforeEach(() => {
   fetchMock.mockReset();
   vi.stubGlobal("fetch", fetchMock);
   // No Brave API key → Strategy 3 is skipped deterministically.
   vi.stubEnv("BRAVE_SEARCH_API_KEY", "");
-  mockedExistsSync.mockReset().mockReturnValue(false);
-  mockedReadFileSync.mockReset().mockImplementation(() => {
-    throw new Error("ENOENT");
-  });
-  mockedWriteFileSync.mockReset();
+  mockedReadFile.mockReset().mockRejectedValue(new Error("ENOENT"));
+  mockedWriteFile.mockReset();
   vi.mocked(checkRate).mockReset().mockReturnValue({ allowed: true });
 });
 
@@ -128,13 +121,12 @@ describe("POST /api/games/fetch-rulebook", () => {
     expect(res.headers.get("X-Pdf-Url")).toBe(staticUrl);
     expect(res.headers.get("X-Found-Via")).toBe("known");
     // "known" findings are not re-persisted (already in the static dict).
-    expect(mockedWriteFileSync).not.toHaveBeenCalled();
+    expect(mockedWriteFile).not.toHaveBeenCalled();
   });
 
   it("Cascade: Strategy 1 fails, Strategy 2 (publisher probe) succeeds and learns", async () => {
     // Seed the learned publisher base URL (as if a previous request had learned it).
-    mockedExistsSync.mockReturnValue(true);
-    mockedReadFileSync.mockReturnValue(
+    mockedReadFile.mockResolvedValue(
       JSON.stringify({
         games: {},
         publishers: {
@@ -157,8 +149,8 @@ describe("POST /api/games/fetch-rulebook", () => {
     expect(res.headers.get("X-Pdf-Url")).toBe(probeUrl);
     expect(res.headers.get("X-Found-Via")).toBe("probe");
     // Non-known findings are persisted for future requests.
-    expect(mockedWriteFileSync).toHaveBeenCalledTimes(1);
-    const [file, raw] = mockedWriteFileSync.mock.calls[0];
+    expect(mockedWriteFile).toHaveBeenCalledTimes(1);
+    const [file, raw] = mockedWriteFile.mock.calls[0];
     const data = JSON.parse(String(raw));
     expect(data.games["nemesis"]).toBe(probeUrl);
   });
@@ -554,7 +546,7 @@ describe("autoLookupPublisher (Wikipedia lookup)", () => {
     expect(String(parseCalls[0][0])).toContain(encodeURIComponent("Zorblatt (board game)"));
     // The extracted website drove Strategy 4, and the extracted name was persisted.
     expect(res.headers.get("X-Found-Via")).toBe("scan");
-    const [, raw] = mockedWriteFileSync.mock.calls[0];
+    const [, raw] = mockedWriteFile.mock.calls[0];
     const data = JSON.parse(String(raw));
     expect(data.publishers["zorb games"].domain).toBe("zorb.com");
   });
@@ -562,8 +554,7 @@ describe("autoLookupPublisher (Wikipedia lookup)", () => {
   it("extracts the publisher name from the infobox so the learned-publisher probe can use it", async () => {
     // Seed a learned publisher whose key only matches if "Zorb Games" is
     // extracted correctly from the wikitext.
-    mockedExistsSync.mockReturnValue(true);
-    mockedReadFileSync.mockReturnValue(
+    mockedReadFile.mockResolvedValue(
       JSON.stringify({
         games: {},
         publishers: { "zorb games": { baseUrl: "https://zorb.com/", domain: "zorb.com" } },
@@ -662,8 +653,8 @@ describe("persistFinding (learning persistence)", () => {
     const res = await post({ gameName: "Zorblatt", publisherUrl: ZORB_HOME });
 
     expect(res.status).toBe(200);
-    expect(mockedWriteFileSync).toHaveBeenCalledTimes(1);
-    const [file, raw] = mockedWriteFileSync.mock.calls[0];
+    expect(mockedWriteFile).toHaveBeenCalledTimes(1);
+    const [file, raw] = mockedWriteFile.mock.calls[0];
     expect(file).toContain("known-rulebooks.json");
     const data = JSON.parse(String(raw));
     expect(data.games["zorblatt"]).toBe(zorbPdfUrl);
@@ -671,8 +662,7 @@ describe("persistFinding (learning persistence)", () => {
 
   it("does not re-persist a URL that is already served from the cache", async () => {
     // Seed the persistent cache with this game's rulebook.
-    mockedExistsSync.mockReturnValue(true);
-    mockedReadFileSync.mockReturnValue(JSON.stringify({ games: { zorblatt: zorbPdfUrl }, publishers: {} }));
+    mockedReadFile.mockResolvedValue(JSON.stringify({ games: { zorblatt: zorbPdfUrl }, publishers: {} }));
     setFetchRouting([
       ["wikipedia.org", () => new Response("nf", { status: 404 })],
       [zorbPdfUrl, pdfResponse],
@@ -684,13 +674,12 @@ describe("persistFinding (learning persistence)", () => {
     // Strategy 1 hits the cache → "known" findings are not re-persisted.
     expect(res.status).toBe(200);
     expect(res.headers.get("X-Found-Via")).toBe("known");
-    expect(mockedWriteFileSync).not.toHaveBeenCalled();
+    expect(mockedWriteFile).not.toHaveBeenCalled();
   });
 
   it("updates an existing game entry in place instead of duplicating it", async () => {
     const oldUrl = "https://zorb.com/zorblatt/old-rules.pdf";
-    mockedExistsSync.mockReturnValue(true);
-    mockedReadFileSync.mockReturnValue(JSON.stringify({ games: { zorblatt: oldUrl }, publishers: {} }));
+    mockedReadFile.mockResolvedValue(JSON.stringify({ games: { zorblatt: oldUrl }, publishers: {} }));
     setFetchRouting([
       ["wikipedia.org", () => new Response("nf", { status: 404 })],
       [zorbPdfUrl, pdfResponse],
@@ -703,7 +692,7 @@ describe("persistFinding (learning persistence)", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("X-Found-Via")).toBe("scan");
-    const [, raw] = mockedWriteFileSync.mock.calls[0];
+    const [, raw] = mockedWriteFile.mock.calls[0];
     const data = JSON.parse(String(raw));
     // Single entry for the game, updated to the new URL — no duplication.
     expect(Object.keys(data.games)).toEqual(["zorblatt"]);
@@ -721,7 +710,7 @@ describe("persistFinding (learning persistence)", () => {
     const res = await post({ gameName: "Zorblatt", publisherUrl: ZORB_HOME, publisherName: "Zorb Games" });
 
     expect(res.status).toBe(200);
-    const [, raw] = mockedWriteFileSync.mock.calls[0];
+    const [, raw] = mockedWriteFile.mock.calls[0];
     const data = JSON.parse(String(raw));
     expect(data.publishers["zorb games"]).toEqual({
       baseUrl: "https://zorb.com/zorblatt/rules.pdf/",
@@ -730,9 +719,7 @@ describe("persistFinding (learning persistence)", () => {
   });
 
   it("does not crash the route when persisting to disk fails", async () => {
-    mockedWriteFileSync.mockImplementation(() => {
-      throw new Error("ENOSPC: no space left on device");
-    });
+    mockedWriteFile.mockRejectedValue(new Error("ENOSPC: no space left on device"));
     setFetchRouting([
       ["wikipedia.org", () => new Response("nf", { status: 404 })],
       [zorbPdfUrl, pdfResponse],
@@ -759,14 +746,13 @@ describe("persistFinding (learning persistence)", () => {
     expect(res.status).toBe(200);
 
     // Read back the mocked file content that was written.
-    const [file, raw] = mockedWriteFileSync.mock.calls[0];
+    const [file, raw] = mockedWriteFile.mock.calls[0];
     expect(file).toContain("known-rulebooks.json");
     const persisted = JSON.parse(String(raw));
     expect(persisted.games["zorblatt"]).toBe(zorbPdfUrl);
 
     // Simulate the next request reading the learned cache from disk.
-    mockedExistsSync.mockReturnValue(true);
-    mockedReadFileSync.mockReturnValue(String(raw));
+    mockedReadFile.mockResolvedValue(String(raw));
 
     const res2 = await post({ gameName: "Zorblatt" });
     expect(res2.status).toBe(200);
@@ -831,8 +817,7 @@ describe("isExpansion bypass", () => {
 
   it("bypasses validation for cached URLs (Strategy 1)", async () => {
     const cachedUrl = "https://zorb.com/Zorblatt_Exansion/ENG/rules.pdf";
-    mockedExistsSync.mockReturnValue(true);
-    mockedReadFileSync.mockReturnValue(JSON.stringify({ games: { zorblatt: cachedUrl }, publishers: {} }));
+    mockedReadFile.mockResolvedValue(JSON.stringify({ games: { zorblatt: cachedUrl }, publishers: {} }));
     setFetchRouting([
       ["wikipedia.org", () => new Response("nf", { status: 404 })],
       [cachedUrl, pdfResponse],
@@ -848,8 +833,7 @@ describe("isExpansion bypass", () => {
 
   it("rejects a cached expansion URL when isExpansion is not set", async () => {
     const cachedUrl = "https://zorb.com/Zorblatt_Exansion/ENG/rules.pdf";
-    mockedExistsSync.mockReturnValue(true);
-    mockedReadFileSync.mockReturnValue(JSON.stringify({ games: { zorblatt: cachedUrl }, publishers: {} }));
+    mockedReadFile.mockResolvedValue(JSON.stringify({ games: { zorblatt: cachedUrl }, publishers: {} }));
     setFetchRouting([
       ["wikipedia.org", () => new Response("nf", { status: 404 })],
       [cachedUrl, pdfResponse], // would be a valid PDF if the check allowed it
@@ -867,8 +851,7 @@ describe("isExpansion bypass", () => {
     // A hyphenated name produces a folder ("NemesisLockdown") that no longer
     // matches the normalized game name ("nemesis_lockdown"), so every probe
     // candidate fails isUrlForBaseGame without the flag.
-    mockedExistsSync.mockReturnValue(true);
-    mockedReadFileSync.mockReturnValue(
+    mockedReadFile.mockResolvedValue(
       JSON.stringify({
         games: {},
         publishers: {
@@ -893,8 +876,7 @@ describe("isExpansion bypass", () => {
   });
 
   it("rejects probe URLs when isExpansion is not set", async () => {
-    mockedExistsSync.mockReturnValue(true);
-    mockedReadFileSync.mockReturnValue(
+    mockedReadFile.mockResolvedValue(
       JSON.stringify({
         games: {},
         publishers: {
@@ -985,8 +967,7 @@ describe("end-to-end language filtering", () => {
     // The cached URL is English-only; with language "de" Strategy 1 rejects it,
     // and no other strategy can surface a German rulebook.
     const cachedUrl = "https://zorb.com/zorblatt/ENG/rules.pdf";
-    mockedExistsSync.mockReturnValue(true);
-    mockedReadFileSync.mockReturnValue(JSON.stringify({ games: { zorblatt: cachedUrl }, publishers: {} }));
+    mockedReadFile.mockResolvedValue(JSON.stringify({ games: { zorblatt: cachedUrl }, publishers: {} }));
     setFetchRouting([
       ["wikipedia.org", () => new Response("nf", { status: 404 })],
       [cachedUrl, pdfResponse], // would be a valid PDF if the language matched
@@ -1002,8 +983,7 @@ describe("end-to-end language filtering", () => {
 
   it("accepts a matching language tag from the cache (Strategy 1)", async () => {
     const cachedUrl = "https://zorb.com/zorblatt/GER/rules.pdf";
-    mockedExistsSync.mockReturnValue(true);
-    mockedReadFileSync.mockReturnValue(JSON.stringify({ games: { zorblatt: cachedUrl }, publishers: {} }));
+    mockedReadFile.mockResolvedValue(JSON.stringify({ games: { zorblatt: cachedUrl }, publishers: {} }));
     setFetchRouting([
       ["wikipedia.org", () => new Response("nf", { status: 404 })],
       [cachedUrl, pdfResponse],
@@ -1020,8 +1000,7 @@ describe("end-to-end language filtering", () => {
   it("never fetches an English URL when the user selects 'de' (Strategy 2)", async () => {
     // With language "de" the probe only builds /GER/ candidates, so an English
     // URL that would be a valid PDF is never even fetched.
-    mockedExistsSync.mockReturnValue(true);
-    mockedReadFileSync.mockReturnValue(
+    mockedReadFile.mockResolvedValue(
       JSON.stringify({
         games: {},
         publishers: { "zorb games": { baseUrl: "https://zorb.com/downloads/", domain: "zorb.com" } },
@@ -1040,8 +1019,7 @@ describe("end-to-end language filtering", () => {
   });
 
   it("accepts the requested language folder from the probe (Strategy 2)", async () => {
-    mockedExistsSync.mockReturnValue(true);
-    mockedReadFileSync.mockReturnValue(
+    mockedReadFile.mockResolvedValue(
       JSON.stringify({
         games: {},
         publishers: { "zorb games": { baseUrl: "https://zorb.com/downloads/", domain: "zorb.com" } },
