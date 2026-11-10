@@ -528,3 +528,249 @@ describe("Strategy 4: scanPublisherSite", () => {
     expect(res.headers.get("X-Pdf-Url")).toBe(deUrl);
   });
 });
+
+// ─── Auto-Lookup Publisher (Wikipedia) ────────────────────────────────────────
+
+const ZORB_HOME = "https://zorb.com";
+const zorbPdfUrl = "https://zorb.com/zorblatt/rules.pdf";
+
+describe("autoLookupPublisher (Wikipedia lookup)", () => {
+  it("finds the article via opensearch, parses it, and extracts publisher info", async () => {
+    const wikitext = "{{Infobox board game\n| publisher = Zorb Games\n| website = https://zorb.com\n}}";
+    setFetchRouting([
+      ["action=opensearch", () => jsonResponse(["Zorblatt (board game)", ["Zorblatt (board game)"], [], []])],
+      ["action=parse", () => jsonResponse({ parse: { wikitext: { "*": wikitext } } })],
+      [zorbPdfUrl, pdfResponse],
+      [ZORB_HOME, () => htmlWithLinks([zorbPdfUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt" });
+
+    expect(res.status).toBe(200);
+    // The parse call followed the opensearch hit, for the article that was found.
+    const parseCalls = fetchMock.mock.calls.filter((call) => String(call[0]).includes("action=parse"));
+    expect(parseCalls.length).toBe(1);
+    expect(String(parseCalls[0][0])).toContain(encodeURIComponent("Zorblatt (board game)"));
+    // The extracted website drove Strategy 4, and the extracted name was persisted.
+    expect(res.headers.get("X-Found-Via")).toBe("scan");
+    const [, raw] = mockedWriteFileSync.mock.calls[0];
+    const data = JSON.parse(String(raw));
+    expect(data.publishers["zorb games"].domain).toBe("zorb.com");
+  });
+
+  it("extracts the publisher name from the infobox so the learned-publisher probe can use it", async () => {
+    // Seed a learned publisher whose key only matches if "Zorb Games" is
+    // extracted correctly from the wikitext.
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(
+      JSON.stringify({
+        games: {},
+        publishers: { "zorb games": { baseUrl: "https://zorb.com/", domain: "zorb.com" } },
+      })
+    );
+    const probeUrl = "https://zorb.com/Zorblatt/ENG/rulebook.pdf";
+    setFetchRouting([
+      ["action=opensearch", () => jsonResponse(["Zorblatt (board game)", ["Zorblatt (board game)"], [], []])],
+      [
+        "action=parse",
+        // A field follows the publisher line so the infobox regex stops at the next `|`.
+        () => jsonResponse({ parse: { wikitext: { "*": "{{Infobox board game\n| publisher = Zorb Games\n| designer = Someone\n}}" } } }),
+      ],
+      [probeUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt" });
+
+    // foundVia=probe only happens if the extracted name matched the seeded key.
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Found-Via")).toBe("probe");
+    expect(res.headers.get("X-Pdf-Url")).toBe(probeUrl);
+  });
+
+  it("extracts the website URL from the infobox so Strategy 4 can scan it", async () => {
+    setFetchRouting([
+      ["action=opensearch", () => jsonResponse(["Zorblatt (board game)", ["Zorblatt (board game)"], [], []])],
+      [
+        "action=parse",
+        () => jsonResponse({ parse: { wikitext: { "*": "{{Infobox board game\n| website = https://zorb.com\n}}" } } }),
+      ],
+      [zorbPdfUrl, pdfResponse],
+      [ZORB_HOME, () => htmlWithLinks([zorbPdfUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt" });
+
+    // foundVia=scan only happens if the website URL was extracted and used.
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Found-Via")).toBe("scan");
+  });
+
+  it("returns null when opensearch finds no article, and the cascade continues without publisher info", async () => {
+    setFetchRouting([
+      ["action=opensearch", () => jsonResponse(["Zorblatt board game", [], [], []])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt" });
+
+    expect(res.status).toBe(404);
+    // No article → the parse API is never called.
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("action=parse"))).toBe(false);
+  });
+
+  it("returns null gracefully when the Wikipedia API errors", async () => {
+    setFetchRouting([
+      ["wikipedia.org", () => new Response("server error", { status: 500 })],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt" });
+
+    expect(res.status).toBe(404);
+    // The lookup failed before any parse call was made.
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("action=parse"))).toBe(false);
+  });
+
+  it("skips the Wikipedia lookup entirely when publisher info is already provided", async () => {
+    setFetchRouting([
+      [zorbPdfUrl, pdfResponse],
+      [ZORB_HOME, () => htmlWithLinks([zorbPdfUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherUrl: ZORB_HOME, publisherName: "Zorb Games" });
+
+    expect(res.status).toBe(200);
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("wikipedia.org"))).toBe(false);
+  });
+});
+
+// ─── Persist Finding (learning persistence) ────────────────────────────────────
+
+describe("persistFinding (learning persistence)", () => {
+  it("writes a newly found URL into known-rulebooks.json", async () => {
+    setFetchRouting([
+      ["wikipedia.org", () => new Response("nf", { status: 404 })],
+      [zorbPdfUrl, pdfResponse],
+      [ZORB_HOME, () => htmlWithLinks([zorbPdfUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherUrl: ZORB_HOME });
+
+    expect(res.status).toBe(200);
+    expect(mockedWriteFileSync).toHaveBeenCalledTimes(1);
+    const [file, raw] = mockedWriteFileSync.mock.calls[0];
+    expect(file).toContain("known-rulebooks.json");
+    const data = JSON.parse(String(raw));
+    expect(data.games["zorblatt"]).toBe(zorbPdfUrl);
+  });
+
+  it("does not re-persist a URL that is already served from the cache", async () => {
+    // Seed the persistent cache with this game's rulebook.
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({ games: { zorblatt: zorbPdfUrl }, publishers: {} }));
+    setFetchRouting([
+      ["wikipedia.org", () => new Response("nf", { status: 404 })],
+      [zorbPdfUrl, pdfResponse],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt" });
+
+    // Strategy 1 hits the cache → "known" findings are not re-persisted.
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Found-Via")).toBe("known");
+    expect(mockedWriteFileSync).not.toHaveBeenCalled();
+  });
+
+  it("updates an existing game entry in place instead of duplicating it", async () => {
+    const oldUrl = "https://zorb.com/zorblatt/old-rules.pdf";
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({ games: { zorblatt: oldUrl }, publishers: {} }));
+    setFetchRouting([
+      ["wikipedia.org", () => new Response("nf", { status: 404 })],
+      [zorbPdfUrl, pdfResponse],
+      [ZORB_HOME, () => htmlWithLinks([zorbPdfUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    // The cached URL is excluded, so a fresh scan finds the new one.
+    const res = await post({ gameName: "Zorblatt", publisherUrl: ZORB_HOME, excludeUrls: [oldUrl] });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Found-Via")).toBe("scan");
+    const [, raw] = mockedWriteFileSync.mock.calls[0];
+    const data = JSON.parse(String(raw));
+    // Single entry for the game, updated to the new URL — no duplication.
+    expect(Object.keys(data.games)).toEqual(["zorblatt"]);
+    expect(data.games["zorblatt"]).toBe(zorbPdfUrl);
+  });
+
+  it("learns the publisher's base URL and domain into the publishers map", async () => {
+    setFetchRouting([
+      ["wikipedia.org", () => new Response("nf", { status: 404 })],
+      [zorbPdfUrl, pdfResponse],
+      [ZORB_HOME, () => htmlWithLinks([zorbPdfUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherUrl: ZORB_HOME, publisherName: "Zorb Games" });
+
+    expect(res.status).toBe(200);
+    const [, raw] = mockedWriteFileSync.mock.calls[0];
+    const data = JSON.parse(String(raw));
+    expect(data.publishers["zorb games"]).toEqual({
+      baseUrl: "https://zorb.com/zorblatt/rules.pdf/",
+      domain: "zorb.com",
+    });
+  });
+
+  it("does not crash the route when persisting to disk fails", async () => {
+    mockedWriteFileSync.mockImplementation(() => {
+      throw new Error("ENOSPC: no space left on device");
+    });
+    setFetchRouting([
+      ["wikipedia.org", () => new Response("nf", { status: 404 })],
+      [zorbPdfUrl, pdfResponse],
+      [ZORB_HOME, () => htmlWithLinks([zorbPdfUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherUrl: ZORB_HOME });
+
+    // Persistence is non-critical — the PDF is still served.
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-Pdf-Url")).toBe(zorbPdfUrl);
+  });
+
+  it("persists learning that a subsequent request reads back from the cache", async () => {
+    setFetchRouting([
+      ["wikipedia.org", () => new Response("nf", { status: 404 })],
+      [zorbPdfUrl, pdfResponse],
+      [ZORB_HOME, () => htmlWithLinks([zorbPdfUrl])],
+      ["hasbro.com", htmlResponse],
+    ]);
+
+    const res = await post({ gameName: "Zorblatt", publisherUrl: ZORB_HOME });
+    expect(res.status).toBe(200);
+
+    // Read back the mocked file content that was written.
+    const [file, raw] = mockedWriteFileSync.mock.calls[0];
+    expect(file).toContain("known-rulebooks.json");
+    const persisted = JSON.parse(String(raw));
+    expect(persisted.games["zorblatt"]).toBe(zorbPdfUrl);
+
+    // Simulate the next request reading the learned cache from disk.
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(String(raw));
+
+    const res2 = await post({ gameName: "Zorblatt" });
+    expect(res2.status).toBe(200);
+    expect(res2.headers.get("X-Found-Via")).toBe("known");
+    expect(res2.headers.get("X-Pdf-Url")).toBe(zorbPdfUrl);
+  });
+});
