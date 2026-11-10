@@ -5,7 +5,7 @@ export default defineConfig({
   resolve: {
     // Match the tsconfig "@/*" alias (→ project root).
     alias: [
-      { find: /^@\/(.*)/, replacement: `${path.resolve(__dirname)}/$1` },
+      { find: /^@\/(.*)/, replacement: `${path.resolve(import.meta.dirname)}/$1` },
     ],
   },
   test: {
