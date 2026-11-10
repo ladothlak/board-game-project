@@ -538,15 +538,15 @@ async function isValidPdf(url: string): Promise<boolean> {
  *   ✗ https://.../Nemesis/IT/NEMESIS_VOIDSEEDERS_RULEBOOK.pdf → file contains "VOIDSEEDERS" (expansion)
  *   ✗ https://.../Nemesis_Lockdown/ENG/...                     → folder "Nemesis_Lockdown" (expansion)
  */
+// Common rulebook descriptor words that indicate a base-game rulebook,
+// not an expansion. e.g., "scythe_rules.pdf" is the base game.
+const RULEBOOK_DESCRIPTORS = new Set([
+  "rules", "rulebook", "manual", "guide", "complete", "player", "aid",
+  "howtoplay", "instructions", "book", "pdf",
+]);
+
 function isUrlForBaseGame(url: string, gameName: string): boolean {
   const normalized = gameName.toLowerCase().replace(/[:\s-]+/g, "_").replace(/[^a-z0-9_]/g, "");
-
-  // Common rulebook descriptor words that indicate a base-game rulebook,
-  // not an expansion. e.g., "scythe_rules.pdf" is the base game.
-  const RULEBOOK_DESCRIPTORS = new Set([
-    "rules", "rulebook", "manual", "guide", "complete", "player", "aid",
-    "howtoplay", "instructions", "book", "pdf",
-  ]);
 
   try {
     const parsed = new URL(url);
@@ -557,7 +557,9 @@ function isUrlForBaseGame(url: string, gameName: string): boolean {
 
     // Find the segment that contains the normalized game name.
     let foundSegment = false;
-    for (const segment of pathSegments) {
+    const lastSegIndex = pathSegments.length - 1;
+    for (let si = 0; si < pathSegments.length; si++) {
+      const segment = pathSegments[si];
       const segLower = segment.toLowerCase();
       if (segLower.includes(normalized)) {
         foundSegment = true;
@@ -573,24 +575,24 @@ function isUrlForBaseGame(url: string, gameName: string): boolean {
         if (segNoExt.startsWith(normalized) && segNoExt.length - normalized.length <= 3) {
           break;
         }
-        // Rulebook descriptor: segment is "<game_name>_<descriptor>" where the
-        // descriptor is a known rulebook word. e.g., "scythe_rules", "nemesis_manual".
-        if (segNoExt.startsWith(normalized)) {
-          const suffix = segNoExt.slice(normalized.length);
-          // Strip separator characters (_ - space) and check the remainder.
-          const cleaned = suffix.replace(/^[_\-\s]+/, "").replace(/[^a-z0-9]/g, "");
-          if (RULEBOOK_DESCRIPTORS.has(cleaned)) {
+        // Descriptor checks only apply to the FILENAME (last segment), not folders.
+        // A folder like "NEMESIS_GUIDE" is an expansion, but a file like
+        // "nemesis_guide.pdf" is the base game's guide.
+        if (si === lastSegIndex) {
+          // Rulebook descriptor: "<game_name>_<descriptor>". e.g., "scythe_rules", "nemesis_manual".
+          if (segNoExt.startsWith(normalized)) {
+            const suffix = segNoExt.slice(normalized.length);
+            const cleaned = suffix.replace(/^[_\-\s]+/, "").replace(/[^a-z0-9]/g, "");
+            if (RULEBOOK_DESCRIPTORS.has(cleaned)) {
+              break;
+            }
+          }
+          // Game name in the middle of the filename + rulebook descriptor present.
+          // e.g., "CN3082 CATAN – 5-6 Rulebook 2025 reduced.pdf"
+          const words = segNoExt.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+          if (words.some(w => RULEBOOK_DESCRIPTORS.has(w))) {
             break;
           }
-        }
-        // Game name in the middle of the filename + rulebook descriptor present.
-        // e.g., "CN3082 CATAN – 5-6 Rulebook 2025 reduced.pdf"
-        // If the segment contains both the game name AND a rulebook descriptor word,
-        // it's likely a base-game rulebook (not an expansion).
-        const words = segNoExt.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
-        const hasDescriptor = words.some(w => RULEBOOK_DESCRIPTORS.has(w));
-        if (hasDescriptor) {
-          break;
         }
         // The segment contains the game name plus extra words → expansion folder.
         // e.g., "nemesis_voidseeders" or "nemesis_lockdown".
