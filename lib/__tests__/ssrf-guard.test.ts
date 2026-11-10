@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { isSafeUrl, isPrivateIPv4, isPrivateIPv6, safeFetch, SsrfBlockedError } from "../fetch-rulebook-utils";
+import {
+  isSafeUrl,
+  isPrivateIPv4,
+  isPrivateIPv6,
+  resolveSafeIp,
+  fetchPinned,
+  safeFetch,
+  SsrfBlockedError,
+} from "../fetch-rulebook-utils";
+import { createHttpMock } from "./http-mock";
 
 // Mock the DNS module so domain-resolution tests are deterministic and offline.
 // The utils module does a default import (`import dns from "dns"`), so we must
@@ -9,8 +18,23 @@ vi.mock("dns", () => ({
   default: { promises: { lookup: (...args: unknown[]) => mockLookup(...args) } },
 }));
 
+// Mock the http/https modules so fetchPinned never touches a real socket.
+// The utils module does default imports (`import http from "http"`), so we
+// provide `default.request`. Both protocols share one spy so tests can assert
+// on the pinned-IP request options.
+const mockRequest = vi.hoisted(() => vi.fn());
+vi.mock("http", () => ({
+  default: { request: (...args: unknown[]) => mockRequest(...args) },
+}));
+vi.mock("https", () => ({
+  default: { request: (...args: unknown[]) => mockRequest(...args) },
+}));
+
+const httpMock = createHttpMock(mockRequest);
+
 beforeEach(() => {
   mockLookup.mockReset();
+  mockRequest.mockReset();
 });
 
 afterEach(() => {
@@ -167,90 +191,238 @@ describe("isSafeUrl — domain names", () => {
   });
 });
 
-// ─── safeFetch (guard + redirect handling) ────────────────────────────────────
+// ─── resolveSafeIp (DNS resolution + validation, returns the pinned IP) ──────
+
+describe("resolveSafeIp", () => {
+  it("passes through a public IPv4 literal (no DNS involved)", async () => {
+    await expect(resolveSafeIp("http://93.184.216.34/x")).resolves.toEqual({
+      ip: "93.184.216.34",
+      hostname: "93.184.216.34",
+    });
+  });
+
+  it("passes through a public IPv6 literal (brackets stripped)", async () => {
+    await expect(resolveSafeIp("http://[2001:db8::1]:8080/x")).resolves.toEqual({
+      ip: "2001:db8::1",
+      hostname: "2001:db8::1",
+    });
+  });
+
+  it("maps localhost to 127.0.0.1 (self-hosted dev/testing)", async () => {
+    await expect(resolveSafeIp("http://localhost:3111/")).resolves.toEqual({
+      ip: "127.0.0.1",
+      hostname: "localhost",
+    });
+  });
+
+  it("throws SsrfBlockedError for private IPv4 literals", async () => {
+    await expect(resolveSafeIp("http://10.0.0.1/")).rejects.toBeInstanceOf(SsrfBlockedError);
+    await expect(resolveSafeIp("http://169.254.169.254/latest/meta-data/")).rejects.toBeInstanceOf(SsrfBlockedError);
+  });
+
+  it("throws SsrfBlockedError for private IPv6 literals", async () => {
+    await expect(resolveSafeIp("http://[::1]/")).rejects.toBeInstanceOf(SsrfBlockedError);
+    await expect(resolveSafeIp("http://[fc00::1]/")).rejects.toBeInstanceOf(SsrfBlockedError);
+  });
+
+  it("resolves a domain to its first public IPv4 address", async () => {
+    mockDns(["93.184.216.34", "151.101.1.1"], []);
+    await expect(resolveSafeIp("https://www.hasbro.com/x.pdf")).resolves.toEqual({
+      ip: "93.184.216.34",
+      hostname: "www.hasbro.com",
+    });
+  });
+
+  it("prefers IPv4 when both A and AAAA records exist", async () => {
+    mockDns(["93.184.216.34"], ["2001:db8::1"]);
+    await expect(resolveSafeIp("https://example.com/x.pdf")).resolves.toEqual({
+      ip: "93.184.216.34",
+      hostname: "example.com",
+    });
+  });
+
+  it("falls back to the first public IPv6 address when only AAAA exists", async () => {
+    mockDns([], ["2001:db8::1"]);
+    await expect(resolveSafeIp("https://example.com/x.pdf")).resolves.toEqual({
+      ip: "2001:db8::1",
+      hostname: "example.com",
+    });
+  });
+
+  it("throws when ANY resolved record is private (checks all, not just the first)", async () => {
+    mockDns(["93.184.216.34", "192.168.0.1"], []);
+    await expect(resolveSafeIp("https://evil.com/x.pdf")).rejects.toBeInstanceOf(SsrfBlockedError);
+  });
+
+  it("throws when the IPv6 record is private even if the IPv4 is public", async () => {
+    mockDns(["93.184.216.34"], ["fc00::1"]);
+    await expect(resolveSafeIp("https://evil.com/x.pdf")).rejects.toBeInstanceOf(SsrfBlockedError);
+  });
+
+  it("throws when DNS resolution fails entirely (no records)", async () => {
+    mockLookup.mockRejectedValue(new Error("ENOTFOUND"));
+    await expect(resolveSafeIp("https://does-not-exist.example/x.pdf")).rejects.toBeInstanceOf(SsrfBlockedError);
+  });
+
+  it("throws for unparseable URLs", async () => {
+    await expect(resolveSafeIp("not a url")).rejects.toBeInstanceOf(SsrfBlockedError);
+  });
+});
+
+// ─── fetchPinned (dials the validated IP with SNI + Host preserved) ───────────
+
+describe("fetchPinned", () => {
+  it("returns status, headers and body from the pinned connection", async () => {
+    httpMock.queueResponse(201, { "content-type": "text/plain", "x-multi": ["a", "b"] }, "hello");
+    const res = await fetchPinned("https://example.com/a/b?q=1", "93.184.216.34", "example.com");
+    expect(res.status).toBe(201);
+    expect(res.headers.get("content-type")).toBe("text/plain");
+    expect(res.headers.get("x-multi")).toBe("a, b");
+    expect(await res.text()).toBe("hello");
+  });
+
+  it("dials the IP with SNI + Host set to the original hostname", async () => {
+    httpMock.queueResponse(200);
+    await fetchPinned("https://example.com/x", "93.184.216.34", "example.com", {
+      headers: { "User-Agent": "test" },
+    });
+    const [options] = mockRequest.mock.calls[0];
+    expect(options.hostname).toBe("93.184.216.34"); // TCP goes to the IP
+    expect(options.port).toBe(443);
+    expect(options.servername).toBe("example.com"); // TLS SNI = original host
+    expect(options.headers.Host).toBe("example.com"); // HTTP Host = original host
+    expect(options.headers["User-Agent"]).toBe("test"); // caller headers preserved
+  });
+
+  it("omits servername for plain HTTP (no TLS)", async () => {
+    httpMock.queueResponse(200);
+    await fetchPinned("http://example.com/x", "93.184.216.34", "example.com");
+    const [options] = mockRequest.mock.calls[0];
+    expect(options.port).toBe(80);
+    expect(options.servername).toBeUndefined();
+  });
+
+  it("writes the request body and uses the given method", async () => {
+    httpMock.queueResponse(200);
+    await fetchPinned("https://example.com/x", "93.184.216.34", "example.com", {
+      method: "POST",
+      body: "payload",
+    });
+    const [options] = mockRequest.mock.calls[0];
+    expect(options.method).toBe("POST");
+    expect(mockRequest.mock.results[0].value.write).toHaveBeenCalledWith("payload");
+  });
+
+  it("rejects when the socket errors", async () => {
+    httpMock.queueError(new Error("ECONNREFUSED"));
+    await expect(fetchPinned("https://example.com/x", "93.184.216.34", "example.com")).rejects.toThrow(
+      "ECONNREFUSED"
+    );
+  });
+
+  it("rejects immediately for an already-aborted signal without connecting", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      fetchPinned("https://example.com/x", "93.184.216.34", "example.com", { signal: controller.signal })
+    ).rejects.toBeInstanceOf(DOMException);
+    expect(mockRequest).not.toHaveBeenCalled();
+  });
+
+  it("throws for unsupported protocols", async () => {
+    await expect(fetchPinned("ftp://example.com/x", "93.184.216.34", "example.com")).rejects.toThrow(
+      "Unsupported protocol"
+    );
+  });
+});
+
+// ─── safeFetch (guard + IP pinning + redirect handling) ───────────────────────
 
 describe("safeFetch", () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
-
-  beforeEach(() => {
-    // Recreate the spy each test: the outer afterEach calls vi.restoreAllMocks(),
-    // which restores globalThis.fetch to the real implementation.
-    fetchSpy = vi.spyOn(globalThis, "fetch");
-  });
-
-  afterEach(() => {
-    fetchSpy.mockRestore();
-  });
-
-  function response(status: number, headers: Record<string, string> = {}, body = ""): Response {
-    return new Response(body, { status, headers });
-  }
-
   it("throws SsrfBlockedError for a blocked URL and never touches the network", async () => {
-    fetchSpy.mockImplementation(() => Promise.reject(new Error("network must not be touched")));
     await expect(safeFetch("http://169.254.169.254/latest/meta-data/")).rejects.toBeInstanceOf(SsrfBlockedError);
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockRequest).not.toHaveBeenCalled();
   });
 
   it("throws SsrfBlockedError (correct error type) for a private URL", async () => {
     await expect(safeFetch("http://10.0.0.1/admin")).rejects.toMatchObject({ name: "SsrfBlockedError" });
+    expect(mockRequest).not.toHaveBeenCalled();
   });
 
   it("blocks http://0.0.0.0/ (empirically routes to loopback on this host)", async () => {
-    fetchSpy.mockImplementation(() => Promise.reject(new Error("network must not be touched")));
     await expect(safeFetch("http://0.0.0.0:8080/")).rejects.toBeInstanceOf(SsrfBlockedError);
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockRequest).not.toHaveBeenCalled();
+  });
+
+  it("rejects a domain whose DNS resolution fails (fail closed)", async () => {
+    mockLookup.mockRejectedValue(new Error("ENOTFOUND"));
+    await expect(safeFetch("https://does-not-exist.example/x.pdf")).rejects.toBeInstanceOf(SsrfBlockedError);
+    expect(mockRequest).not.toHaveBeenCalled();
+  });
+
+  it("pins the connection to the resolved IP with SNI + Host set to the original hostname", async () => {
+    mockDns(["93.184.216.34"], []);
+    httpMock.queueResponse(200, {}, "ok");
+    const res = await safeFetch("https://public.example.com/start");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok");
+
+    const [options] = mockRequest.mock.calls[0];
+    // TCP connection goes to the validated IP — no DNS re-resolution (TOCTOU fix).
+    expect(options.hostname).toBe("93.184.216.34");
+    expect(options.port).toBe(443);
+    // TLS SNI + HTTP Host preserve the original hostname for cert/vhost selection.
+    expect(options.servername).toBe("public.example.com");
+    expect(options.headers.Host).toBe("public.example.com");
   });
 
   it("allows [::ffff:127.0.0.1] (IPv4-mapped form of the allowed loopback)", async () => {
-    fetchSpy.mockResolvedValue(response(200, {}, "ok"));
+    httpMock.queueResponse(200, {}, "ok");
     const res = await safeFetch("http://[::ffff:127.0.0.1]:8080/");
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
   });
 
-  it("passes redirect: 'manual' to fetch", async () => {
-    fetchSpy.mockResolvedValue(response(200));
-    await safeFetch("http://93.184.216.34/");
-    expect(fetchSpy).toHaveBeenCalledWith("http://93.184.216.34/", expect.objectContaining({ redirect: "manual" }));
+  it("allows localhost (pinned to 127.0.0.1)", async () => {
+    httpMock.queueResponse(200, {}, "ok");
+    const res = await safeFetch("http://localhost:3111/");
+    expect(res.status).toBe(200);
+    expect(mockRequest.mock.calls[0][0].hostname).toBe("127.0.0.1");
   });
 
   it("blocks a 302 redirect to a private address (redirect-following bypass)", async () => {
-    fetchSpy
-      .mockResolvedValueOnce(response(302, { location: "http://169.254.169.254/latest/meta-data/" }))
-      .mockImplementation(() => Promise.reject(new Error("redirect target must not be fetched")));
+    httpMock.queueResponse(302, { location: "http://169.254.169.254/latest/meta-data/" });
     await expect(safeFetch("http://93.184.216.34/")).rejects.toBeInstanceOf(SsrfBlockedError);
     // Only the initial (public) hop is fetched; the internal Location is never touched.
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(mockRequest).toHaveBeenCalledTimes(1);
   });
 
-  it("follows a valid redirect chain to a public URL", async () => {
+  it("follows a valid redirect chain to a public URL (each hop re-resolved + pinned)", async () => {
     mockDns(["93.184.216.34"], []);
-    fetchSpy
-      .mockResolvedValueOnce(response(302, { location: "https://public.example.com/next" }))
-      .mockResolvedValueOnce(response(200, {}, "final"));
+    httpMock.queueResponse(302, { location: "https://public.example.com/next" });
+    httpMock.queueResponse(200, {}, "final");
     const res = await safeFetch("https://public.example.com/start");
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("final");
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(mockRequest).toHaveBeenCalledTimes(2);
   });
 
   it("resolves a relative Location header against the current URL", async () => {
-    fetchSpy
-      .mockResolvedValueOnce(response(302, { location: "/next" }))
-      .mockResolvedValueOnce(response(200));
+    httpMock.queueResponse(302, { location: "/next" });
+    httpMock.queueResponse(200);
     await safeFetch("http://93.184.216.34/start");
-    expect(fetchSpy).toHaveBeenLastCalledWith("http://93.184.216.34/next", expect.anything());
+    const [options] = mockRequest.mock.calls[1];
+    expect(options.path).toBe("/next");
   });
 
   it("throws when a redirect has no Location header", async () => {
-    fetchSpy.mockResolvedValueOnce(response(302));
+    httpMock.queueResponse(302);
     await expect(safeFetch("http://93.184.216.34/")).rejects.toThrow("Redirect with no Location header");
   });
 
   it("throws after too many redirects", async () => {
     for (let i = 0; i < 6; i++) {
-      fetchSpy.mockResolvedValueOnce(response(302, { location: `http://93.184.216.34/hop-${i}` }));
+      httpMock.queueResponse(302, { location: `http://93.184.216.34/hop-${i}` });
     }
     await expect(safeFetch("http://93.184.216.34/start")).rejects.toThrow("Too many redirects");
   });

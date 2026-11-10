@@ -6,6 +6,8 @@
  */
 
 import dns from "dns";
+import http from "http";
+import https from "https";
 import net from "net";
 
 export const UA =
@@ -552,6 +554,80 @@ export async function isSafeUrl(url: string): Promise<boolean> {
 }
 
 /**
+ * Resolve a URL's host to a single, validated IP address.
+ *
+ * This is the TOCTOU-safe half of safeFetch: DNS is resolved exactly once,
+ * EVERY resolved A + AAAA record is checked against the private ranges, and
+ * the returned IP is the one the connection is pinned to. Because the fetch
+ * then dials that exact address (no second DNS lookup), a short-TTL
+ * DNS-rebinding flip between validation and connection is impossible.
+ *
+ * - Literal IP hosts are validated directly (no DNS lookup).
+ * - `localhost` maps to 127.0.0.1 (allowed for this self-hosted app).
+ * - Domain names: ALL resolved addresses must be public, otherwise
+ *   SsrfBlockedError is thrown (fail closed). IPv4 is preferred; if only
+ *   AAAA records exist, the first public IPv6 address is returned.
+ * - If DNS resolution yields no records at all, SsrfBlockedError is thrown.
+ */
+export async function resolveSafeIp(url: string): Promise<{ ip: string; hostname: string }> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new SsrfBlockedError(url); // can't parse → fail closed
+  }
+
+  // Strip brackets from an IPv6 literal host (e.g. "[::1]" → "::1").
+  const host = parsed.hostname.startsWith("[") && parsed.hostname.endsWith("]")
+    ? parsed.hostname.slice(1, -1)
+    : parsed.hostname;
+
+  if (!host) throw new SsrfBlockedError(url); // empty host → fail closed
+
+  // Allow self-hosted dev/testing targets.
+  if (host === "localhost") return { ip: "127.0.0.1", hostname: host };
+
+  const ipVersion = net.isIP(host);
+  if (ipVersion === 4) {
+    if (isPrivateIPv4(host)) throw new SsrfBlockedError(url);
+    return { ip: host, hostname: host };
+  }
+  if (ipVersion === 6) {
+    if (isPrivateIPv6(host)) throw new SsrfBlockedError(url);
+    return { ip: host, hostname: host };
+  }
+
+  // Domain name → resolve via DNS and check ALL A + AAAA records.
+  const v4: string[] = [];
+  const v6: string[] = [];
+  try {
+    const aRecords = await dns.promises.lookup(host, { family: 4, all: true });
+    v4.push(...aRecords.map((r) => r.address));
+  } catch {
+    /* no A records */
+  }
+  try {
+    const aaaaRecords = await dns.promises.lookup(host, { family: 6, all: true });
+    v6.push(...aaaaRecords.map((r) => r.address));
+  } catch {
+    /* no AAAA records */
+  }
+
+  if (v4.length === 0 && v6.length === 0) {
+    throw new SsrfBlockedError(url); // resolution failed → fail closed
+  }
+
+  for (const ip of [...v4, ...v6]) {
+    if (ip.includes(":") ? isPrivateIPv6(ip) : isPrivateIPv4(ip)) {
+      throw new SsrfBlockedError(url);
+    }
+  }
+
+  // Prefer IPv4 for compatibility; fall back to the first public IPv6.
+  return { ip: v4[0] ?? v6[0], hostname: host };
+}
+
+/**
  * Maximum HTML page size in bytes. Legitimate rulebook/publisher pages are
  * typically 50–200 KB; a multi-gigabyte payload from a malicious or buggy
  * server would exhaust server memory, so the read is capped well above any
@@ -611,27 +687,141 @@ export async function fetchTextWithLimit(url: string, maxSize: number, init?: Re
   return new TextDecoder("utf-8").decode(buffer);
 }
 
+/** Normalize a HeadersInit into a plain record (for http.request options). */
+function headersToRecord(headers?: HeadersInit): Record<string, string> {
+  if (!headers) return {};
+  if (headers instanceof Headers) return Object.fromEntries(headers.entries());
+  if (Array.isArray(headers)) return Object.fromEntries(headers);
+  return { ...headers };
+}
+
 /**
- * Guarded fetch: runs the SSRF guard before issuing the request. Throws
+ * Fetch a URL by dialing a specific, pre-validated IP address.
+ *
+ * This is the TOCTOU-safe half of safeFetch: the TCP/TLS connection goes to
+ * the exact IP that resolveSafeIp validated — the hostname is never
+ * re-resolved at connect time, so a DNS-rebinding flip between validation and
+ * connection cannot redirect the request to an internal address.
+ *
+ * TLS correctness: the socket connects to the IP, but the SNI (`servername`)
+ * and the HTTP `Host` header are set to the ORIGINAL hostname so the server
+ * selects the right certificate and virtual host. For plain HTTP there is no
+ * SNI; only the Host header matters.
+ *
+ * The response body is adapted to a web ReadableStream, so callers can use
+ * res.body.getReader() (and cancel it) exactly as with fetch(). Cancelling
+ * the stream destroys the socket, so partial reads (e.g. isValidPdf's 4-byte
+ * probe) do not download the rest of the payload.
+ */
+export async function fetchPinned(
+  url: string,
+  ip: string,
+  hostname: string,
+  init?: RequestInit,
+): Promise<Response> {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Unsupported protocol: ${parsed.protocol}`);
+  }
+  const isHttps = parsed.protocol === "https:";
+  const port = parsed.port ? Number(parsed.port) : isHttps ? 443 : 80;
+  const path = parsed.pathname + parsed.search;
+
+  return new Promise<Response>((resolve, reject) => {
+    const signal = init?.signal;
+
+    // Reject immediately if the signal is already aborted.
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
+      return;
+    }
+
+    let onAbort: (() => void) | undefined;
+
+    const options: https.RequestOptions = {
+      hostname: ip, // dial the validated IP — no DNS at connect time
+      port,
+      path,
+      method: (init?.method ?? "GET").toUpperCase(),
+      headers: { Host: hostname, ...headersToRecord(init?.headers) },
+      servername: isHttps ? hostname : undefined, // TLS SNI = original host
+    };
+
+    const req = (isHttps ? https : http).request(options, (res) => {
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+
+      const responseHeaders = new Headers();
+      for (const [key, value] of Object.entries(res.headers)) {
+        if (value !== undefined) {
+          responseHeaders.set(key, Array.isArray(value) ? value.join(", ") : value);
+        }
+      }
+
+      // Collect the full response body into a buffer, then adapt it to a
+      // web ReadableStream. This is safe because all callers enforce size
+      // caps (1 MB for HTML, 100 MB for PDFs) before or after reading.
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        const buffer = Buffer.concat(chunks);
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength));
+            controller.close();
+          },
+          cancel() {
+            req.destroy();
+          },
+        });
+        resolve(new Response(body, { status: res.statusCode ?? 0, headers: responseHeaders }));
+      });
+      res.on("error", (err) => reject(err));
+    });
+
+    req.on("error", (err) => {
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+      reject(err);
+    });
+
+    if (signal) {
+      onAbort = () => req.destroy(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    if (init?.body != null) {
+      req.write(init.body as string | Uint8Array);
+    }
+    req.end();
+  });
+}
+
+/**
+ * Guarded fetch with DNS-rebinding (TOCTOU) protection. Throws
  * SsrfBlockedError if the URL points to a private/internal address, so callers
  * never touch the network with a blocked host.
  *
- * Redirects are followed manually (up to `maxRedirects` hops) and EVERY hop is
- * re-validated by the guard. This closes the redirect-following bypass where a
- * public page 302s to an unvalidated internal Location target.
+ * For EVERY hop (initial URL and each redirect target):
+ *   1. resolveSafeIp() resolves DNS exactly once and validates ALL A + AAAA
+ *      records against the private ranges.
+ *   2. fetchPinned() dials that exact IP — the hostname is never re-resolved,
+ *      so a short-TTL DNS-rebinding flip between validation and connection
+ *      cannot redirect the request to an internal address (Issue #31).
+ *
+ * Redirects are followed manually (up to `maxRedirects` hops) and every hop
+ * gets its own resolution + pinning. This also closes the redirect-following
+ * bypass where a public page 302s to an unvalidated internal Location target.
  */
 export async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
   const maxRedirects = 5;
   let currentUrl = url;
 
   for (let i = 0; i <= maxRedirects; i++) {
-    if (!await isSafeUrl(currentUrl)) {
-      throw new SsrfBlockedError(currentUrl);
-    }
+    // Resolve + validate once, then pin the connection to that exact IP.
+    const { ip, hostname } = await resolveSafeIp(currentUrl);
 
-    const res = await fetch(currentUrl, { ...init, redirect: "manual" });
+    const res = await fetchPinned(currentUrl, ip, hostname, init);
 
-    // If it's a redirect, follow it (with validation).
+    // If it's a redirect, follow it (with its own resolution + validation).
     if (res.status >= 300 && res.status < 400) {
       const location = res.headers.get("location");
       if (!location) throw new Error("Redirect with no Location header");

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   decodeHtmlEntities,
   resolveFileShareUrl,
@@ -10,24 +10,27 @@ import {
   MAX_HTML_SIZE,
   HtmlTooLargeError,
 } from "../fetch-rulebook-utils";
+import { createHttpMock } from "./http-mock";
 
-// ─── Shared fetch mock helpers ────────────────────────────────────────────────
+// ─── Shared http/https mock helpers ────────────────────────────────────────────
+//
+// safeFetch (via fetchPinned) dials the pinned IP through Node's http/https
+// modules, so we mock those instead of globalThis.fetch.
 
 const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46]; // "%PDF"
 
-function bytesResponse(bytes: number[], init?: ResponseInit): Response {
-  return new Response(new Uint8Array(bytes), init);
-}
+const mockRequest = vi.hoisted(() => vi.fn());
+vi.mock("http", () => ({
+  default: { request: (...args: unknown[]) => mockRequest(...args) },
+}));
+vi.mock("https", () => ({
+  default: { request: (...args: unknown[]) => mockRequest(...args) },
+}));
 
-const mockFetch = vi.fn();
+const httpMock = createHttpMock(mockRequest);
 
 beforeEach(() => {
-  mockFetch.mockReset();
-  vi.stubGlobal("fetch", mockFetch);
-});
-
-afterEach(() => {
-  vi.unstubAllGlobals();
+  mockRequest.mockReset();
 });
 
 // ─── isUrlForBaseGame ───────────────────────────────────────────────────────────
@@ -133,50 +136,50 @@ describe("isUrlForBaseGame", () => {
 
 describe("isValidPdf", () => {
   it("accepts content starting with the %PDF magic bytes", async () => {
-    mockFetch.mockResolvedValue(bytesResponse([...PDF_MAGIC, 0x2d, 0x31]));
+    httpMock.queueResponse(200, {}, Buffer.from([...PDF_MAGIC, 0x2d, 0x31]));
     await expect(isValidPdf("https://x.com/a.pdf")).resolves.toBe(true);
   });
 
   it("rejects HTML content", async () => {
     // "<!DO" — typical start of an HTML document.
-    mockFetch.mockResolvedValue(bytesResponse([0x3c, 0x21, 0x44, 0x4f]));
+    httpMock.queueResponse(200, {}, Buffer.from([0x3c, 0x21, 0x44, 0x4f]));
     await expect(isValidPdf("https://x.com/a.pdf")).resolves.toBe(false);
   });
 
   it("rejects ZIP content (PK..)", async () => {
-    mockFetch.mockResolvedValue(bytesResponse([0x50, 0x4b, 0x03, 0x04]));
+    httpMock.queueResponse(200, {}, Buffer.from([0x50, 0x4b, 0x03, 0x04]));
     await expect(isValidPdf("https://x.com/a.pdf")).resolves.toBe(false);
   });
 
   it("rejects bodies shorter than 4 bytes", async () => {
-    mockFetch.mockResolvedValue(bytesResponse([0x25, 0x50, 0x44]));
+    httpMock.queueResponse(200, {}, Buffer.from([0x25, 0x50, 0x44]));
     await expect(isValidPdf("https://x.com/a.pdf")).resolves.toBe(false);
   });
 
   it("rejects non-OK HTTP status", async () => {
-    mockFetch.mockResolvedValue(new Response("not found", { status: 404 }));
+    httpMock.queueResponse(404, {}, "not found");
     await expect(isValidPdf("https://x.com/a.pdf")).resolves.toBe(false);
   });
 
   it("returns false when the network request fails", async () => {
-    mockFetch.mockRejectedValue(new Error("ECONNREFUSED"));
+    httpMock.queueError(new Error("ECONNREFUSED"));
     await expect(isValidPdf("https://x.com/a.pdf")).resolves.toBe(false);
   });
 
   it("resolves Dropbox share URLs to dl=1 before fetching", async () => {
-    mockFetch.mockResolvedValue(bytesResponse(PDF_MAGIC));
+    httpMock.queueResponse(200, {}, Buffer.from(PDF_MAGIC));
     await isValidPdf("https://www.dropbox.com/scl/fo/abc/def?dl=0");
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    const calledUrl = String(mockFetch.mock.calls[0][0]);
-    expect(calledUrl).toBe("https://www.dropbox.com/scl/fo/abc/def?dl=1");
+    expect(mockRequest).toHaveBeenCalledTimes(1);
+    const [options] = mockRequest.mock.calls[0];
+    expect(options.path).toBe("/scl/fo/abc/def?dl=1");
   });
 
   it("resolves Google Drive file URLs to the direct download endpoint", async () => {
-    mockFetch.mockResolvedValue(bytesResponse(PDF_MAGIC));
+    httpMock.queueResponse(200, {}, Buffer.from(PDF_MAGIC));
     await isValidPdf("https://drive.google.com/file/d/FILEID/view");
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    const calledUrl = String(mockFetch.mock.calls[0][0]);
-    expect(calledUrl).toBe("https://drive.google.com/uc?export=download&id=FILEID");
+    expect(mockRequest).toHaveBeenCalledTimes(1);
+    const [options] = mockRequest.mock.calls[0];
+    expect(options.path).toBe("/uc?export=download&id=FILEID");
   });
 });
 
@@ -305,7 +308,7 @@ describe("isLanguageCompatible", () => {
 describe("fetchTextWithLimit", () => {
   it("returns the full body as a UTF-8 string when within the limit", async () => {
     const html = "<!DOCTYPE html><html><body><h1>Hello</h1></body></html>";
-    mockFetch.mockResolvedValue(new Response(html, { status: 200 }));
+    httpMock.queueResponse(200, {}, html);
 
     const result = await fetchTextWithLimit("https://x.com/page", MAX_HTML_SIZE);
     expect(result).toBe(html);
@@ -314,7 +317,7 @@ describe("fetchTextWithLimit", () => {
   it("decodes multi-byte UTF-8 characters correctly", async () => {
     // "café" contains a multi-byte character (é = 0xC3 0xA9 in UTF-8).
     const html = "<p>café</p>";
-    mockFetch.mockResolvedValue(new Response(html, { status: 200 }));
+    httpMock.queueResponse(200, {}, html);
 
     const result = await fetchTextWithLimit("https://x.com/page", MAX_HTML_SIZE);
     expect(result).toBe("<p>café</p>");
@@ -324,28 +327,19 @@ describe("fetchTextWithLimit", () => {
     // A body just over the limit (1 MB + 64 bytes).
     const oversized = new Uint8Array(MAX_HTML_SIZE + 64);
     oversized.set(new TextEncoder().encode("<html>"));
-    mockFetch.mockResolvedValue(new Response(oversized, { status: 200 }));
+    httpMock.queueResponse(200, {}, Buffer.from(oversized));
 
     await expect(fetchTextWithLimit("https://x.com/page", MAX_HTML_SIZE)).rejects.toThrow(HtmlTooLargeError);
   });
 
   it("throws on non-OK HTTP status", async () => {
-    mockFetch.mockResolvedValue(new Response("not found", { status: 404 }));
+    httpMock.queueResponse(404, {}, "not found");
 
     await expect(fetchTextWithLimit("https://x.com/page", MAX_HTML_SIZE)).rejects.toThrow("HTTP 404");
   });
 
   it("returns an empty string for a bodyless response", async () => {
-    mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
-
-    const result = await fetchTextWithLimit("https://x.com/page", MAX_HTML_SIZE);
-    expect(result).toBe("");
-  });
-
-  it("resolves to an empty string when the response has no body stream", async () => {
-    // A Response with a string body still has a readable stream, so this is
-    // covered by the first test. This edge case ensures no crash.
-    mockFetch.mockResolvedValue(new Response("", { status: 200 }));
+    httpMock.queueResponse(200);
 
     const result = await fetchTextWithLimit("https://x.com/page", MAX_HTML_SIZE);
     expect(result).toBe("");
@@ -353,7 +347,7 @@ describe("fetchTextWithLimit", () => {
 
   it("respects a custom maxSize smaller than the default", async () => {
     // A 10-byte body with a 5-byte limit.
-    mockFetch.mockResolvedValue(new Response("hello world", { status: 200 }));
+    httpMock.queueResponse(200, {}, "hello world");
 
     await expect(fetchTextWithLimit("https://x.com/page", 5)).rejects.toThrow(HtmlTooLargeError);
   });

@@ -9,8 +9,9 @@
  * these tests exercise the candidate-following path, where the input is
  * attacker-influenceable.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { POST } from "../route";
+import { makeFakeRequest } from "@/lib/__tests__/http-mock";
 
 vi.mock("@/lib/rate-limit", () => ({
   checkRate: vi.fn(() => ({ allowed: true })),
@@ -32,25 +33,44 @@ vi.mock("dns", () => ({
     },
   },
 }));
+// safeFetch (via fetchPinned) dials the pinned IP through Node's http/https
+// modules, so we mock those instead of globalThis.fetch.
+const mockRequest = vi.hoisted(() => vi.fn());
+vi.mock("http", () => ({
+  default: { request: (...args: unknown[]) => mockRequest(...args) },
+}));
+vi.mock("https", () => ({
+  default: { request: (...args: unknown[]) => mockRequest(...args) },
+}));
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 
-const fetchMock = vi.fn();
-
-function htmlResponse(body: string): Response {
-  return new Response(body, { status: 200, headers: { "Content-Type": "text/html" } });
+function htmlResponse(body: string): { status: number; headers: Record<string, string>; body: string } {
+  return { status: 200, headers: { "Content-Type": "text/html" }, body };
 }
 
-/** Route the mocked fetch by URL substring. Unmatched URLs get a 404. */
-function setFetchRouting(routes: Array<[string | RegExp, () => Response]>): void {
-  fetchMock.mockImplementation((input: RequestInfo | URL) => {
-    const url = String(input);
-    for (const [pattern, makeResponse] of routes) {
-      const matches = typeof pattern === "string" ? url.includes(pattern) : pattern.test(url);
-      if (matches) return Promise.resolve(makeResponse());
+/**
+ * Route the mocked http/https.request by original hostname (preserved in the
+ * Host header by fetchPinned) + path. Unmatched requests get a 404.
+ */
+function setHttpRouting(
+  routes: Array<[string | RegExp, () => { status: number; headers?: Record<string, string>; body?: string }]>
+): void {
+  mockRequest.mockImplementation(
+    (options: { headers: Record<string, string>; path: string }, callback: (res: unknown) => void) => {
+      const host = options.headers.Host ?? "";
+      const path = options.path ?? "";
+      for (const [pattern, makeResponse] of routes) {
+        const haystack = `${host}\n${path}`;
+        const matches = typeof pattern === "string" ? haystack.includes(pattern) : pattern.test(haystack);
+        if (matches) {
+          const r = makeResponse();
+          return makeFakeRequest(r.status, r.headers ?? {}, r.body ?? "", callback);
+        }
+      }
+      return makeFakeRequest(404, {}, "not found", callback);
     }
-    return Promise.resolve(new Response("not found", { status: 404 }));
-  });
+  );
 }
 
 function post(body: unknown): Promise<Response> {
@@ -65,12 +85,7 @@ function post(body: unknown): Promise<Response> {
 }
 
 beforeEach(() => {
-  fetchMock.mockReset();
-  vi.stubGlobal("fetch", fetchMock);
-});
-
-afterEach(() => {
-  vi.unstubAllGlobals();
+  mockRequest.mockReset();
 });
 
 // ─── SSRF guard in the web-search fallback ──────────────────────────────────────
@@ -84,9 +99,9 @@ describe("SSRF guard in lookupWeb (web-search fallback)", () => {
       `<a href="${privateUrl}">result</a>` +
       `<a href="${publicUrl}">result</a>` +
       `</body></html>`;
-    setFetchRouting([
+    setHttpRouting([
       ["html.duckduckgo.com", () => htmlResponse(searchHtml)],
-      [publicUrl, () => htmlResponse(
+      ["zorblatt.example", () => htmlResponse(
         `<title>Zorblatt – Official Rules</title>` +
         `<meta name="description" content="A great game.">`
       )],
@@ -99,8 +114,8 @@ describe("SSRF guard in lookupWeb (web-search fallback)", () => {
     expect(body.source).toBe("web");
     // The private URL was rejected by the guard; the public candidate was used.
     expect(body.webUrl).toBe(publicUrl);
-    // The internal address was never fetched.
-    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("192.168.1.1"))).toBe(false);
+    // The internal address was never dialed (requests are pinned to resolved IPs).
+    expect(mockRequest.mock.calls.some((c) => c[0].hostname === "192.168.1.1")).toBe(false);
   });
 
   it("rejects a public result that redirects to an internal address", async () => {
@@ -108,9 +123,9 @@ describe("SSRF guard in lookupWeb (web-search fallback)", () => {
     // metadata endpoint. safeFetch must validate the redirect target and stop.
     const publicUrl = "https://zorblatt.example/zorblatt";
     const searchHtml = `<html><body><a href="${publicUrl}">result</a></body></html>`;
-    setFetchRouting([
+    setHttpRouting([
       ["html.duckduckgo.com", () => htmlResponse(searchHtml)],
-      [publicUrl, () => new Response("", {
+      ["zorblatt.example", () => ({
         status: 302,
         headers: { location: "http://169.254.169.254/latest/meta-data/" },
       })],
@@ -119,8 +134,8 @@ describe("SSRF guard in lookupWeb (web-search fallback)", () => {
     const res = await post({ name: "Zorblatt" });
 
     expect(res.status).toBe(404);
-    // The redirect target was never fetched.
-    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("169.254.169.254"))).toBe(false);
+    // The redirect target was never dialed.
+    expect(mockRequest.mock.calls.some((c) => c[0].hostname === "169.254.169.254")).toBe(false);
   });
 
   it("returns 404 when every candidate is blocked by the SSRF guard", async () => {
@@ -128,23 +143,23 @@ describe("SSRF guard in lookupWeb (web-search fallback)", () => {
       `<a href="http://192.168.1.1/zorblatt">result</a>` +
       `<a href="http://10.0.0.5/zorblatt">result</a>` +
       `</body></html>`;
-    setFetchRouting([
+    setHttpRouting([
       ["html.duckduckgo.com", () => htmlResponse(searchHtml)],
     ]);
 
     const res = await post({ name: "Zorblatt" });
 
     expect(res.status).toBe(404);
-    // No internal address was ever fetched.
-    expect(fetchMock.mock.calls.some((c) => /192\.168\.1\.1|10\.0\.0\.5/.test(String(c[0])))).toBe(false);
+    // No internal address was ever dialed.
+    expect(mockRequest.mock.calls.some((c) => /192\.168\.1\.1|10\.0\.0\.5/.test(c[0].hostname))).toBe(false);
   });
 
   it("fetches and extracts metadata from a normal public search result", async () => {
     const publicUrl = "https://zorblatt.example/zorblatt";
     const searchHtml = `<html><body><a href="${publicUrl}">result</a></body></html>`;
-    setFetchRouting([
+    setHttpRouting([
       ["html.duckduckgo.com", () => htmlResponse(searchHtml)],
-      [publicUrl, () => htmlResponse(
+      ["zorblatt.example", () => htmlResponse(
         `<title>Zorblatt – Official Rules</title>` +
         `<meta name="description" content="Play with 2 to 4 players for 60 minutes.">`
       )],
