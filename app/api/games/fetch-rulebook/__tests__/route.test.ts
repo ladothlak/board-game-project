@@ -29,6 +29,19 @@ vi.mock("fs/promises", () => ({
   readFile: vi.fn(() => Promise.reject(new Error("ENOENT"))),
   writeFile: vi.fn(() => Promise.resolve()),
 }));
+// The SSRF guard resolves hostnames via DNS before fetching. In these tests the
+// domains are fakes, so resolve every hostname to a public IPv4 address (and no
+// AAAA record) so the guard treats them as safe and the strategy cascade runs.
+vi.mock("dns", () => ({
+  default: {
+    promises: {
+      lookup: (_host: string, opts: { family: number }) =>
+        Promise.resolve(
+          opts.family === 4 ? [{ address: "93.184.216.34", family: 4 }] : []
+        ),
+    },
+  },
+}));
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 

@@ -15,6 +15,9 @@ import {
   MAX_PDF_SIZE,
   PdfTooLargeError,
   readWithSizeLimit,
+  isSafeUrl,
+  safeFetch,
+  SsrfBlockedError,
 } from "@/lib/fetch-rulebook-utils";
 
 /**
@@ -273,7 +276,7 @@ async function webSearchForPdf(gameName: string, publisherName?: string, exclude
 
   try {
     // Call Brave Search API.
-    const searchRes = await fetch(
+    const searchRes = await safeFetch(
       `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=10`,
       {
         headers: {
@@ -302,10 +305,9 @@ async function webSearchForPdf(gameName: string, publisherName?: string, exclude
 
       // Fetch the page and look for PDF links.
       try {
-        const pageRes = await fetch(r.url, {
+        const pageRes = await safeFetch(r.url, {
           headers: { "User-Agent": UA, "Accept": "text/html" },
           signal: AbortSignal.timeout(10_000),
-          redirect: "follow",
         });
         if (!pageRes.ok) continue;
         const html = await pageRes.text();
@@ -358,10 +360,9 @@ const PDF_LINK_PATTERNS = [
 async function scanPublisherSite(publisherUrl: string, gameName?: string, excluded?: Set<string>, isExpansion = false, language?: string): Promise<string | null> {
   const check = (url: string) => (isExpansion || isUrlForBaseGame(url, gameName ?? "")) && isLanguageCompatible(url, language);
   try {
-    const homeRes = await fetch(publisherUrl, {
+    const homeRes = await safeFetch(publisherUrl, {
       headers: { "User-Agent": UA, "Accept": "text/html" },
       signal: AbortSignal.timeout(20_000),
-      redirect: "follow",
     });
     if (!homeRes.ok) return null;
     const html = await homeRes.text();
@@ -405,10 +406,9 @@ async function scanPublisherSite(publisherUrl: string, gameName?: string, exclud
     for (const subUrl of subPageUrls.slice(0, 3)) {
       if (excluded?.has(subUrl)) continue;
       try {
-        const subRes = await fetch(subUrl, {
+        const subRes = await safeFetch(subUrl, {
           headers: { "User-Agent": UA, "Accept": "text/html" },
           signal: AbortSignal.timeout(10_000),
-          redirect: "follow",
         });
         if (!subRes.ok) continue;
         const subHtml = await subRes.text();
@@ -462,7 +462,7 @@ async function scanPublisherSite(publisherUrl: string, gameName?: string, exclud
 async function autoLookupPublisher(gameName: string): Promise<{ publisherUrl?: string; publisherName?: string } | null> {
   try {
     // 1. Find the article via opensearch.
-    const searchRes = await fetch(
+    const searchRes = await safeFetch(
       `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(gameName + " board game")}&limit=3&format=json`,
       { headers: { "User-Agent": "BoardGameParlor/1.0 (self-hosted catalog)" }, signal: AbortSignal.timeout(8_000) }
     );
@@ -473,7 +473,7 @@ async function autoLookupPublisher(gameName: string): Promise<{ publisherUrl?: s
 
     // 2. Parse the article's wikitext for publisher info.
     const articleTitle = titles[0];
-    const parseRes = await fetch(
+    const parseRes = await safeFetch(
       `https://en.wikipedia.org/w/api.php?action=parse&page=${encodeURIComponent(articleTitle)}&prop=wikitext&redirects=1&format=json`,
       { headers: { "User-Agent": "BoardGameParlor/1.0 (self-hosted catalog)" }, signal: AbortSignal.timeout(8_000) }
     );
@@ -523,6 +523,19 @@ export async function POST(req: Request) {
   const excluded = new Set(excludeUrls ?? []);
   if (!gameName && !bodyPublisherUrl && !directUrl) {
     return NextResponse.json({ error: "Game name, publisher URL, or direct URL is required" }, { status: 400 });
+  }
+
+  // SSRF guard: reject user-supplied URLs that resolve to a private/internal
+  // address (cloud metadata 169.254.x.x, RFC1918 ranges, non-localhost loopback).
+  // Fail fast with a clear 403 before any server-side fetch is attempted.
+  for (const u of [directUrl, bodyPublisherUrl]) {
+    if (u && !(await isSafeUrl(u))) {
+      logRequest({ ip, route: "/api/games/fetch-rulebook", method: "POST", status: 403, durationMs: Date.now() - start });
+      return NextResponse.json(
+        { error: "Blocked: that URL points to a private or internal address." },
+        { status: 403 }
+      );
+    }
   }
 
   // Auto-lookup: if we have a game name but no publisher info, try to find it.
@@ -587,10 +600,9 @@ export async function POST(req: Request) {
 
     // Download the PDF.
     const downloadUrl = decodeHtmlEntities(resolveFileShareUrl(pdfUrl) ?? pdfUrl);
-    const pdfRes = await fetch(downloadUrl, {
+    const pdfRes = await safeFetch(downloadUrl, {
       headers: { "User-Agent": UA },
       signal: AbortSignal.timeout(120_000),
-      redirect: "follow",
     });
     if (!pdfRes.ok) {
       throw new Error(`PDF download returned ${pdfRes.status}`);
@@ -620,6 +632,13 @@ export async function POST(req: Request) {
       },
     });
   } catch (e) {
+    if (e instanceof SsrfBlockedError) {
+      logRequest({ ip, route: "/api/games/fetch-rulebook", method: "POST", status: 403, durationMs: Date.now() - start });
+      return NextResponse.json(
+        { error: "Blocked: that URL points to a private or internal address." },
+        { status: 403 }
+      );
+    }
     if (e instanceof PdfTooLargeError) {
       logRequest({ ip, route: "/api/games/fetch-rulebook", method: "POST", status: 413, durationMs: Date.now() - start });
       return NextResponse.json(
