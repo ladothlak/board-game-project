@@ -12,6 +12,9 @@ import {
   isLanguageCompatible,
   LANG_2_TO_3,
   UA,
+  MAX_PDF_SIZE,
+  PdfTooLargeError,
+  readWithSizeLimit,
 } from "@/lib/fetch-rulebook-utils";
 
 /**
@@ -601,7 +604,7 @@ export async function POST(req: Request) {
       throw new Error("Found a link but it isn't a PDF file.");
     }
 
-    const bytes = Buffer.from(await pdfRes.arrayBuffer());
+    const bytes = await readWithSizeLimit(pdfRes, MAX_PDF_SIZE);
 
     // Sanity check: PDFs start with %PDF.
     if (bytes.subarray(0, 4).toString() !== "%PDF") {
@@ -617,6 +620,13 @@ export async function POST(req: Request) {
       },
     });
   } catch (e) {
+    if (e instanceof PdfTooLargeError) {
+      logRequest({ ip, route: "/api/games/fetch-rulebook", method: "POST", status: 413, durationMs: Date.now() - start });
+      return NextResponse.json(
+        { error: `The rulebook PDF is too large to download (${e.message}). Drag your copy in instead.` },
+        { status: 413 }
+      );
+    }
     logRequest({ ip, route: "/api/games/fetch-rulebook", method: "POST", status: 502, durationMs: Date.now() - start });
     return NextResponse.json(
       { error: `Couldn't fetch the rulebook automatically (${e instanceof Error ? e.message : "unknown error"}). Drag your copy in instead.` },
