@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
-import { safeFetch, SsrfBlockedError } from "@/lib/fetch-rulebook-utils";
+import { safeFetch, SsrfBlockedError, fetchTextWithLimit, MAX_HTML_SIZE } from "@/lib/fetch-rulebook-utils";
 
 /**
  * Look up a board game by name. Tries BGG first (most complete data),
@@ -488,9 +488,9 @@ async function lookupWeb(name: string, publisher?: string | null): Promise<Looku
     // the route (each attempt has its own 15s timeout budget).
     const result: LookupResult = { title: name, source: "web" };
     for (const url of acceptableUrls.slice(0, 3)) {
-      let pageRes: Response;
+      let pageHtml: string;
       try {
-        pageRes = await safeFetch(url, {
+        pageHtml = await fetchTextWithLimit(url, MAX_HTML_SIZE, {
           headers: { "User-Agent": UA },
           signal: AbortSignal.timeout(15_000),
         });
@@ -501,13 +501,9 @@ async function lookupWeb(name: string, publisher?: string | null): Promise<Looku
         continue; // skip this URL and try the next candidate
       }
 
-      if (!pageRes.ok) continue; // dead link — try the next candidate
-
       result.webUrl = url;
 
       try {
-        const pageHtml = await pageRes.text();
-
         // Title.
         const titleMatch = pageHtml.match(/<title[^>]*>\s*([^<]+?)\s*<\/title>/i);
         if (titleMatch) {
