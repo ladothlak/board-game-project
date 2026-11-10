@@ -451,11 +451,11 @@ function resolveFileShareUrl(url: string): string | null {
   try {
     const parsed = new URL(url);
 
-    // Dropbox: dropbox.com/scl/fo/<id>/<token>?dl=0 → dl.dropboxusercontent.com/scl/fo/<id>/<token>?rlkey=<key>&st=<st>
-    // Actually, the direct download is: https://dl.dropboxusercontent.com/scl/fo/<same-path>?rlkey=<key>&st=<st>&dl=1
-    // Simpler: just append ?dl=1 to force download.
+    // Dropbox: www.dropbox.com/scl/fo/<id>/<token>?params → ensure dl=1 for direct download.
+    // The GET request follows the redirect chain to the actual file server.
+    // We do NOT convert to dl.dropboxusercontent.com because the path structure differs
+    // and returns 404. Instead, we rely on the redirect from www.dropbox.com?dl=1.
     if (parsed.hostname.includes("dropbox.com") && parsed.pathname.startsWith("/scl/")) {
-      // Convert to direct download by ensuring dl=1 parameter.
       const searchParams = new URLSearchParams(parsed.search);
       searchParams.set("dl", "1");
       return `${parsed.origin}${parsed.pathname}?${searchParams.toString()}`;
@@ -478,24 +478,32 @@ function resolveFileShareUrl(url: string): string | null {
 // ─── Shared Helper ────────────────────────────────────────────────────────────
 
 /**
- * Check if a URL serves a valid PDF (HEAD request, content-type check).
- * Requires the server to actually report PDF content-type — not just a .pdf extension.
- * Also resolves Dropbox/Drive share links before checking.
+ * Check if a URL serves a valid PDF.
+ * Uses a GET request and reads only the first 4 bytes from the response stream,
+ * then cancels the connection. Checks for the %PDF magic header (0x25 0x50 0x44 0x46).
+ * This is more reliable than content-type headers (many servers don't set them correctly,
+ * and Dropbox/Drive redirect chains return JSON for HEAD but actual files for GET).
  */
 async function isValidPdf(url: string): Promise<boolean> {
   try {
     // Resolve file-share URLs (Dropbox, Drive) to direct download links.
     const resolved = resolveFileShareUrl(url) ?? url;
     const res = await fetch(resolved, {
-      method: "HEAD",
+      method: "GET",
       headers: { "User-Agent": UA },
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(15_000),
       redirect: "follow",
     });
-    if (!res.ok) return false;
-    const ct = res.headers.get("content-type") ?? "";
-    // Must explicitly serve as a PDF. Some servers return 200 + HTML for missing files.
-    return ct.includes("pdf");
+    if (!res.ok || !res.body) return false;
+
+    // Read only the first 4 bytes from the stream, then cancel.
+    const reader = res.body.getReader();
+    const { value } = await reader.read();
+    await reader.cancel(); // Stop downloading the rest.
+
+    if (!value || value.length < 4) return false;
+    // PDF magic bytes: %PDF (0x25 0x50 0x44 0x46)
+    return value[0] === 0x25 && value[1] === 0x50 && value[2] === 0x44 && value[3] === 0x46;
   } catch {
     return false;
   }
