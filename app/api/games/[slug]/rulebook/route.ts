@@ -236,7 +236,7 @@ function rebuildIndexFor(slug: string, title: string, pages: string[]) {
   pages.forEach((text, i) => {
     const clean = (text ?? "").replace(/\s+/g, " ").trim();
     if (clean) {
-      entries.push({ id: `${slug}-p${i + 1}`, slug, title, page: i + 1, text: clean });
+      entries.push({ id: `${slug}-p${i + 1}`, slug, title, page: i + 1, text: clean, isExpansion: false });
     }
   });
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
