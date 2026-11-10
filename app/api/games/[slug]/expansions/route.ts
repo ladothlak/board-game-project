@@ -252,7 +252,7 @@ function addExpansionChunks(slug: string, title: string, idPrefix: string, pages
   pages.forEach((text, i) => {
     const clean = (text ?? "").replace(/\s+/g, " ").trim();
     if (clean) {
-      entries.push({ id: `${idPrefix}-p${i + 1}`, slug, title, page: maxBasePage + i + 1, text: clean });
+      entries.push({ id: `${idPrefix}-p${i + 1}`, slug, title, page: maxBasePage + i + 1, text: clean, isExpansion: true });
     }
   });
   fs.mkdirSync(path.dirname(outPath), { recursive: true });

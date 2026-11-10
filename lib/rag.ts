@@ -412,7 +412,7 @@ export async function buildRagContext(
     if (mentionedExps.length > 0) {
       // Find all chunks that belong to a mentioned expansion.
       const expChunks = chunks.filter(
-        (c) => c.id.includes("-exp-") && mentionedExps.some((name) => c.id.includes(name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")))
+        (c) => c.isExpansion === true && mentionedExps.some((name) => c.id.includes(name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")))
       );
       // Boost them to the top with a high score.
       for (const ec of expChunks) {
