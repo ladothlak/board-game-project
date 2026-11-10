@@ -443,3 +443,73 @@ The local model is a **reasoning model** — it can return empty content, so:
 | `npm start` | Production server on port 3111 |
 | `npm run build:search` | Extract PDF text → `public/search-index.json` |
 | `npm run backup` | Tar `content/games/` + index into `backups/` |
+
+---
+
+## When Things Go Wrong
+
+### The LLM server is down
+
+The chat bar, game finder, and all LLM-generated content (descriptions,
+concepts, checklists) depend on the Unsloth server at `UNSLOTH_BASE_URL`.
+If it's unreachable:
+
+- The HealthStrip in the footer shows a red dot ("parlor AI offline").
+- Chat requests return an error message with the brewing animation.
+- Existing cached content (descriptions, concepts) still loads fine —
+  only *new* generation fails.
+
+**Fix:** Start the Unsloth server (`unsloth` CLI) and confirm it's listening
+on port 8888. The HealthStrip polls every 30 s and will flip back to green
+automatically.
+
+### PDF extraction fails
+
+The rulebook digest spawns a child process (`lib/extract-cli.mjs`) that uses
+`pdfjs-dist`. If it crashes:
+
+- Check that the PDF file is valid (`file content/games/<slug>/rules.pdf`).
+- Look for OCR fallback errors in the server console — `tesseract` must be
+  installed for scanned PDFs.
+- Re-run the digest: `POST /api/games/[slug]/rulebook` with the same PDF.
+
+### Port conflict
+
+The production server runs on port 3111. If something else is already using
+it:
+
+```bash
+lsof -i :3111   # find the offending process
+kill <pid>      # or change the port in package.json
+```
+
+### Disk full
+
+The `content/` directory stores PDFs (tens of MB each), rendered covers, and
+the search index. If the disk fills up:
+
+- Check usage: `du -sh content/games/`
+- Remove games you no longer need: `DELETE /api/games/[slug]/remove`
+- Clear old backups: `ls backups/ | tail -n +11 | xargs rm` (keeps 10 most recent)
+
+### Checking the audit log
+
+Every API call is logged as a JSON line to `logs/audit.log` (gitignored).
+To inspect recent activity:
+
+```bash
+tail -20 logs/audit.log | jq .
+# Filter by route:
+grep '"route":"/api/chat"' logs/audit.log | tail -10
+```
+
+### Search index is stale
+
+If a game was added or its rulebook replaced but chat doesn't see the new
+content:
+
+- The re-digest pipeline rewrites `public/search-index.json` automatically.
+- Check for a `.digesting` marker file in `content/games/<slug>/` — its
+  presence means the background digest is still running.
+- As a last resort, delete `public/search-index.json` and restart the server;
+  it will be rebuilt from all game PDFs on next request.
