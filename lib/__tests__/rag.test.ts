@@ -6,7 +6,7 @@ import {
   adaptiveContext,
   estimateConfidence,
   hierarchicalToc,
-  isFollowUp,
+
   detectExplicitPages,
   expandQuery,
   rerank,
@@ -209,27 +209,6 @@ describe("hierarchicalToc", () => {
 
   it("returns an empty string for no chunks", () => {
     expect(hierarchicalToc([])).toBe("");
-  });
-});
-
-// ─── isFollowUp ──────────────────────────────────────────────────────────────────
-
-describe("isFollowUp", () => {
-  it.each([
-    "And what happens next?",
-    "What about the combat rules?",
-    "So how do I play?",
-    "Then what if I have no tokens?",
-  ])("detects follow-up: %s", (q) => {
-    expect(isFollowUp(q)).toBe(true);
-  });
-
-  it.each([
-    "How do I win?",
-    "Tell me about setup",
-    "What is a token?",
-  ])("does not flag non follow-ups: %s", (q) => {
-    expect(isFollowUp(q)).toBe(false);
   });
 });
 
