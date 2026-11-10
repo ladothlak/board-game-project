@@ -4,8 +4,10 @@
  * The web fallback (lookupWeb) follows URLs taken from search results —
  * attacker-influenceable input. Those fetches must go through safeFetch so a
  * malicious result (or a redirect it issues) can never reach an internal
- * address. BGG and Wikipedia are hardcoded public domains and keep using
- * plain fetch; only the followed candidate URLs need the guard.
+ * address. All external fetches in the route (BGG, Wikipedia, DuckDuckGo and
+ * the followed candidate URLs) go through the guard as defense-in-depth;
+ * these tests exercise the candidate-following path, where the input is
+ * attacker-influenceable.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { POST } from "../route";
