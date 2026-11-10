@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 import { readFile, writeFile } from "fs/promises";
@@ -498,6 +499,9 @@ async function autoLookupPublisher(gameName: string): Promise<{ publisherUrl?: s
 // ─── Main Handler ─────────────────────────────────────────────────────────────
 
 export async function POST(req: Request) {
+  const denied = requireAuth(req as any);
+  if (denied) return denied;
+
   const start = Date.now();
   const ip = getClientIp(req);
 

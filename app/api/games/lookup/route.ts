@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 import { safeFetch, SsrfBlockedError, HtmlTooLargeError, fetchTextWithLimit, MAX_HTML_SIZE } from "@/lib/fetch-rulebook-utils";
@@ -28,6 +29,9 @@ interface LookupResult {
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
 export async function POST(req: Request) {
+  const denied = requireAuth(req as any);
+  if (denied) return denied;
+
   const start = Date.now();
   const ip = getClientIp(req);
 

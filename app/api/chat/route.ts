@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
 import { getGame } from "@/lib/games";
 import { loadIndex, retrieve } from "@/lib/retrieve";
 import { buildRagContext } from "@/lib/rag";
@@ -35,6 +36,9 @@ function dedupePages(answer: string): { page: number }[] {
 }
 
 export async function POST(req: Request) {
+  const denied = requireAuth(req as any);
+  if (denied) return denied;
+
   const start = Date.now();
   const ip = getClientIp(req);
 

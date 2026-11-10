@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getGame } from "@/lib/games";
 import { readChecklist, writeChecklist, generateChecklist } from "@/lib/generate-checklist";
+import { requireAuth } from "@/lib/auth";
 
 /**
  * GET — return the stored setup checklist, or { steps: null } if none yet.
@@ -19,6 +20,8 @@ export async function GET(_req: Request, ctx: { params: Promise<{ slug: string }
  * Skips regeneration when one already exists, unless { force: true }.
  */
 export async function POST(req: Request, ctx: { params: Promise<{ slug: string }> }) {
+  const denied = requireAuth(req as any);
+  if (denied) return denied;
   const { slug } = await ctx.params;
   if (!(await getGame(slug))) {
     return NextResponse.json({ error: "Unknown game" }, { status: 404 });

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
 import fs from "fs/promises";
 import path from "path";
 import { spawn } from "child_process";
@@ -17,6 +18,9 @@ export async function POST(
   req: Request,
   ctx: { params: Promise<{ slug: string }> }
 ) {
+  const denied = requireAuth(req as any);
+  if (denied) return denied;
+
   const start = Date.now();
   const ip = getClientIp(req);
   const { slug } = await ctx.params;

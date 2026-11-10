@@ -5,6 +5,7 @@ import {
   readConcepts,
   writeConcepts,
 } from "@/lib/generate-concepts";
+import { requireAuth } from "@/lib/auth";
 
 const BASE_URL = process.env.UNSLOTH_BASE_URL ?? "http://localhost:8888/v1";
 
@@ -31,6 +32,8 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ slug: string }> }
 ) {
+  const denied = requireAuth(req as any);
+  if (denied) return denied;
   const { slug } = await params;
   const game = await getGame(slug);
   if (!game) {

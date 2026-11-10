@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getGame } from "@/lib/games";
 import fs from "fs/promises";
 import path from "path";
+import { requireAuth } from "@/lib/auth";
 
 const UNSLOTH_URL = process.env.UNSLOTH_URL ?? "http://localhost:8888/v1";
 const MODEL = process.env.UNSLOTH_MODEL ?? "ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF";
@@ -11,6 +12,8 @@ const MODEL = process.env.UNSLOTH_MODEL ?? "ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO
  * Stored in meta.json as `complexity` so it's available on every page load.
  */
 export async function POST(req: NextRequest) {
+  const denied = requireAuth(req);
+  if (denied) return denied;
   const body = await req.json();
   const slug: string = body.slug;
   if (!slug) {
