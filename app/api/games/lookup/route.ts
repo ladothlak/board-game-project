@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
-import { safeFetch, SsrfBlockedError, fetchTextWithLimit, MAX_HTML_SIZE } from "@/lib/fetch-rulebook-utils";
+import { safeFetch, SsrfBlockedError, HtmlTooLargeError, fetchTextWithLimit, MAX_HTML_SIZE } from "@/lib/fetch-rulebook-utils";
 
 /**
  * Look up a board game by name. Tries BGG first (most complete data),
@@ -97,12 +97,20 @@ export async function POST(req: Request) {
 
 async function lookupBgg(name: string): Promise<LookupResult | null> {
   const searchUrl = `https://boardgamegeek.com/bggsearch?q=${encodeURIComponent(name)}`;
-  const searchRes = await fetch(searchUrl, {
-    headers: { "User-Agent": UA },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!searchRes.ok) return null;
-  const searchHtml = await searchRes.text();
+  let searchHtml: string;
+  try {
+    // Guarded fetch with a size cap: defense-in-depth even for hardcoded
+    // trusted domains.
+    searchHtml = await fetchTextWithLimit(searchUrl, MAX_HTML_SIZE, {
+      headers: { "User-Agent": UA },
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (e) {
+    if (e instanceof SsrfBlockedError || e instanceof HtmlTooLargeError) {
+      console.log(`lookup: BGG search skipped (${e.message})`);
+    }
+    return null; // skip gracefully on any fetch failure
+  }
 
   // Find the first game result link.
   const match = searchHtml.match(/href="\/thing\/(\d+)[^"]*"[^>]*>([^<]+)/i);
@@ -111,12 +119,20 @@ async function lookupBgg(name: string): Promise<LookupResult | null> {
   const thingId = match[1];
   const bggUrl = `https://boardgamegeek.com/thing/${thingId}`;
 
-  const gameRes = await fetch(bggUrl, {
-    headers: { "User-Agent": UA },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!gameRes.ok) return null;
-  const gameHtml = await gameRes.text();
+  let gameHtml: string;
+  try {
+    // Guarded fetch with a size cap: defense-in-depth even for hardcoded
+    // trusted domains.
+    gameHtml = await fetchTextWithLimit(bggUrl, MAX_HTML_SIZE, {
+      headers: { "User-Agent": UA },
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (e) {
+    if (e instanceof SsrfBlockedError || e instanceof HtmlTooLargeError) {
+      console.log(`lookup: BGG page skipped (${e.message})`);
+    }
+    return null; // skip gracefully on any fetch failure
+  }
 
   const result: LookupResult = { title: name, bggUrl, source: "bgg" };
 
@@ -241,7 +257,7 @@ async function lookupWikipedia(name: string, publisher?: string | null): Promise
 /** Search Wikipedia and return the first article title, or null. */
 async function wikiSearch(query: string): Promise<string | null> {
   try {
-    const res = await fetch(
+    const res = await safeFetch(
       `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(query)}&limit=3&format=json`,
       {
         headers: { "User-Agent": "BoardGameParlor/1.0 (self-hosted catalog)" },
@@ -270,7 +286,7 @@ async function wikiExtract(articleTitle: string, displayName: string): Promise<L
   // Fetch wikitext (for infobox fields).
   let text = "";
   try {
-    const parseRes = await fetch(
+    const parseRes = await safeFetch(
       `https://en.wikipedia.org/w/api.php?action=parse&page=${encodeURIComponent(articleTitle)}&prop=wikitext&redirects=1&format=json`,
       {
         headers: { "User-Agent": "BoardGameParlor/1.0 (self-hosted catalog)" },
@@ -288,7 +304,7 @@ async function wikiExtract(articleTitle: string, displayName: string): Promise<L
 
   // Description via plain-text extract API.
   try {
-    const extractRes = await fetch(
+    const extractRes = await safeFetch(
       `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(articleTitle)}&prop=extracts&exintro=1&explaintext=1&redirects=1&format=json`,
       {
         headers: { "User-Agent": "BoardGameParlor/1.0 (self-hosted catalog)" },
@@ -360,7 +376,7 @@ async function wikiExtract(articleTitle: string, displayName: string): Promise<L
 
     // Follow the publisher's Wikipedia page to find their website.
     try {
-      const pubRes = await fetch(
+      const pubRes = await safeFetch(
         `https://en.wikipedia.org/w/api.php?action=parse&page=${encodeURIComponent(pubName)}&prop=wikitext&redirects=1&format=json`,
         {
           headers: { "User-Agent": "BoardGameParlor/1.0 (self-hosted catalog)" },
@@ -423,15 +439,20 @@ async function lookupWeb(name: string, publisher?: string | null): Promise<Looku
   const encoded = encodeURIComponent(query);
 
   try {
-    const searchRes = await fetch(
-      `https://html.duckduckgo.com/html/?q=${encoded}`,
-      {
+    let html: string;
+    try {
+      // Guarded fetch with a size cap: defense-in-depth even for the
+      // hardcoded trusted DDG endpoint.
+      html = await fetchTextWithLimit(`https://html.duckduckgo.com/html/?q=${encoded}`, MAX_HTML_SIZE, {
         headers: { "User-Agent": UA },
         signal: AbortSignal.timeout(15_000),
+      });
+    } catch (e) {
+      if (e instanceof SsrfBlockedError || e instanceof HtmlTooLargeError) {
+        console.log(`lookup: DDG search skipped (${e.message})`);
       }
-    );
-    if (!searchRes.ok) return null;
-    const html = await searchRes.text();
+      return null; // skip gracefully on any fetch failure
+    }
 
     // Collect candidate URLs from the search results.
     const candidates: string[] = [];
