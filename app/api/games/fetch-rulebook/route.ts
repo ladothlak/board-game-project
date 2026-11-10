@@ -583,6 +583,15 @@ function isUrlForBaseGame(url: string, gameName: string): boolean {
             break;
           }
         }
+        // Game name in the middle of the filename + rulebook descriptor present.
+        // e.g., "CN3082 CATAN – 5-6 Rulebook 2025 reduced.pdf"
+        // If the segment contains both the game name AND a rulebook descriptor word,
+        // it's likely a base-game rulebook (not an expansion).
+        const words = segNoExt.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+        const hasDescriptor = words.some(w => RULEBOOK_DESCRIPTORS.has(w));
+        if (hasDescriptor) {
+          break;
+        }
         // The segment contains the game name plus extra words → expansion folder.
         // e.g., "nemesis_voidseeders" or "nemesis_lockdown".
         return false;
@@ -605,6 +614,11 @@ function isUrlForBaseGame(url: string, gameName: string): boolean {
         // Otherwise, extra words → expansion.
         return false;
       }
+      // Game name in the middle of the filename + rulebook descriptor present.
+      const words = fileNoExt.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+      if (words.includes(normalized) && words.some(w => RULEBOOK_DESCRIPTORS.has(w))) {
+        return true;
+      }
       // If the filename doesn't contain the game name at all, reject it —
       // it's likely a different game's rulebook (e.g. "rulebook.pdf" under
       // a sibling game's folder).
@@ -626,6 +640,12 @@ function isUrlForBaseGame(url: string, gameName: string): boolean {
       if (RULEBOOK_DESCRIPTORS.has(cleaned)) return true;
       // e.g., "nemesis_voidseeders_rulebook_280x280mm_it.pdf"
       return false;
+    }
+
+    // Game name in the middle of the filename + rulebook descriptor present.
+    const words = fileNoExt.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+    if (words.includes(normalized) && words.some(w => RULEBOOK_DESCRIPTORS.has(w))) {
+      return true;
     }
 
     // Generic rulebook filenames are fine: "rulebook.pdf", "rules.pdf", "nemesis.pdf"
