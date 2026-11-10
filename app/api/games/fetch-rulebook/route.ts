@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { checkRate } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFile, writeFile } from "fs/promises";
 import path from "path";
 import {
   decodeHtmlEntities,
@@ -95,25 +95,23 @@ interface KnownRulebooksData {
 
 const KNOWN_RULEBOOKS_FILE = path.join(process.cwd(), "content", "known-rulebooks.json");
 
-function loadKnownRulebooks(): KnownRulebooksData {
+async function loadKnownRulebooks(): Promise<KnownRulebooksData> {
   try {
-    if (existsSync(KNOWN_RULEBOOKS_FILE)) {
-      const raw = readFileSync(KNOWN_RULEBOOKS_FILE, "utf-8");
-      const data = JSON.parse(raw);
-      return {
-        games: data.games ?? {},
-        publishers: data.publishers ?? {},
-      };
-    }
+    const raw = await readFile(KNOWN_RULEBOOKS_FILE, "utf-8");
+    const data = JSON.parse(raw);
+    return {
+      games: data.games ?? {},
+      publishers: data.publishers ?? {},
+    };
   } catch {
     /* corrupted or missing — start fresh */
   }
   return { games: {}, publishers: {} };
 }
 
-function saveKnownRulebooks(data: KnownRulebooksData): void {
+async function saveKnownRulebooks(data: KnownRulebooksData): Promise<void> {
   try {
-    writeFileSync(KNOWN_RULEBOOKS_FILE, JSON.stringify(data, null, 2) + "\n", "utf-8");
+    await writeFile(KNOWN_RULEBOOKS_FILE, JSON.stringify(data, null, 2) + "\n", "utf-8");
   } catch {
     /* non-critical */
   }
@@ -123,8 +121,8 @@ function saveKnownRulebooks(data: KnownRulebooksData): void {
  * Persist a found rulebook URL and learn the publisher's base URL.
  * Called after Strategies 2-4 succeed.
  */
-function persistFinding(gameName: string, url: string, publisherName?: string): void {
-  const data = loadKnownRulebooks();
+async function persistFinding(gameName: string, url: string, publisherName?: string): Promise<void> {
+  const data = await loadKnownRulebooks();
 
   // Store the game → URL mapping.
   data.games[normalizeName(gameName)] = url;
@@ -160,7 +158,7 @@ function persistFinding(gameName: string, url: string, publisherName?: string): 
     }
   }
 
-  saveKnownRulebooks(data);
+  await saveKnownRulebooks(data);
 }
 
 /** Normalize a name for use as a JSON key. */
@@ -172,7 +170,7 @@ function normalizeName(name: string): string {
 
 async function tryKnownUrls(gameName: string, excluded: Set<string>, isExpansion = false, language?: string): Promise<string | null> {
   const normalized = normalizeName(gameName);
-  const data = loadKnownRulebooks();
+  const data = await loadKnownRulebooks();
   const check = (url: string) => (isExpansion || isUrlForBaseGame(url, gameName)) && isLanguageCompatible(url, language);
 
   // 1. Persistent cache (accumulated over time).
@@ -207,7 +205,7 @@ async function tryKnownUrls(gameName: string, excluded: Set<string>, isExpansion
  * under that directory structure. This is much faster than a web search.
  */
 async function probePublisherBase(gameName: string, publisherName?: string, excluded?: Set<string>, isExpansion = false, language?: string): Promise<string | null> {
-  const data = loadKnownRulebooks();
+  const data = await loadKnownRulebooks();
   if (!publisherName) return null;
 
   const pubKey = normalizeName(publisherName);
@@ -251,7 +249,7 @@ async function webSearchForPdf(gameName: string, publisherName?: string, exclude
 
   // Build the search query.
   let query: string;
-  const data = loadKnownRulebooks();
+  const data = await loadKnownRulebooks();
   const pubKey = publisherName ? normalizeName(publisherName) : null;
   const pubInfo = pubKey ? data.publishers[pubKey] : null;
 
@@ -581,7 +579,7 @@ export async function POST(req: Request) {
 
     // Persist the finding (learn for future requests).
     if (gameName && foundVia !== "known") {
-      persistFinding(gameName, pdfUrl, publisherName);
+      await persistFinding(gameName, pdfUrl, publisherName);
     }
 
     // Download the PDF.
