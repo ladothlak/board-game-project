@@ -48,12 +48,8 @@ export default function HealthStrip() {
         {health.provider ? "parlor AI online" : "parlor AI offline"}
       </span>
       <span className="flex items-center gap-1.5">
-        <span className="h-2 w-2 rounded-full bg-latte/60 dark:bg-cocoa/50" aria-hidden />
-        {health.gameCount} game{health.gameCount === 1 ? "" : "s"} on the shelf
-      </span>
-      <span className="flex items-center gap-1.5">
-        <span className="h-2 w-2 rounded-full bg-latte/60 dark:bg-cocoa/50" aria-hidden />
-        rulebooks indexed {indexDate}
+        <span aria-hidden>☕</span>
+        {health.gameCount} game{health.gameCount === 1 ? "" : "s"} on the shelf · indexed {indexDate}
       </span>
     </div>
   );

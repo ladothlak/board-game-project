@@ -5,4 +5,6 @@ out/
 .DS_Store
 npm-debug.log*
 logs/
+backups/
 content/*
+tsconfig.tsbuildinfo

@@ -87,7 +87,20 @@ export default function ShelfSection({ games }: { games: GameMeta[] }) {
       />
 
       <section className="mt-6">
-        <GameGrid games={filtered} />
+        {games.length === 0 ? (
+          <div className="flex flex-col items-center gap-4 rounded-2xl bg-parchment/40 px-8 py-12 text-center dark:bg-nightcard/60">
+            <span className="text-5xl" aria-hidden>📦</span>
+            <h2 className="font-lora text-2xl font-bold text-ink dark:text-parchment">
+              The shelf is empty
+            </h2>
+            <p className="max-w-sm text-ink/70 dark:text-parchment/70">
+              No games on the menu yet. Add your first rulebook and the
+              parlor will be ready to brew.
+            </p>
+          </div>
+        ) : (
+          <GameGrid games={filtered} />
+        )}
       </section>
     </>
   );
