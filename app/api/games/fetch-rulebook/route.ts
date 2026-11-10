@@ -3,6 +3,16 @@ import { checkRate } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import path from "path";
+import {
+  decodeHtmlEntities,
+  resolveFileShareUrl,
+  isValidPdf,
+  isUrlForBaseGame,
+  detectLanguage,
+  isLanguageCompatible,
+  LANG_2_TO_3,
+  UA,
+} from "@/lib/fetch-rulebook-utils";
 
 /**
  * Best-effort rulebook PDF fetch. Codified search routine with learning:
@@ -29,8 +39,6 @@ import path from "path";
  * to content/known-rulebooks.json. If a publisher name is available, the
  * base URL is also learned so future games from that publisher benefit.
  */
-
-const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
 // ─── Static Known URL Patterns ───────────────────────────────────────────────
 // Predictable URL patterns by publisher (hardcoded, always available).
@@ -207,7 +215,9 @@ async function probePublisherBase(gameName: string, publisherName?: string, excl
   if (!pubInfo) return null;
 
   // Build candidate URLs using the learned base URL.
-  const langFolder = (language ?? "en").toUpperCase();
+  // Publisher sites use 3-letter ISO folder codes (e.g., /ENG/), not 2-letter ones.
+  const langCode = (language ?? "en").toLowerCase();
+  const langFolder = LANG_2_TO_3[langCode] ?? langCode.toUpperCase();
   const gameFolder = gameName.replace(/[:\s]+/g, "_").replace(/[^a-zA-Z0-9_]/g, "");
   const slug = gameName.toLowerCase().replace(/[^a-z0-9]+/g, "");
   const candidates: string[] = [
@@ -439,308 +449,6 @@ async function scanPublisherSite(publisherUrl: string, gameName?: string, exclud
     /* non-critical */
   }
   return null;
-}
-
-// ─── File Share URL Resolver ──────────────────────────────────────────────────
-
-/**
- * Decode common HTML entities in a URL string.
- * URLs extracted from HTML often contain &amp; instead of &, etc.
- */
-function decodeHtmlEntities(url: string): string {
-  return url
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/g, "'");
-}
-
-/**
- * Resolve Dropbox/Google Drive share links to direct download URLs.
- * Returns the resolved URL or null if it's not a recognized file-share pattern.
- */
-function resolveFileShareUrl(url: string): string | null {
-  try {
-    // Normalize HTML entities that may have slipped through.
-    const cleanUrl = decodeHtmlEntities(url);
-    const parsed = new URL(cleanUrl);
-
-    // Dropbox: www.dropbox.com/scl/fo/<id>/<token>?params → ensure dl=1 for direct download.
-    // The GET request follows the redirect chain to the actual file server.
-    // We do NOT convert to dl.dropboxusercontent.com because the path structure differs
-    // and returns 404. Instead, we rely on the redirect from www.dropbox.com?dl=1.
-    if (parsed.hostname.includes("dropbox.com") && parsed.pathname.startsWith("/scl/")) {
-      const searchParams = new URLSearchParams(parsed.search);
-      searchParams.set("dl", "1");
-      return `${parsed.origin}${parsed.pathname}?${searchParams.toString()}`;
-    }
-
-    // Google Drive: drive.google.com/file/d/<fileId>/view → drive.google.com/uc?export=download&id=<fileId>
-    if (parsed.hostname === "drive.google.com" && parsed.pathname.startsWith("/file/d/")) {
-      const fileId = parsed.pathname.split("/")[4];
-      if (fileId) {
-        return `https://drive.google.com/uc?export=download&id=${fileId}`;
-      }
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// ─── Shared Helper ────────────────────────────────────────────────────────────
-
-/**
- * Check if a URL serves a valid PDF.
- * Uses a GET request and reads only the first 4 bytes from the response stream,
- * then cancels the connection. Checks for the %PDF magic header (0x25 0x50 0x44 0x46).
- * This is more reliable than content-type headers (many servers don't set them correctly,
- * and Dropbox/Drive redirect chains return JSON for HEAD but actual files for GET).
- */
-async function isValidPdf(url: string): Promise<boolean> {
-  try {
-    // Resolve file-share URLs (Dropbox, Drive) to direct download links.
-    const resolved = resolveFileShareUrl(url) ?? url;
-    const res = await fetch(resolved, {
-      method: "GET",
-      headers: { "User-Agent": UA },
-      signal: AbortSignal.timeout(15_000),
-      redirect: "follow",
-    });
-    if (!res.ok || !res.body) return false;
-
-    // Read only the first 4 bytes from the stream, then cancel.
-    const reader = res.body.getReader();
-    const { value } = await reader.read();
-    await reader.cancel(); // Stop downloading the rest.
-
-    if (!value || value.length < 4) return false;
-    // PDF magic bytes: %PDF (0x25 0x50 0x44 0x46)
-    return value[0] === 0x25 && value[1] === 0x50 && value[2] === 0x44 && value[3] === 0x46;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Check if a URL appears to be for the *base* game, not an expansion or sequel.
- *
- * Heuristic: extract the path segment(s) from the URL that contain the game name.
- * If the segment is exactly the game name (normalized), check the filename.
- * If the filename contains the game name followed by additional words
- * (e.g., "NEMESIS_VOIDSEEDERS_RULEBOOK"), it's an expansion and should be rejected.
- *
- * Examples for gameName = "Nemesis":
- *   ✓ https://.../Nemesis/ENG/rulebook.pdf                    → folder "Nemesis", file "rulebook.pdf" (base)
- *   ✗ https://.../Nemesis/IT/NEMESIS_VOIDSEEDERS_RULEBOOK.pdf → file contains "VOIDSEEDERS" (expansion)
- *   ✗ https://.../Nemesis_Lockdown/ENG/...                     → folder "Nemesis_Lockdown" (expansion)
- */
-// Common rulebook descriptor words that indicate a base-game rulebook,
-// not an expansion. e.g., "scythe_rules.pdf" is the base game.
-const RULEBOOK_DESCRIPTORS = new Set([
-  "rules", "rulebook", "manual", "guide", "complete", "player", "aid",
-  "howtoplay", "instructions", "book", "pdf",
-]);
-
-function isUrlForBaseGame(url: string, gameName: string): boolean {
-  const normalized = gameName.toLowerCase().replace(/[:\s-]+/g, "_").replace(/[^a-z0-9_]/g, "");
-
-  try {
-    const parsed = new URL(url);
-    // Decode URL-encoded characters (e.g., %20 → space) for proper matching.
-    const pathSegments = parsed.pathname.split("/").filter(Boolean).map(s => {
-      try { return decodeURIComponent(s); } catch { return s; }
-    });
-
-    // Find the segment that contains the normalized game name.
-    let foundSegment = false;
-    const lastSegIndex = pathSegments.length - 1;
-    for (let si = 0; si < pathSegments.length; si++) {
-      const segment = pathSegments[si];
-      const segLower = segment.toLowerCase();
-      if (segLower.includes(normalized)) {
-        foundSegment = true;
-        // Check if the segment is *exactly* the game name (allowing .pdf extension).
-        const segNoExt = segLower.replace(/\.pdf$/i, "");
-        if (segNoExt === normalized) {
-          // Segment matches exactly — now check the filename for expansion indicators.
-          break;
-        }
-        // Name variant: segment starts with the game name + a short suffix (≤ 3 chars).
-        // e.g., "clue" → "cluedo", "risk" → "riskclassic". These are regional
-        // name variants, not expansions.
-        if (segNoExt.startsWith(normalized) && segNoExt.length - normalized.length <= 3) {
-          break;
-        }
-        // Descriptor checks only apply to the FILENAME (last segment), not folders.
-        // A folder like "NEMESIS_GUIDE" is an expansion, but a file like
-        // "nemesis_guide.pdf" is the base game's guide.
-        if (si === lastSegIndex) {
-          // Rulebook descriptor: "<game_name>_<descriptor>". e.g., "scythe_rules", "nemesis_manual".
-          if (segNoExt.startsWith(normalized)) {
-            const suffix = segNoExt.slice(normalized.length);
-            const cleaned = suffix.replace(/^[_\-\s]+/, "").replace(/[^a-z0-9]/g, "");
-            if (RULEBOOK_DESCRIPTORS.has(cleaned)) {
-              break;
-            }
-          }
-          // Game name in the middle of the filename + rulebook descriptor present.
-          // e.g., "CN3082 CATAN – 5-6 Rulebook 2025 reduced.pdf"
-          const words = segNoExt.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
-          if (words.some(w => RULEBOOK_DESCRIPTORS.has(w))) {
-            break;
-          }
-        }
-        // The segment contains the game name plus extra words → expansion folder.
-        // e.g., "nemesis_voidseeders" or "nemesis_lockdown".
-        return false;
-      }
-    }
-
-    if (!foundSegment) {
-      // No path segment contains the game name — check the filename directly.
-      const filename = pathSegments[pathSegments.length - 1]?.toLowerCase() ?? "";
-      const fileNoExt = filename.replace(/\.pdf$/i, "");
-      if (fileNoExt === normalized) return true;
-      // If the filename starts with the game name:
-      if (fileNoExt.startsWith(normalized)) {
-        const suffix = fileNoExt.slice(normalized.length);
-        // Short name variant (≤ 3 chars): "clue" → "cluedo".
-        if (suffix.replace(/[^a-z0-9]/g, "").length <= 3) return true;
-        // Rulebook descriptor: "scythe_rules", "nemesis_manual".
-        const cleaned = suffix.replace(/^[_\-\s]+/, "").replace(/[^a-z0-9]/g, "");
-        if (RULEBOOK_DESCRIPTORS.has(cleaned)) return true;
-        // Otherwise, extra words → expansion.
-        return false;
-      }
-      // Game name in the middle of the filename + rulebook descriptor present.
-      const words = fileNoExt.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
-      if (words.includes(normalized) && words.some(w => RULEBOOK_DESCRIPTORS.has(w))) {
-        return true;
-      }
-      // If the filename doesn't contain the game name at all, reject it —
-      // it's likely a different game's rulebook (e.g. "rulebook.pdf" under
-      // a sibling game's folder).
-      if (!fileNoExt.includes(normalized)) return false;
-      return true;
-    }
-
-    // A segment matched. Now check the filename for expansion indicators.
-    const filename = pathSegments[pathSegments.length - 1]?.toLowerCase() ?? "";
-    const fileNoExt = filename.replace(/\.pdf$/i, "");
-
-    // If the filename starts with the game name:
-    if (fileNoExt.startsWith(normalized)) {
-      const suffix = fileNoExt.slice(normalized.length);
-      // Short name variant (≤ 3 chars): "clue" → "cluedo", "risk" → "riskclassic".
-      if (suffix.replace(/[^a-z0-9]/g, "").length <= 3) return true;
-      // Rulebook descriptor: "scythe_rules", "nemesis_manual".
-      const cleaned = suffix.replace(/^[_\-\s]+/, "").replace(/[^a-z0-9]/g, "");
-      if (RULEBOOK_DESCRIPTORS.has(cleaned)) return true;
-      // e.g., "nemesis_voidseeders_rulebook_280x280mm_it.pdf"
-      return false;
-    }
-
-    // Game name in the middle of the filename + rulebook descriptor present.
-    const words = fileNoExt.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
-    if (words.includes(normalized) && words.some(w => RULEBOOK_DESCRIPTORS.has(w))) {
-      return true;
-    }
-
-    // Generic rulebook filenames are fine: "rulebook.pdf", "rules.pdf", "nemesis.pdf"
-    return true;
-  } catch {
-    return true; // Can't parse URL — allow it.
-  }
-}
-
-// ─── Language Detection ────────────────────────────────────────────────────────
-
-const LANG_CODES = new Set(["en", "it", "de", "fr", "es", "pt", "nl", "sv", "no", "da", "fi", "pl", "cs", "hu", "ro", "tr", "ja", "ko", "zh"]);
-
-// 3-letter ISO codes → 2-letter equivalent (for standalone path segments like /ENG/).
-const LANG_3_TO_2: Record<string, string> = {
-  eng: "en", ger: "de", fre: "fr", ita: "it", spa: "es", por: "pt",
-  dut: "nl", swe: "sv", nor: "no", dan: "da", fin: "fi", pol: "pl",
-  cze: "cs", hun: "hu", rum: "ro", tur: "tr", jpn: "ja", kor: "ko", chi: "zh",
-};
-
-// Generic words that commonly follow a language prefix in filenames.
-const GENERIC_DESCRIPTORS = new Set(["rulebook", "rules", "manual", "instructions", "guide", "pdf", "game", "board", "edition"]);
-
-/**
- * Detect the language of a rulebook URL by looking for ISO codes
- * in safe positions only. Returns the detected language code (lowercase)
- * or null if no language tag is found.
- *
- * Detection rules (designed to avoid false positives):
- * 1. Standalone path segment that is exactly a 2- or 3-letter code → definite.
- *    e.g., /ENG/, /DE/, /IT/
- * 2. Filename: last token before .pdf that is a 2-letter code → definite.
- *    e.g., rulebook_IT.pdf, rules-de.pdf
- * 3. Filename: first token is a 2-letter code AND the second token is a
- *    generic descriptor → probable.
- *    e.g., EN_rulebook.pdf, DE_manual.pdf
- * 4. Any other position → ambiguous, do NOT flag (avoids false positives
- *    like IT_LIVES.pdf being read as Italian "Lives").
- */
-function detectLanguage(url: string): string | null {
-  try {
-    const parsed = new URL(url);
-    const pathSegments = parsed.pathname.split("/").filter(Boolean);
-
-    // 1. Check path segments for a standalone 2- or 3-letter code.
-    for (const segment of pathSegments) {
-      const segLower = segment.toLowerCase();
-      if (segLower.length === 2 && LANG_CODES.has(segLower)) {
-        return segLower;
-      }
-      if (segLower.length === 3 && LANG_3_TO_2[segLower]) {
-        return LANG_3_TO_2[segLower];
-      }
-    }
-
-    // 2 & 3. Check filename tokens.
-    const filename = pathSegments[pathSegments.length - 1]?.toLowerCase() ?? "";
-    const fileNoExt = filename.replace(/\.pdf$/i, "");
-    const tokens = fileNoExt.split(/[_\-.]/).filter(Boolean);
-
-    if (tokens.length >= 2) {
-      // Last token before extension: e.g., rulebook_IT → ["rulebook", "it"]
-      const last = tokens[tokens.length - 1];
-      if (last.length === 2 && LANG_CODES.has(last)) {
-        return last;
-      }
-      // First token is a code AND second is generic: e.g., EN_rulebook → ["en", "rulebook"]
-      const first = tokens[0];
-      const second = tokens[1];
-      if (first.length === 2 && LANG_CODES.has(first) && GENERIC_DESCRIPTORS.has(second)) {
-        return first;
-      }
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Check if a URL's detected language is compatible with the desired language.
- * Returns true if:
- *   - No language is specified (no constraint), OR
- *   - No language tag is found in the URL (can't determine → allow), OR
- *   - The detected language matches the desired language.
- * Returns false if a language tag is found and it does NOT match.
- */
-function isLanguageCompatible(url: string, desired?: string): boolean {
-  if (!desired) return true;
-  const detected = detectLanguage(url);
-  if (!detected) return true; // No tag found — can't determine, allow it.
-  return detected === desired.toLowerCase();
 }
 
 // ─── Auto-Lookup Publisher ─────────────────────────────────────────────────────
