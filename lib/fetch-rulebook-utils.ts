@@ -309,6 +309,54 @@ export function detectLanguage(url: string): string | null {
   }
 }
 
+// ─── Download Size Guard ──────────────────────────────────────────────────────
+
+/**
+ * Maximum PDF download size in bytes. Legitimate rulebooks are typically
+ * 1–20 MB; a multi-gigabyte payload from a malicious or buggy URL would
+ * exhaust server memory, so the download is capped well above any real
+ * rulebook.
+ */
+export const MAX_PDF_SIZE = 100 * 1024 * 1024; // 100 MB
+
+/** Thrown when a downloaded PDF exceeds MAX_PDF_SIZE. Maps to HTTP 413. */
+export class PdfTooLargeError extends Error {
+  constructor() {
+    super(`PDF exceeds maximum size (${MAX_PDF_SIZE / (1024 * 1024)} MB)`);
+    this.name = "PdfTooLargeError";
+  }
+}
+
+/**
+ * Read a response body into a Buffer while enforcing a maximum size.
+ * Streams the body in chunks and tracks the accumulated byte count, aborting
+ * the download as soon as the limit is exceeded — so memory usage stays
+ * bounded instead of buffering an unbounded payload (unlike arrayBuffer()).
+ */
+export async function readWithSizeLimit(res: Response, maxSize: number): Promise<Buffer<ArrayBuffer>> {
+  if (!res.body) return Buffer.alloc(0);
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalSize = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalSize += value.length;
+      if (totalSize > maxSize) {
+        await reader.cancel();
+        throw new PdfTooLargeError();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  // Declared as Buffer<ArrayBuffer> (not a bare Buffer, which widens to
+  // ArrayBufferLike and is not assignable to the Response body's BodyInit).
+  return Buffer.concat(chunks, totalSize);
+}
+
 /**
  * Check if a URL's detected language is compatible with the desired language.
  * Returns true if:

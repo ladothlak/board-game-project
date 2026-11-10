@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFile, writeFile } from "fs/promises";
 import { POST } from "../route";
+import { MAX_PDF_SIZE, PdfTooLargeError, readWithSizeLimit } from "@/lib/fetch-rulebook-utils";
 import { checkRate } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 
@@ -217,6 +218,59 @@ describe("POST /api/games/fetch-rulebook", () => {
     const res = await post({ gameName: "Nemesis", directUrl });
 
     expect(res.status).toBe(502);
+  });
+});
+
+// ─── PDF Size Cap ──────────────────────────────────────────────────────────────
+
+describe("PDF size cap", () => {
+  it("returns 413 when the downloaded PDF exceeds MAX_PDF_SIZE", async () => {
+    const directUrl = "https://x.com/Nemesis/ENG/rulebook.pdf";
+    // A body just over the cap, starting with the %PDF magic bytes so the
+    // validation fetch (which only reads 4 bytes) passes and the full
+    // download is what trips the cap. The buffer is shared between the
+    // validation and download responses to keep the test's memory bounded.
+    const oversized = new Uint8Array(MAX_PDF_SIZE + 64);
+    oversized.set(new TextEncoder().encode("%PDF"));
+    setFetchRouting([[directUrl, () => new Response(oversized, {
+      status: 200,
+      headers: { "Content-Type": "application/pdf" },
+    })]]);
+
+    const res = await post({ gameName: "Nemesis", directUrl });
+
+    expect(res.status).toBe(413);
+    const body = await res.json();
+    expect(body.error).toContain("too large");
+  });
+
+  it("serves a normal-sized PDF without hitting the cap", async () => {
+    const directUrl = "https://x.com/Nemesis/ENG/rulebook.pdf";
+    setFetchRouting([[directUrl, pdfResponse]]);
+
+    const res = await post({ gameName: "Nemesis", directUrl });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("application/pdf");
+  });
+});
+
+describe("readWithSizeLimit", () => {
+  it("returns the full body when within the limit", async () => {
+    const res = new Response(new TextEncoder().encode("hello world"), { status: 200 });
+    const buf = await readWithSizeLimit(res, 100);
+    expect(buf.toString()).toBe("hello world");
+  });
+
+  it("throws PdfTooLargeError when the body exceeds the limit", async () => {
+    const res = new Response(new TextEncoder().encode("hello world"), { status: 200 });
+    await expect(readWithSizeLimit(res, 5)).rejects.toThrow(PdfTooLargeError);
+  });
+
+  it("returns an empty buffer for a bodyless response", async () => {
+    const res = new Response(null, { status: 200 });
+    const buf = await readWithSizeLimit(res, 100);
+    expect(buf.length).toBe(0);
   });
 });
 
