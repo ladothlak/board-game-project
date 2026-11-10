@@ -3,6 +3,7 @@ import { getGame } from "@/lib/games";
 import { buildRagContext } from "@/lib/rag";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { validateQuestion } from "@/lib/guard";
+import { requireAuth } from "@/lib/auth";
 
 /**
  * In-memory prewarm cache. Keyed by slug + normalized question.
@@ -36,6 +37,8 @@ export function getPrewarm(slug: string, question: string) {
 }
 
 export async function POST(req: Request) {
+  const denied = requireAuth(req as any);
+  if (denied) return denied;
   const ip = getClientIp(req);
 
   // Rate limit prewarm requests more aggressively (they're speculative).
