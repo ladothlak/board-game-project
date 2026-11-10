@@ -577,25 +577,24 @@ export async function resolveSafeIp(url: string): Promise<{ ip: string; hostname
     throw new SsrfBlockedError(url); // can't parse → fail closed
   }
 
-  const hostname = parsed.hostname;
   // Strip brackets from an IPv6 literal host (e.g. "[::1]" → "::1").
-  const host = hostname.startsWith("[") && hostname.endsWith("]")
-    ? hostname.slice(1, -1)
-    : hostname;
+  const host = parsed.hostname.startsWith("[") && parsed.hostname.endsWith("]")
+    ? parsed.hostname.slice(1, -1)
+    : parsed.hostname;
 
   if (!host) throw new SsrfBlockedError(url); // empty host → fail closed
 
   // Allow self-hosted dev/testing targets.
-  if (host === "localhost") return { ip: "127.0.0.1", hostname };
+  if (host === "localhost") return { ip: "127.0.0.1", hostname: host };
 
   const ipVersion = net.isIP(host);
   if (ipVersion === 4) {
     if (isPrivateIPv4(host)) throw new SsrfBlockedError(url);
-    return { ip: host, hostname };
+    return { ip: host, hostname: host };
   }
   if (ipVersion === 6) {
     if (isPrivateIPv6(host)) throw new SsrfBlockedError(url);
-    return { ip: host, hostname };
+    return { ip: host, hostname: host };
   }
 
   // Domain name → resolve via DNS and check ALL A + AAAA records.
@@ -625,7 +624,7 @@ export async function resolveSafeIp(url: string): Promise<{ ip: string; hostname
   }
 
   // Prefer IPv4 for compatibility; fall back to the first public IPv6.
-  return { ip: v4[0] ?? v6[0], hostname };
+  return { ip: v4[0] ?? v6[0], hostname: host };
 }
 
 /**
@@ -730,6 +729,13 @@ export async function fetchPinned(
 
   return new Promise<Response>((resolve, reject) => {
     const signal = init?.signal;
+
+    // Reject immediately if the signal is already aborted.
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
+      return;
+    }
+
     let onAbort: (() => void) | undefined;
 
     const options: https.RequestOptions = {
@@ -751,53 +757,25 @@ export async function fetchPinned(
         }
       }
 
-      // Adapt the Node stream to a web ReadableStream so res.body behaves
-      // like a fetch() body (getReader/cancel). Pulls one chunk per pull()
-      // and pauses the socket between pulls for backpressure; cancelling the
-      // stream destroys the request, so partial reads (e.g. isValidPdf's
-      // 4-byte probe) do not download the rest of the payload.
-      const body = new ReadableStream<Uint8Array>({
-        pull(controller) {
-          return new Promise<void>((resolvePull, rejectPull) => {
-            let settled = false;
-            const onData = (chunk: Buffer) => {
-              if (settled) return;
-              settled = true;
-              cleanup();
-              res.pause(); // backpressure: pause until the consumer pulls again
-              controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
-              resolvePull();
-            };
-            const onEnd = () => {
-              if (settled) return;
-              settled = true;
-              cleanup();
-              controller.close();
-              resolvePull();
-            };
-            const onError = (err: Error) => {
-              if (settled) return;
-              settled = true;
-              cleanup();
-              controller.error(err);
-              rejectPull(err);
-            };
-            const cleanup = () => {
-              res.removeListener("data", onData);
-              res.removeListener("end", onEnd);
-              res.removeListener("error", onError);
-            };
-            res.once("data", onData);
-            res.once("end", onEnd);
-            res.once("error", onError);
-          });
-        },
-        cancel() {
-          req.destroy();
-        },
+      // Collect the full response body into a buffer, then adapt it to a
+      // web ReadableStream. This is safe because all callers enforce size
+      // caps (1 MB for HTML, 100 MB for PDFs) before or after reading.
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        const buffer = Buffer.concat(chunks);
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength));
+            controller.close();
+          },
+          cancel() {
+            req.destroy();
+          },
+        });
+        resolve(new Response(body, { status: res.statusCode ?? 0, headers: responseHeaders }));
       });
-
-      resolve(new Response(body, { status: res.statusCode ?? 0, headers: responseHeaders }));
+      res.on("error", (err) => reject(err));
     });
 
     req.on("error", (err) => {
@@ -806,10 +784,6 @@ export async function fetchPinned(
     });
 
     if (signal) {
-      if (signal.aborted) {
-        reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
-        return;
-      }
       onAbort = () => req.destroy(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
       signal.addEventListener("abort", onAbort, { once: true });
     }

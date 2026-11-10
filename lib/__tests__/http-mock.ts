@@ -17,21 +17,26 @@ import { vi } from "vitest";
 export function makeFakeRequest(
   status: number,
   headers: Record<string, string | string[]> = {},
-  body = "",
+  body: string | Buffer = "",
   callback: (res: Readable) => void,
 ): unknown {
-  const res = new Readable();
+  const res = new Readable({ read() {} });
   (res as unknown as { headers: Record<string, string | string[]> }).headers = headers;
   (res as unknown as { statusCode: number }).statusCode = status;
-  if (body) res.push(Buffer.from(body));
-  res.push(null);
 
   return Object.assign(new EventEmitter(), {
     write: vi.fn(),
     destroy: vi.fn(),
     end: () => {
       // Deliver the response asynchronously, like a real socket would.
-      process.nextTick(() => callback(res));
+      // Push data on the NEXT tick so listeners are already attached.
+      process.nextTick(() => {
+        callback(res);
+        process.nextTick(() => {
+          if (body) res.push(typeof body === "string" ? Buffer.from(body) : body);
+          res.push(null);
+        });
+      });
     },
   });
 }
@@ -41,7 +46,7 @@ export function makeFakeRequest(
  */
 export function createHttpMock(requestMock: ReturnType<typeof vi.fn>) {
   /** Queue a response for the next request. */
-  function queueResponse(status: number, headers: Record<string, string | string[]> = {}, body = ""): void {
+  function queueResponse(status: number, headers: Record<string, string | string[]> = {}, body: string | Buffer = ""): void {
     requestMock.mockImplementationOnce((_options: unknown, callback: (res: Readable) => void) =>
       makeFakeRequest(status, headers, body, callback)
     );

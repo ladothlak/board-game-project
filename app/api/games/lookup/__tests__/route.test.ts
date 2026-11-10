@@ -101,7 +101,7 @@ describe("SSRF guard in lookupWeb (web-search fallback)", () => {
       `</body></html>`;
     setHttpRouting([
       ["html.duckduckgo.com", () => htmlResponse(searchHtml)],
-      [publicUrl, () => htmlResponse(
+      ["zorblatt.example", () => htmlResponse(
         `<title>Zorblatt – Official Rules</title>` +
         `<meta name="description" content="A great game.">`
       )],
@@ -125,7 +125,7 @@ describe("SSRF guard in lookupWeb (web-search fallback)", () => {
     const searchHtml = `<html><body><a href="${publicUrl}">result</a></body></html>`;
     setHttpRouting([
       ["html.duckduckgo.com", () => htmlResponse(searchHtml)],
-      [publicUrl, () => ({
+      ["zorblatt.example", () => ({
         status: 302,
         headers: { location: "http://169.254.169.254/latest/meta-data/" },
       })],
@@ -159,7 +159,7 @@ describe("SSRF guard in lookupWeb (web-search fallback)", () => {
     const searchHtml = `<html><body><a href="${publicUrl}">result</a></body></html>`;
     setHttpRouting([
       ["html.duckduckgo.com", () => htmlResponse(searchHtml)],
-      [publicUrl, () => htmlResponse(
+      ["zorblatt.example", () => htmlResponse(
         `<title>Zorblatt – Official Rules</title>` +
         `<meta name="description" content="Play with 2 to 4 players for 60 minutes.">`
       )],
