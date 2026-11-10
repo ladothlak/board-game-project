@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
 import { getGame, invalidateGamesCache } from "@/lib/games";
-import { checkRate } from "@/lib/rate-limit";
+import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
@@ -19,7 +19,7 @@ export async function POST(
   ctx: { params: Promise<{ slug: string }> }
 ) {
   const start = Date.now();
-  const ip = req.headers.get("x-forwarded-for") ?? "unknown";
+  const ip = getClientIp(req);
   const { slug } = await ctx.params;
 
   // Rate limit: 3 per minute.
@@ -92,7 +92,7 @@ export async function DELETE(
   ctx: { params: Promise<{ slug: string }> }
 ) {
   const start = Date.now();
-  const ip = req.headers.get("x-forwarded-for") ?? "unknown";
+  const ip = getClientIp(req);
   const { slug } = await ctx.params;
 
   const game = getGame(slug);
@@ -157,7 +157,7 @@ export async function PATCH(
   ctx: { params: Promise<{ slug: string }> }
 ) {
   const start = Date.now();
-  const ip = req.headers.get("x-forwarded-for") ?? "unknown";
+  const ip = getClientIp(req);
   const { slug } = await ctx.params;
 
   const game = getGame(slug);

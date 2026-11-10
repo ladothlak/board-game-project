@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { checkRate } from "@/lib/rate-limit";
+import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 
 /**
@@ -28,7 +28,7 @@ const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (
 
 export async function POST(req: Request) {
   const start = Date.now();
-  const ip = req.headers.get("x-forwarded-for") ?? "unknown";
+  const ip = getClientIp(req);
 
   // Rate limit: 5 per minute (be polite to external sites).
   const rate = checkRate(ip, "/api/games/lookup", 5, 60_000);

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { checkRate } from "@/lib/rate-limit";
+import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 import { readFile, writeFile } from "fs/promises";
 import path from "path";
@@ -500,7 +500,7 @@ async function autoLookupPublisher(gameName: string): Promise<{ publisherUrl?: s
 
 export async function POST(req: Request) {
   const start = Date.now();
-  const ip = req.headers.get("x-forwarded-for") ?? "unknown";
+  const ip = getClientIp(req);
 
   // Rate limit: 5 per minute (accommodates dismiss-and-retry flow).
   const rate = checkRate(ip, "/api/games/fetch-rulebook", 5, 60_000);

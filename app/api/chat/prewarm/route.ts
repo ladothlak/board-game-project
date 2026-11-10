@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getGame } from "@/lib/games";
 import { buildRagContext } from "@/lib/rag";
-import { checkRate } from "@/lib/rate-limit";
+import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { validateQuestion } from "@/lib/guard";
 
 /**
@@ -36,7 +36,7 @@ export function getPrewarm(slug: string, question: string) {
 }
 
 export async function POST(req: Request) {
-  const ip = req.headers.get("x-forwarded-for") ?? "unknown";
+  const ip = getClientIp(req);
 
   // Rate limit prewarm requests more aggressively (they're speculative).
   const rate = checkRate(ip, "/api/chat/prewarm", 15, 60_000);

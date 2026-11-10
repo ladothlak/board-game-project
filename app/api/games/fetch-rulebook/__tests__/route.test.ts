@@ -19,6 +19,7 @@ import { logRequest } from "@/lib/audit-log";
 
 vi.mock("@/lib/rate-limit", () => ({
   checkRate: vi.fn(() => ({ allowed: true })),
+  getClientIp: vi.fn(() => "test-ip"),
 }));
 vi.mock("@/lib/audit-log", () => ({
   logRequest: vi.fn(),

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listGames, type GameMeta } from "@/lib/games";
-import { checkRate } from "@/lib/rate-limit";
+import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { validateQuery } from "@/lib/guard";
 import { withQueue } from "@/lib/llm-queue";
 import { logRequest } from "@/lib/audit-log";
@@ -116,7 +116,7 @@ function preFilter(games: GameMeta[], query: string): GameMeta[] {
 
 export async function POST(req: NextRequest) {
   const start = Date.now();
-  const ip = req.headers.get("x-forwarded-for") ?? req.headers.get("x-real-ip") ?? "unknown";
+  const ip = getClientIp(req);
 
   // Rate limit: 5 requests per minute per IP.
   const rate = checkRate(ip, "/api/find-game", 5, 60_000);

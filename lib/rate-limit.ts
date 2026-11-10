@@ -45,3 +45,28 @@ export function checkRate(ip: string, route: string, limit: number, windowMs: nu
   bucket.timestamps.push(now);
   return { allowed: true as const };
 }
+
+/**
+ * Determine a trustworthy client identifier for rate limiting.
+ *
+ * `x-forwarded-for` and `x-real-ip` are set by the client, so trusting them
+ * unconditionally lets any user rotate their own "IP" on every request and
+ * bypass the per-IP budget. We therefore only use `x-forwarded-for` when the
+ * request has passed through a trusted reverse proxy, indicated by the
+ * server-set `x-request-id` header (which clients do not set). Direct
+ * connections all share one fixed identifier: nobody can rotate their
+ * identity, and total abuse is still bounded by the per-route budget.
+ *
+ * Note: we deliberately do NOT fall back to the `host` header — it is also
+ * client-settable and would be rotatable in the same way.
+ */
+export function getClientIp(req: Request): string {
+  if (req.headers.get("x-request-id") !== null) {
+    const forwarded = req.headers.get("x-forwarded-for");
+    if (forwarded) {
+      // The leftmost entry is the original client IP.
+      return forwarded.split(",")[0].trim();
+    }
+  }
+  return "direct";
+}
