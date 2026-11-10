@@ -7,6 +7,8 @@ export interface Chunk {
   title: string;
   page: number;
   text: string;
+  /** True when this chunk belongs to an expansion (not the base game). */
+  isExpansion?: boolean;
 }
 
 let cache: Chunk[] | null = null;
@@ -34,7 +36,12 @@ export function loadIndex(): Chunk[] {
     try {
       const raw = JSON.parse(fs.readFileSync(p, "utf8")).entries ?? [];
       // Sanitize each chunk's text to strip running navigation headers.
-      entries = raw.map((c: Chunk) => ({ ...c, text: sanitizeChunkText(c.text) }));
+      // Infer isExpansion from ID for index files written before the field existed.
+      entries = raw.map((c: Chunk) => ({
+        ...c,
+        text: sanitizeChunkText(c.text),
+        isExpansion: c.isExpansion ?? c.id.includes("-exp-"),
+      }));
     } catch (e) {
       console.error(`Failed to read search index:`, e);
     }
