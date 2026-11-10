@@ -308,7 +308,6 @@ async function webSearchForPdf(gameName: string, publisherName?: string, exclude
         const pageRes = await safeFetch(r.url, {
           headers: { "User-Agent": UA, "Accept": "text/html" },
           signal: AbortSignal.timeout(10_000),
-          redirect: "follow",
         });
         if (!pageRes.ok) continue;
         const html = await pageRes.text();
@@ -364,7 +363,6 @@ async function scanPublisherSite(publisherUrl: string, gameName?: string, exclud
     const homeRes = await safeFetch(publisherUrl, {
       headers: { "User-Agent": UA, "Accept": "text/html" },
       signal: AbortSignal.timeout(20_000),
-      redirect: "follow",
     });
     if (!homeRes.ok) return null;
     const html = await homeRes.text();
@@ -411,7 +409,6 @@ async function scanPublisherSite(publisherUrl: string, gameName?: string, exclud
         const subRes = await safeFetch(subUrl, {
           headers: { "User-Agent": UA, "Accept": "text/html" },
           signal: AbortSignal.timeout(10_000),
-          redirect: "follow",
         });
         if (!subRes.ok) continue;
         const subHtml = await subRes.text();
@@ -606,7 +603,6 @@ export async function POST(req: Request) {
     const pdfRes = await safeFetch(downloadUrl, {
       headers: { "User-Agent": UA },
       signal: AbortSignal.timeout(120_000),
-      redirect: "follow",
     });
     if (!pdfRes.ok) {
       throw new Error(`PDF download returned ${pdfRes.status}`);

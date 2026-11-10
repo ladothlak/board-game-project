@@ -219,7 +219,6 @@ export async function isValidPdf(url: string): Promise<boolean> {
       method: "GET",
       headers: { "User-Agent": UA },
       signal: AbortSignal.timeout(15_000),
-      redirect: "follow",
     });
     if (!res.ok || !res.body) return false;
 
@@ -392,9 +391,11 @@ export class SsrfBlockedError extends Error {
  * to prevent SSRF attacks.
  *
  * Blocked: RFC1918 private ranges (10/8, 172.16/12, 192.168/16), link-local
- *   169.254/16 (includes the cloud metadata endpoint 169.254.169.254), and the
- *   loopback range 127/8 EXCEPT 127.0.0.1 (allowed for this self-hosted app).
- * Allowed: all public/unspecified addresses and 127.0.0.1.
+ *   169.254/16 (includes the cloud metadata endpoint 169.254.169.254), the
+ *   "this network" range 0.0.0.0/8 (empirically routes to loopback on this
+ *   host), and the loopback range 127/8 EXCEPT 127.0.0.1 (allowed for this
+ *   self-hosted app).
+ * Allowed: all public addresses and 127.0.0.1.
  */
 export function isPrivateIPv4(ip: string): boolean {
   const parts = ip.split(".").map(Number);
@@ -402,6 +403,7 @@ export function isPrivateIPv4(ip: string): boolean {
     return true; // fail closed on malformed input
   }
   const [a, b] = parts;
+  if (a === 0) return true;                                        // 0.0.0.0/8 ("this network" — routes to loopback)
   if (a === 10) return true;                                       // 10.0.0.0/8
   if (a === 172 && b >= 16 && b <= 31) return true;                 // 172.16.0.0/12
   if (a === 192 && b === 168) return true;                          // 192.168.0.0/16
@@ -456,7 +458,8 @@ function expandIPv6(ip: string): number[] | null {
 
 /**
  * Check if an IPv6 address is in a private/reserved range that must be blocked.
- * Blocked: ::1 (loopback), fc00::/7 (unique local), and IPv4-mapped
+ * Blocked: ::1 (loopback), fe80::/10 (link-local, consistent with blocking
+ *   169.254/16 for IPv4), fc00::/7 (unique local), and IPv4-mapped
  *   ::ffff:0:0/96 addresses whose embedded IPv4 is itself private.
  */
 export function isPrivateIPv6(ip: string): boolean {
@@ -470,6 +473,9 @@ export function isPrivateIPv6(ip: string): boolean {
   ) {
     return true;
   }
+
+  // fe80::/10 (link-local): top 10 bits of the first group are 1111111010.
+  if ((groups[0] & 0xffc0) === 0xfe80) return true;
 
   // fc00::/7 (unique local): top 7 bits of the first group are 1111110.
   if ((groups[0] & 0xfe00) === 0xfc00) return true;
@@ -549,9 +555,32 @@ export async function isSafeUrl(url: string): Promise<boolean> {
  * Guarded fetch: runs the SSRF guard before issuing the request. Throws
  * SsrfBlockedError if the URL points to a private/internal address, so callers
  * never touch the network with a blocked host.
+ *
+ * Redirects are followed manually (up to `maxRedirects` hops) and EVERY hop is
+ * re-validated by the guard. This closes the redirect-following bypass where a
+ * public page 302s to an unvalidated internal Location target.
  */
 export async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
-  const safe = await isSafeUrl(url);
-  if (!safe) throw new SsrfBlockedError(url);
-  return fetch(url, init);
+  const maxRedirects = 5;
+  let currentUrl = url;
+
+  for (let i = 0; i <= maxRedirects; i++) {
+    if (!await isSafeUrl(currentUrl)) {
+      throw new SsrfBlockedError(currentUrl);
+    }
+
+    const res = await fetch(currentUrl, { ...init, redirect: "manual" });
+
+    // If it's a redirect, follow it (with validation).
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      if (!location) throw new Error("Redirect with no Location header");
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+
+    return res;
+  }
+
+  throw new Error("Too many redirects");
 }
