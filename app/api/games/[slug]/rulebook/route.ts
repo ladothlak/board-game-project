@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
 import { getGame, invalidateGamesCache } from "@/lib/games";
-import { checkRate } from "@/lib/rate-limit";
+import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 
 const MAX_PDF_SIZE = 100 * 1024 * 1024; // 100 MB
@@ -27,7 +27,7 @@ export async function POST(
 ) {
   const start = Date.now();
   const { slug } = await ctx.params;
-  const ip = req.headers.get("x-forwarded-for") ?? "unknown";
+  const ip = getClientIp(req);
 
   // Rate limit: 3 per minute (PDF uploads are heavy).
   const rate = checkRate(ip, `/api/games/${slug}/rulebook`, 3, 60_000);

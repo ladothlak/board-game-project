@@ -45,3 +45,26 @@ export function checkRate(ip: string, route: string, limit: number, windowMs: nu
   bucket.timestamps.push(now);
   return { allowed: true as const };
 }
+
+/**
+ * Determine a trustworthy client identifier for rate limiting.
+ *
+ * Every request header that could identify a client — `x-forwarded-for`,
+ * `x-real-ip`, `host` — is set by the client, so reading any of them lets an
+ * attacker rotate their own "IP" on every request and get a fresh per-IP
+ * bucket each time, bypassing the budget. A previous revision tried to detect
+ * a trusted reverse proxy via the `x-request-id` header, but that header is
+ * ALSO client-settable, so it was spoofable in exactly the same way.
+ *
+ * This deployment is self-hosted with NO reverse proxy in front of the app,
+ * so there is no trustworthy server-set signal to key on at all. We therefore
+ * return a single fixed identifier for every request: nobody can rotate their
+ * identity, and total abuse is bounded by the per-route budget. It is
+ * unspoofable by construction because it reads no headers whatsoever.
+ *
+ * If a reverse proxy is added in the future, this can be revisited (e.g., an
+ * env-var gate where the proxy strips client-set headers before forwarding).
+ */
+export function getClientIp(_req: Request): string {
+  return "direct";
+}

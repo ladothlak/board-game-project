@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getGame } from "@/lib/games";
 import { loadIndex, retrieve } from "@/lib/retrieve";
 import { buildRagContext } from "@/lib/rag";
-import { checkRate } from "@/lib/rate-limit";
+import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { validateQuestion } from "@/lib/guard";
 import { withQueue } from "@/lib/llm-queue";
 import { logRequest } from "@/lib/audit-log";
@@ -36,7 +36,7 @@ function dedupePages(answer: string): { page: number }[] {
 
 export async function POST(req: Request) {
   const start = Date.now();
-  const ip = req.headers.get("x-forwarded-for") ?? req.headers.get("x-real-ip") ?? "unknown";
+  const ip = getClientIp(req);
 
   // Rate limit: 10 requests per minute per IP.
   const rate = checkRate(ip, "/api/chat", 10, 60_000);
