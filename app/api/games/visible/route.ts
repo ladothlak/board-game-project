@@ -8,6 +8,6 @@ import { listGames } from "@/lib/games";
  * since the static search index is built at build time.
  */
 export async function GET() {
-  const slugs = listGames().map((g) => g.slug);
+  const slugs = (await listGames()).map((g) => g.slug);
   return NextResponse.json({ slugs });
 }

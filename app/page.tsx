@@ -7,9 +7,9 @@ import GameNightPlanner from "@/components/game-night-planner";
 // The shelf changes at runtime (games get added), so render fresh.
 export const dynamic = "force-dynamic";
 
-export default function HomePage() {
-  const games = listGames();
-  const hidden = listHiddenGames();
+export default async function HomePage() {
+  const games = await listGames();
+  const hidden = await listHiddenGames();
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-10">

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 import { spawn } from "child_process";
 import { getGame, invalidateGamesCache } from "@/lib/games";
@@ -35,7 +35,7 @@ export async function POST(
     return NextResponse.json({ error: "Too many uploads — wait a minute." }, { status: 429 });
   }
 
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) {
     logRequest({ ip, route: `/api/games/${slug}/rulebook`, method: "POST", status: 404, durationMs: Date.now() - start });
     return NextResponse.json({ error: "Unknown game" }, { status: 404 });
@@ -57,7 +57,14 @@ export async function POST(
   }
 
   const dir = path.join(process.cwd(), "content", "games", slug);
-  if (!fs.existsSync(dir)) {
+  let dirOk = false;
+  try {
+    await fs.stat(dir);
+    dirOk = true;
+  } catch {
+    /* directory missing */
+  }
+  if (!dirOk) {
     return NextResponse.json({ error: "Game directory not found" }, { status: 404 });
   }
 
@@ -71,11 +78,11 @@ export async function POST(
     return NextResponse.json({ error: "File doesn't look like a valid PDF" }, { status: 400 });
   }
 
-  fs.writeFileSync(pdfPath, bytes);
+  await fs.writeFile(pdfPath, bytes);
 
   // Update meta.json to point to the new file (in case the filename changed).
   const metaPath = path.join(dir, "meta.json");
-  const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+  const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
   meta.pdf = pdfName;
 
   invalidateGamesCache();
@@ -106,7 +113,14 @@ export async function GET(
 
   // Check if the digest is still in flight.
   const statusPath = path.join(process.cwd(), "content", "games", slug, ".digesting");
-  if (fs.existsSync(statusPath)) {
+  let digesting = false;
+  try {
+    await fs.access(statusPath);
+    digesting = true;
+  } catch {
+    /* no marker — digest complete */
+  }
+  if (digesting) {
     return NextResponse.json({ done: false });
   }
 
@@ -118,18 +132,18 @@ export async function GET(
 async function reDigest(slug: string) {
   const dir = path.join(process.cwd(), "content", "games", slug);
   const metaPath = path.join(dir, "meta.json");
-  const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+  const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
   const pdfPath = path.join(dir, meta.pdf ?? "rules.pdf");
 
   // Mark as digesting.
-  fs.writeFileSync(path.join(dir, ".digesting"), new Date().toISOString());
+  await fs.writeFile(path.join(dir, ".digesting"), new Date().toISOString());
 
   try {
     // 1. Extract text from the PDF (child process).
     const pages = await extractPdf(pdfPath);
 
     // 2. Rebuild the search index for this slug.
-    rebuildIndexFor(slug, meta.title ?? slug, pages);
+    await rebuildIndexFor(slug, meta.title ?? slug, pages);
 
     // 3. Regenerate description + metadata via LLM.
     if (pages.some((p) => (p ?? "").trim().length > 0)) {
@@ -192,12 +206,16 @@ async function reDigest(slug: string) {
     }
 
     // Persist updated meta.
-    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+    await fs.writeFile(metaPath, JSON.stringify(meta, null, 2));
     invalidateGamesCache();
   } finally {
     // Clear the digesting marker.
     const statusPath = path.join(dir, ".digesting");
-    if (fs.existsSync(statusPath)) fs.unlinkSync(statusPath);
+    try {
+      await fs.unlink(statusPath);
+    } catch {
+      /* marker already gone */
+    }
   }
 }
 
@@ -222,15 +240,13 @@ function extractPdf(pdfPath: string): Promise<string[]> {
   });
 }
 
-function rebuildIndexFor(slug: string, title: string, pages: string[]) {
+async function rebuildIndexFor(slug: string, title: string, pages: string[]) {
   const outPath = path.join(process.cwd(), "public", "search-index.json");
   let index = { entries: [] as any[] };
-  if (fs.existsSync(outPath)) {
-    try {
-      index = JSON.parse(fs.readFileSync(outPath, "utf8"));
-    } catch {
-      /* start fresh */
-    }
+  try {
+    index = JSON.parse(await fs.readFile(outPath, "utf8"));
+  } catch {
+    /* start fresh */
   }
   const entries = (index.entries ?? []).filter((e: any) => e.slug !== slug);
   pages.forEach((text, i) => {
@@ -239,8 +255,8 @@ function rebuildIndexFor(slug: string, title: string, pages: string[]) {
       entries.push({ id: `${slug}-p${i + 1}`, slug, title, page: i + 1, text: clean, isExpansion: false });
     }
   });
-  fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  fs.writeFileSync(
+  await fs.mkdir(path.dirname(outPath), { recursive: true });
+  await fs.writeFile(
     outPath,
     JSON.stringify({ generatedAt: new Date().toISOString(), entries }, null, 2)
   );

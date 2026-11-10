@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getGame } from "@/lib/games";
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 
 const UNSLOTH_URL = process.env.UNSLOTH_URL ?? "http://localhost:8888/v1";
@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "No slug provided." }, { status: 400 });
   }
 
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) {
     return NextResponse.json({ error: `Unknown game: ${slug}` }, { status: 404 });
   }
@@ -73,9 +73,9 @@ Respond with ONLY a single integer from 1 to 5. No other text.`;
 
     // Persist to meta.json.
     const metaPath = path.join(process.cwd(), "content", "games", slug, "meta.json");
-    const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+    const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
     meta.complexity = score;
-    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+    await fs.writeFile(metaPath, JSON.stringify(meta, null, 2));
 
     return NextResponse.json({ complexity: score });
   } catch {
@@ -91,7 +91,7 @@ export async function GET(req: NextRequest) {
   if (!slug) {
     return NextResponse.json({ error: "No slug provided." }, { status: 400 });
   }
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) {
     return NextResponse.json({ error: `Unknown game: ${slug}` }, { status: 404 });
   }

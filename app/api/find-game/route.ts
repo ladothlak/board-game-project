@@ -148,7 +148,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: guard.reason }, { status: 400 });
   }
 
-  const games = listGames();
+  const games = await listGames();
   if (games.length === 0) {
     return NextResponse.json({ recommendations: [] });
   }

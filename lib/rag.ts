@@ -368,7 +368,7 @@ export async function buildRagContext(
   apiKey: string,
   expansionNames?: string[]
 ): Promise<RagContext> {
-  const chunks = loadIndex().filter((c) => c.slug === slug);
+  const chunks = (await loadIndex()).filter((c) => c.slug === slug);
   if (chunks.length === 0) {
     return { excerpts: "", toc: "", confidence: 0, pages: [] };
   }

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 import { spawn } from "child_process";
 import { getGame, invalidateGamesCache } from "@/lib/games";
@@ -28,7 +28,7 @@ export async function POST(
     return NextResponse.json({ error: "Too many requests — wait a minute." }, { status: 429 });
   }
 
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) {
     return NextResponse.json({ error: "Game not found" }, { status: 404 });
   }
@@ -54,18 +54,25 @@ export async function POST(
   }
 
   const dir = path.join(process.cwd(), "content", "games", slug);
-  if (!fs.existsSync(dir)) {
+  let dirOk = false;
+  try {
+    await fs.stat(dir);
+    dirOk = true;
+  } catch {
+    /* directory missing */
+  }
+  if (!dirOk) {
     return NextResponse.json({ error: "Game directory not found" }, { status: 404 });
   }
 
   // Sanitize the filename.
   const fileBase = `expansion-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
   const pdfName = `${fileBase}.pdf`;
-  fs.writeFileSync(path.join(dir, pdfName), Buffer.from(await pdf.arrayBuffer()));
+  await fs.writeFile(path.join(dir, pdfName), Buffer.from(await pdf.arrayBuffer()));
 
   // Update meta.json.
   const metaPath = path.join(dir, "meta.json");
-  const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+  const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
   if (!meta.expansions) meta.expansions = [];
 
   // Prevent duplicates.
@@ -74,7 +81,7 @@ export async function POST(
   }
 
   meta.expansions.push({ name, pdf: pdfName });
-  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n", "utf8");
+  await fs.writeFile(metaPath, JSON.stringify(meta, null, 2) + "\n", "utf8");
   invalidateGamesCache();
 
   logRequest({ ip, route: `/api/games/${slug}/expansions`, method: "POST", status: 201, durationMs: Date.now() - start });
@@ -94,7 +101,7 @@ export async function DELETE(
   const ip = getClientIp(req);
   const { slug } = await ctx.params;
 
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) {
     return NextResponse.json({ error: "Game not found" }, { status: 404 });
   }
@@ -113,7 +120,7 @@ export async function DELETE(
 
   const dir = path.join(process.cwd(), "content", "games", slug);
   const metaPath = path.join(dir, "meta.json");
-  const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+  const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
 
   const idx = (meta.expansions ?? []).findIndex(
     (e: { name: string }) => e.name.toLowerCase() === name.toLowerCase()
@@ -125,7 +132,7 @@ export async function DELETE(
   const removed = meta.expansions[idx];
   // Delete the PDF file.
   try {
-    fs.unlinkSync(path.join(dir, removed.pdf));
+    await fs.unlink(path.join(dir, removed.pdf));
   } catch {
     /* file might already be gone */
   }
@@ -133,12 +140,12 @@ export async function DELETE(
   // Remove its chunks from the search index if it was in chat context.
   if (removed.inChatContext) {
     const nameSlug = removed.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    removeExpansionChunks(`${slug}-exp-${nameSlug}`);
+    await removeExpansionChunks(`${slug}-exp-${nameSlug}`);
   }
 
   meta.expansions.splice(idx, 1);
   if (meta.expansions.length === 0) delete meta.expansions;
-  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n", "utf8");
+  await fs.writeFile(metaPath, JSON.stringify(meta, null, 2) + "\n", "utf8");
   invalidateGamesCache();
 
   logRequest({ ip, route: `/api/games/${slug}/expansions`, method: "DELETE", status: 200, durationMs: Date.now() - start });
@@ -159,7 +166,7 @@ export async function PATCH(
   const ip = getClientIp(req);
   const { slug } = await ctx.params;
 
-  const game = getGame(slug);
+  const game = await getGame(slug);
   if (!game) {
     return NextResponse.json({ error: "Game not found" }, { status: 404 });
   }
@@ -178,7 +185,7 @@ export async function PATCH(
 
   const dir = path.join(process.cwd(), "content", "games", slug);
   const metaPath = path.join(dir, "meta.json");
-  const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+  const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
 
   const idx = (meta.expansions ?? []).findIndex(
     (e: { name: string }) => e.name.toLowerCase() === name.toLowerCase()
@@ -189,7 +196,7 @@ export async function PATCH(
 
   // Update the flag.
   meta.expansions[idx].inChatContext = body.inChatContext;
-  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n", "utf8");
+  await fs.writeFile(metaPath, JSON.stringify(meta, null, 2) + "\n", "utf8");
   invalidateGamesCache();
 
   // Update the search index.
@@ -199,15 +206,22 @@ export async function PATCH(
   if (body.inChatContext) {
     // Extract text from the expansion PDF and add chunks.
     const pdfPath = path.join(dir, meta.expansions[idx].pdf);
-    if (!fs.existsSync(pdfPath)) {
+    let pdfOk = false;
+    try {
+      await fs.access(pdfPath);
+      pdfOk = true;
+    } catch {
+      /* file missing */
+    }
+    if (!pdfOk) {
       return NextResponse.json({ error: "Expansion PDF file not found" }, { status: 404 });
     }
 
     const pages = await extractPdf(pdfPath);
-    addExpansionChunks(slug, meta.title ?? slug, idPrefix, pages);
+    await addExpansionChunks(slug, meta.title ?? slug, idPrefix, pages);
   } else {
     // Remove the expansion's chunks.
-    removeExpansionChunks(idPrefix);
+    await removeExpansionChunks(idPrefix);
   }
 
   logRequest({ ip, route: `/api/games/${slug}/expansions`, method: "PATCH", status: 200, durationMs: Date.now() - start });
@@ -235,14 +249,12 @@ function extractPdf(pdfPath: string): Promise<string[]> {
   });
 }
 
-function addExpansionChunks(slug: string, title: string, idPrefix: string, pages: string[]) {
+async function addExpansionChunks(slug: string, title: string, idPrefix: string, pages: string[]) {
   const outPath = path.join(process.cwd(), "public", "search-index.json");
   let index = { entries: [] as any[] };
-  if (fs.existsSync(outPath)) {
-    try {
-      index = JSON.parse(fs.readFileSync(outPath, "utf8"));
-    } catch { /* start fresh */ }
-  }
+  try {
+    index = JSON.parse(await fs.readFile(outPath, "utf8"));
+  } catch { /* start fresh */ }
   // Remove any existing chunks for this expansion (in case of re-toggle).
   const entries = (index.entries ?? []).filter((e: any) => !e.id.startsWith(idPrefix));
 
@@ -255,17 +267,16 @@ function addExpansionChunks(slug: string, title: string, idPrefix: string, pages
       entries.push({ id: `${idPrefix}-p${i + 1}`, slug, title, page: maxBasePage + i + 1, text: clean, isExpansion: true });
     }
   });
-  fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  fs.writeFileSync(outPath, JSON.stringify({ generatedAt: new Date().toISOString(), entries }, null, 2));
+  await fs.mkdir(path.dirname(outPath), { recursive: true });
+  await fs.writeFile(outPath, JSON.stringify({ generatedAt: new Date().toISOString(), entries }, null, 2));
 }
 
-function removeExpansionChunks(idPrefix: string) {
+async function removeExpansionChunks(idPrefix: string) {
   const outPath = path.join(process.cwd(), "public", "search-index.json");
-  if (!fs.existsSync(outPath)) return;
   let index = { entries: [] as any[] };
   try {
-    index = JSON.parse(fs.readFileSync(outPath, "utf8"));
+    index = JSON.parse(await fs.readFile(outPath, "utf8"));
   } catch { return; }
   const entries = (index.entries ?? []).filter((e: any) => !e.id.startsWith(idPrefix));
-  fs.writeFileSync(outPath, JSON.stringify({ generatedAt: new Date().toISOString(), entries }, null, 2));
+  await fs.writeFile(outPath, JSON.stringify({ generatedAt: new Date().toISOString(), entries }, null, 2));
 }

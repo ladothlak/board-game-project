@@ -14,7 +14,7 @@ export async function generatePairs(
   slug: string,
   apiKey: string
 ): Promise<PairResult[]> {
-  const games = listGames();
+  const games = await listGames();
   const current = games.find((g) => g.slug === slug);
   if (!current) return [];
 

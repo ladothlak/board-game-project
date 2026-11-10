@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 
 const MIME: Record<string, string> = {
@@ -36,26 +36,28 @@ export async function GET(
   const filePath = path.join(dir, name);
 
   // Defense in depth: ensure the resolved path stays inside the game dir.
-  const realDir = fs.realpathSync(dir) + path.sep;
-  const realFile = fs.realpathSync(filePath);
+  const realDir = (await fs.realpath(dir)) + path.sep;
+  const realFile = await fs.realpath(filePath);
   if (!realFile.startsWith(realDir)) {
     return NextResponse.json({ error: "Invalid file name" }, { status: 400 });
   }
-  if (!fs.existsSync(realFile)) {
+
+  let bytes: Buffer;
+  let stat;
+  try {
+    bytes = await fs.readFile(realFile);
+    // ETag based on file size + mtime (cheap, no hashing needed for local files).
+    stat = await fs.stat(realFile);
+  } catch {
     return NextResponse.json({ error: "File not found" }, { status: 404 });
   }
-
-  const bytes = fs.readFileSync(realFile);
-
-  // ETag based on file size + mtime (cheap, no hashing needed for local files).
-  const stat = fs.statSync(realFile);
   const etag = `"${stat.size}-${Math.round(stat.mtimeMs)}"`;
   const ifNoneMatch = req.headers.get("if-none-match");
   if (ifNoneMatch === etag) {
     return new Response(null, { status: 304 });
   }
 
-  const res = new NextResponse(bytes);
+  const res = new NextResponse(new Uint8Array(bytes));
   res.headers.set("Content-Type", MIME[ext]);
   res.headers.set("ETag", etag);
   // PDFs and images are immutable at runtime — cache aggressively.

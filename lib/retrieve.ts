@@ -1,4 +1,4 @@
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 
 export interface Chunk {
@@ -20,29 +20,27 @@ let cacheMtime = -1;
  * whenever its mtime changes — otherwise a running server would keep serving
  * a stale in-memory copy and new games would have no searchable/chat context.
  */
-export function loadIndex(): Chunk[] {
+export async function loadIndex(): Promise<Chunk[]> {
   const p = path.join(process.cwd(), "public", "search-index.json");
   let mtime = -1;
-  if (fs.existsSync(p)) {
-    try {
-      mtime = fs.statSync(p).mtimeMs;
-    } catch {
-      /* ignore */
-    }
+  try {
+    mtime = (await fs.stat(p)).mtimeMs;
+  } catch {
+    /* no index file yet */
   }
   if (cache && mtime === cacheMtime) return cache;
   let entries: Chunk[] = [];
-  if (fs.existsSync(p)) {
-    try {
-      const raw = JSON.parse(fs.readFileSync(p, "utf8")).entries ?? [];
-      // Sanitize each chunk's text to strip running navigation headers.
-      // Infer isExpansion from ID for index files written before the field existed.
-      entries = raw.map((c: Chunk) => ({
-        ...c,
-        text: sanitizeChunkText(c.text),
-        isExpansion: c.isExpansion ?? c.id.includes("-exp-"),
-      }));
-    } catch (e) {
+  try {
+    const raw = JSON.parse(await fs.readFile(p, "utf8")).entries ?? [];
+    // Sanitize each chunk's text to strip running navigation headers.
+    // Infer isExpansion from ID for index files written before the field existed.
+    entries = raw.map((c: Chunk) => ({
+      ...c,
+      text: sanitizeChunkText(c.text),
+      isExpansion: c.isExpansion ?? c.id.includes("-exp-"),
+    }));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
       console.error(`Failed to read search index:`, e);
     }
   }

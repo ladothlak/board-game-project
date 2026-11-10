@@ -79,7 +79,7 @@ const CHUNKS: Chunk[] = [
 
 describe("buildRagContext", () => {
   beforeEach(() => {
-    vi.mocked(loadIndex).mockReturnValue(CHUNKS);
+    vi.mocked(loadIndex).mockResolvedValue(CHUNKS);
   });
 
   it("skips LLM expansion for short queries and retrieves directly", async () => {
@@ -97,7 +97,7 @@ describe("buildRagContext", () => {
   });
 
   it("boosts an explicitly referenced page to the top and skips expansion", async () => {
-    vi.mocked(loadIndex).mockReturnValue([
+    vi.mocked(loadIndex).mockResolvedValue([
       ...CHUNKS,
       { id: "t42", slug: SLUG, title: "Reference", page: 42, text: "The reference table lists all keywords." },
     ]);
@@ -117,7 +117,7 @@ describe("buildRagContext", () => {
   });
 
   it("boosts chunks of a mentioned enabled expansion to the top", async () => {
-    vi.mocked(loadIndex).mockReturnValue([
+    vi.mocked(loadIndex).mockResolvedValue([
       ...CHUNKS,
       { id: "g-exp-doom", slug: SLUG, title: "Doom", page: 10, text: "The Doom expansion adds terrifying new enemies.", isExpansion: true },
     ]);
@@ -170,7 +170,7 @@ describe("buildRagContext", () => {
   it("truncates later chunks to fit the adaptive context budget", async () => {
     const longSetup = `Set up the board. ${"a".repeat(1980)}`; // ~2000 chars
     const longCombat = `${"b".repeat(4900)} set up the board`; // ~5000 chars
-    vi.mocked(loadIndex).mockReturnValue([
+    vi.mocked(loadIndex).mockResolvedValue([
       { id: "l1", slug: SLUG, title: "Setup", page: 1, text: longSetup },
       { id: "l2", slug: SLUG, title: "Combat", page: 2, text: longCombat },
     ]);
@@ -203,7 +203,7 @@ describe("buildRagContext", () => {
   });
 
   it("retrieves and merges results from all expansion query variants", async () => {
-    vi.mocked(loadIndex).mockReturnValue([
+    vi.mocked(loadIndex).mockResolvedValue([
       CHUNKS[0],
       { id: "m2", slug: SLUG, title: "Combat", page: 2, text: "Each turn you may attack with your forces." },
       { id: "m4", slug: SLUG, title: "Combat Rules", page: 4, text: "Combat rules: resolve the battle each round." },
@@ -223,7 +223,7 @@ describe("buildRagContext", () => {
   });
 
   it("follows cross-references and includes the referenced page in the final context", async () => {
-    vi.mocked(loadIndex).mockReturnValue([
+    vi.mocked(loadIndex).mockResolvedValue([
       { id: "c1", slug: SLUG, title: "Setup", page: 1, text: "Set up the board. See page 3 for the details." },
       { id: "c3", slug: SLUG, title: "Victory", page: 3, text: "Victory condition detailed here." },
     ]);
