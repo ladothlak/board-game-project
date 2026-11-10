@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
 import { listGames, type GameMeta } from "@/lib/games";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { validateQuery } from "@/lib/guard";
@@ -115,6 +116,9 @@ function preFilter(games: GameMeta[], query: string): GameMeta[] {
 }
 
 export async function POST(req: NextRequest) {
+  const denied = requireAuth(req);
+  if (denied) return denied;
+
   const start = Date.now();
   const ip = getClientIp(req);
 

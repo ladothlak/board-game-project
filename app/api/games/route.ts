@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
 import fs from "fs/promises";
 import path from "path";
 import { listGames, invalidateGamesCache } from "@/lib/games";
@@ -15,6 +16,9 @@ function slugify(title: string): string {
 }
 
 export async function POST(req: Request) {
+  const denied = requireAuth(req as any);
+  if (denied) return denied;
+
   let form: FormData;
   try {
     form = await req.formData();
