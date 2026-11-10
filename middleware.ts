@@ -16,7 +16,16 @@ export function middleware(req: NextRequest) {
   // Reject oversized request bodies early (but allow file uploads).
   if (!isUpload) {
     const length = req.headers.get("content-length");
-    if (length && Number(length) > MAX_BODY_BYTES) {
+    // Chunked transfer encoding (no content-length) is rejected on non-upload
+    // routes: JSON APIs always have a known body size, and allowing chunked
+    // bodies would bypass the size check.
+    if (!length) {
+      return NextResponse.json(
+        { error: "Content-Length header required." },
+        { status: 411 }
+      );
+    }
+    if (Number(length) > MAX_BODY_BYTES) {
       return NextResponse.json(
         { error: "Request body too large." },
         { status: 413 }
