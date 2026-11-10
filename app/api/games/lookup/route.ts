@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
+import { safeFetch, SsrfBlockedError } from "@/lib/fetch-rulebook-utils";
 
 /**
  * Look up a board game by name. Tries BGG first (most complete data),
@@ -454,7 +455,7 @@ async function lookupWeb(name: string, publisher?: string | null): Promise<Looku
     }
 
     // Filter to only official publisher domains.
-    let bestUrl: string | null = null;
+    const acceptableUrls: string[] = [];
     for (const url of candidates) {
       try {
         const parsed = new URL(url);
@@ -473,28 +474,38 @@ async function lookupWeb(name: string, publisher?: string | null): Promise<Looku
           if (!matches) continue;
         }
 
-        // Accept the first plausible official domain.
-        bestUrl = url;
-        break;
+        acceptableUrls.push(url);
       } catch { /* skip malformed */ }
     }
 
-    if (!bestUrl) return null;
+    if (acceptableUrls.length === 0) return null;
 
-    // Fetch the page and try to extract some metadata.
-    const result: LookupResult = {
-      title: name,
-      source: "web",
-      webUrl: bestUrl,
-    };
+    // Fetch the first candidate that passes the SSRF guard and serves a page.
+    // Candidate URLs come from search results (attacker-influenceable), so each
+    // is fetched via safeFetch, which validates the host AND every redirect hop.
+    // A URL blocked by the guard is skipped in favor of the next candidate.
+    // Bounded to a few candidates so a run of dead/blocked links can't stall
+    // the route (each attempt has its own 15s timeout budget).
+    const result: LookupResult = { title: name, source: "web" };
+    for (const url of acceptableUrls.slice(0, 3)) {
+      let pageRes: Response;
+      try {
+        pageRes = await safeFetch(url, {
+          headers: { "User-Agent": UA },
+          signal: AbortSignal.timeout(15_000),
+        });
+      } catch (e) {
+        if (e instanceof SsrfBlockedError) {
+          console.log(`lookup: SSRF guard blocked ${url}, trying next candidate`);
+        }
+        continue; // skip this URL and try the next candidate
+      }
 
-    try {
-      const pageRes = await fetch(bestUrl, {
-        headers: { "User-Agent": UA },
-        signal: AbortSignal.timeout(15_000),
-        redirect: "follow",
-      });
-      if (pageRes.ok) {
+      if (!pageRes.ok) continue; // dead link — try the next candidate
+
+      result.webUrl = url;
+
+      try {
         const pageHtml = await pageRes.text();
 
         // Title.
@@ -523,10 +534,12 @@ async function lookupWeb(name: string, publisher?: string | null): Promise<Looku
 
         const timeMatch = textContent.match(/(\d+)\s*minutes?/i);
         if (timeMatch) result.playtimeMinutes = Number(timeMatch[1]);
-      }
-    } catch { /* non-critical — return what we have */ }
+      } catch { /* non-critical — return what we have */ }
 
-    return result;
+      break; // got a usable page — done.
+    }
+
+    return result.webUrl ? result : null;
   } catch {
     return null;
   }
