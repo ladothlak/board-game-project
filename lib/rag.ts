@@ -322,22 +322,6 @@ export function hierarchicalToc(chunks: Chunk[]): string {
 
 // ─── 9. Follow-Up Detection ────────────────────────────────────────────────
 
-/**
- * Detect if the question is a follow-up (references "that", "this", "it",
- * builds on previous context). If so, carry forward the previous page focus.
- */
-export function isFollowUp(question: string): boolean {
-  const q = question.toLowerCase().trim();
-  const followUpPatterns = [
-    /^and (what|how|can|do)/i,
-    /^what about\b/i,
-    /^then what/i,
-    /^so (what|how)/i,
-    /\b(that|this|it|they)\b.*\?(what|how|can|do)/i,
-  ];
-  return followUpPatterns.some((p) => p.test(q));
-}
-
 // ─── 10. Explicit Page Detection ──────────────────────────────────────────
 
 /**
