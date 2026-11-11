@@ -13,6 +13,19 @@ export async function GET(_req: Request, ctx: { params: Promise<{ slug: string }
   if (!game) {
     return NextResponse.json({ error: "Unknown game" }, { status: 404 });
   }
+
+  // While a re-digest is in flight, return an empty description so the
+  // client shows its "brewing" state instead of the stale old text.
+  // Once reDigest completes (marker removed), the fresh description
+  // from meta.json is served.
+  let digesting = false;
+  try {
+    await fs.access(path.join(process.cwd(), "content", "games", slug, ".digesting"));
+    digesting = true;
+  } catch {
+    /* no marker — not digesting */
+  }
+
   // Include the LLM-generated metadata fields so client components can
   // refresh them in place after a rulebook re-digest (rulebook-updated).
   // no-store prevents the browser from caching this response, ensuring
@@ -21,7 +34,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ slug: string }
     {
       slug,
       title: game.title,
-      description: game.description ?? "",
+      description: digesting ? "" : (game.description ?? ""),
       players: game.players ?? null,
       playtimeMinutes: game.playtimeMinutes ?? null,
       ageRating: game.ageRating ?? null,

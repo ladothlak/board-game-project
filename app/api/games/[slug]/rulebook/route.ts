@@ -14,12 +14,11 @@ import { MAX_PDF_SIZE } from "@/lib/fetch-rulebook-utils";
  *
  * Steps:
  * 1. Save the new PDF (replacing the old one).
- * 2. Re-extract text + rebuild the search index for this slug.
- * 3. Regenerate the LLM description + metadata.
- * 4. Regenerate key concepts.
- * 5. Regenerate setup checklist.
- * 6. Update complexity score.
- * 7. Invalidate in-memory caches.
+ * 2. Remove old generated content (concepts, checklist).
+ * 3. Re-extract text + rebuild the search index for this slug.
+ * 4. Regenerate the LLM description + metadata.
+ * 5. Update complexity score.
+ * 6. Invalidate in-memory caches.
  */
 export async function POST(
   req: Request,
@@ -152,6 +151,12 @@ async function reDigest(slug: string) {
   // The .digesting marker is written by the POST handler before it responds,
   // so this function only ever removes it (in the finally block below).
   try {
+    // Remove old generated content so the UI shows "not loaded" state
+    // until the user manually triggers regeneration.
+    for (const f of ["concepts.json", "checklist.json"]) {
+      try { await fs.unlink(path.join(dir, f)); } catch { /* already gone */ }
+    }
+
     const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
     const pdfPath = path.join(dir, meta.pdf ?? "rules.pdf");
 
