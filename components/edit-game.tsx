@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useDialog } from "@/hooks/use-dialog";
@@ -31,6 +31,23 @@ export default function EditGame({ slug, game }: Props) {
   const [ageRating, setAgeRating] = useState(game.ageRating ?? "");
   const [tags, setTags] = useState((game.tags ?? []).join(", "));
   const [coverFile, setCoverFile] = useState<File | null>(null);
+  // Values captured when the modal opens. Used to detect which fields the user
+  // actually modified, so the PATCH payload only contains changed fields —
+  // this avoids clobbering LLM-generated description/tags that the digest
+  // pipeline may have written while the modal was open.
+  const initialRef = useRef<{
+    title: string;
+    description: string;
+    players: string;
+    playtime: string;
+    ageRating: string;
+    tags: string;
+  } | null>(null);
+
+  function openModal() {
+    initialRef.current = { title, description, players, playtime, ageRating, tags };
+    setOpen(true);
+  }
   const router = useRouter();
   const { panelRef } = useDialog<HTMLFormElement>(open, () => setOpen(false));
 
@@ -40,6 +57,36 @@ export default function EditGame({ slug, game }: Props) {
       setError("The title can't be empty.");
       return;
     }
+
+    // Only include fields the user actually modified, so we don't overwrite
+    // metadata (e.g. LLM-generated description/tags) that may have changed
+    // since the modal opened.
+    const initial = initialRef.current!;
+    const payload: Record<string, unknown> = {};
+    if (title.trim() !== initial.title) payload.title = title.trim();
+    if (description !== initial.description) payload.description = description;
+    if (players.trim() !== initial.players) {
+      payload.players = players.trim() || undefined;
+    }
+    if (playtime !== initial.playtime) {
+      payload.playtimeMinutes = playtime === "" ? undefined : Number(playtime);
+    }
+    if (ageRating.trim() !== initial.ageRating) {
+      payload.ageRating = ageRating.trim() || undefined;
+    }
+    if (tags !== initial.tags) {
+      payload.tags = tags
+        .split(",")
+        .map((t) => t.trim().toLowerCase())
+        .filter(Boolean);
+    }
+
+    // Nothing changed and no new cover — just close, no request needed.
+    if (Object.keys(payload).length === 0 && !coverFile) {
+      setOpen(false);
+      return;
+    }
+
     setSaving(true);
     setError(null);
     try {
@@ -54,17 +101,6 @@ export default function EditGame({ slug, game }: Props) {
         }
       }
 
-      const payload = {
-        title: title.trim(),
-        description,
-        players: players.trim() || undefined,
-        playtimeMinutes: playtime === "" ? undefined : Number(playtime),
-        ageRating: ageRating.trim() || undefined,
-        tags: tags
-          .split(",")
-          .map((t) => t.trim().toLowerCase())
-          .filter(Boolean),
-      };
       const res = await fetch(`/api/games/${slug}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -91,7 +127,7 @@ export default function EditGame({ slug, game }: Props) {
     <>
       <button
         type="button"
-        onClick={() => setOpen(true)}
+        onClick={openModal}
         aria-label={`Edit ${game.title}`}
         title="Edit game"
         className="inline-flex items-center gap-1.5 rounded-lg border border-latte/50 bg-parchment/30 px-3 py-1.5 text-xs text-cocoa transition-colors hover:bg-parchment/60 dark:border-cocoa/40 dark:bg-night/40 dark:text-latte"

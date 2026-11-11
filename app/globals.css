@@ -127,7 +127,7 @@ body::before {
 }
 
 .fade-up {
-  animation: fade-up 0.4s ease-out both;
+  animation: fade-up 0.4s ease-out;
 }
 
 /* Fullscreen PDF stage */

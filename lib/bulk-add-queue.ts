@@ -115,8 +115,14 @@ async function processJob(job: BulkJob): Promise<void> {
       // 1. Look up metadata (BGG → Wikipedia → web).
       const meta = await lookupGame(result.name);
       if (!meta) {
-        result.status = "no_rulebook";
-        result.error = "Not found";
+        if (job.includeNoRulebook) {
+          // Shelf it with just the name — no metadata, no rulebook.
+          await createGameWithoutPdf(result.name, null);
+          result.status = "added";
+        } else {
+          result.status = "no_rulebook";
+          result.error = "Not found";
+        }
         continue;
       }
 
@@ -227,7 +233,7 @@ async function createGame(name: string, meta: LookupResult, pdfBytes: Buffer): P
  * looked-up metadata but NO pdf field and an empty description — no cover is
  * rendered and no digest is fired, since there's nothing to read from.
  */
-async function createGameWithoutPdf(name: string, meta: LookupResult): Promise<void> {
+async function createGameWithoutPdf(name: string, meta: LookupResult | null): Promise<void> {
   const baseSlug = slugify(name);
   if (!baseSlug) {
     throw new Error("Title could not be converted to a slug");
@@ -243,10 +249,10 @@ async function createGameWithoutPdf(name: string, meta: LookupResult): Promise<v
   const gameMeta = {
     title: name,
     description: "", // no rulebook to digest — filled in later if one is added
-    players: meta.players,
-    playtimeMinutes: meta.playtimeMinutes,
-    ageRating: meta.ageRating,
-    tags: (meta.tags ?? []).map((t) => t.trim().toLowerCase()).filter(Boolean),
+    players: meta?.players,
+    playtimeMinutes: meta?.playtimeMinutes,
+    ageRating: meta?.ageRating,
+    tags: (meta?.tags ?? []).map((t) => t.trim().toLowerCase()).filter(Boolean),
   };
   await fs.writeFile(path.join(dir, "meta.json"), JSON.stringify(gameMeta, null, 2));
   invalidateGamesCache();

@@ -2,9 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 
 const MAX_BODY_BYTES = 100 * 1024; // 100 KB for JSON API routes.
 
-// Route that accepts file uploads (PDFs can be tens of MB).
-// Only this route is exempt from the 100KB body-size check.
-const UPLOAD_ROUTES = ["/api/games"];
+// Routes that accept file uploads (PDFs and cover images can be tens of MB).
+// Only these paths are exempt from the 100KB body-size check:
+//   POST /api/games                (game creation with rulebook PDF)
+//   POST /api/games/<slug>/cover   (cover image upload)
+//   POST /api/games/<slug>/rulebook (rulebook PDF upload)
+const UPLOAD_PATHS = /^\/api\/games(?:$|\/[^/]+\/(cover|rulebook)$)/;
 
 /**
  * Global middleware: adds security headers to every response and rejects
@@ -12,7 +15,7 @@ const UPLOAD_ROUTES = ["/api/games"];
  */
 export function middleware(req: NextRequest) {
   const path = req.nextUrl.pathname;
-  const isUpload = UPLOAD_ROUTES.some((r) => path === r);
+  const isUpload = UPLOAD_PATHS.test(path);
 
   // Reject oversized request bodies early (but allow file uploads).
   // Only enforce for methods that carry a body (POST/PUT/PATCH) — GET/HEAD/DELETE

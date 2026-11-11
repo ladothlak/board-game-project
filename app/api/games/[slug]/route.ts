@@ -3,6 +3,9 @@ import fs from "fs/promises";
 import path from "path";
 import { getGame, invalidateGamesCache } from "@/lib/games";
 import { digestRulebook } from "@/lib/digest-rulebook.mjs";
+import { requireAuth } from "@/lib/auth";
+import { getClientIp } from "@/lib/rate-limit";
+import { logRequest } from "@/lib/audit-log";
 
 export async function GET(_req: Request, ctx: { params: Promise<{ slug: string }> }) {
   const { slug } = await ctx.params;
@@ -39,8 +42,16 @@ export async function POST(_req: Request, ctx: { params: Promise<{ slug: string 
  * only the fields present in the body are merged into meta.json.
  */
 export async function PATCH(req: Request, ctx: { params: Promise<{ slug: string }> }) {
+  const denied = requireAuth(req as any);
+  if (denied) return denied;
+
+  const start = Date.now();
   const { slug } = await ctx.params;
+  const ip = getClientIp(req);
+  const route = `/api/games/${slug}`;
+
   if (!(await getGame(slug))) {
+    logRequest({ ip, route, method: "PATCH", status: 404, durationMs: Date.now() - start });
     return NextResponse.json({ error: "Unknown game" }, { status: 404 });
   }
 
@@ -48,7 +59,29 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ slug: string 
   try {
     body = await req.json();
   } catch {
+    logRequest({ ip, route, method: "PATCH", status: 400, durationMs: Date.now() - start });
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  // Validate a couple of fields before touching the metadata.
+  if (
+    body.playtimeMinutes != null &&
+    (typeof body.playtimeMinutes !== "number" ||
+      !Number.isFinite(body.playtimeMinutes) ||
+      body.playtimeMinutes < 0)
+  ) {
+    logRequest({ ip, route, method: "PATCH", status: 400, durationMs: Date.now() - start });
+    return NextResponse.json(
+      { error: "playtimeMinutes must be a non-negative number" },
+      { status: 400 }
+    );
+  }
+  if (typeof body.image === "string" && !/\.(jpe?g|png|webp|gif)$/i.test(body.image)) {
+    logRequest({ ip, route, method: "PATCH", status: 400, durationMs: Date.now() - start });
+    return NextResponse.json(
+      { error: "Image must be a JPEG, PNG, WebP, or GIF file." },
+      { status: 400 }
+    );
   }
 
   const metaPath = path.join(process.cwd(), "content", "games", slug, "meta.json");
@@ -56,6 +89,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ slug: string 
   try {
     meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
   } catch {
+    logRequest({ ip, route, method: "PATCH", status: 404, durationMs: Date.now() - start });
     return NextResponse.json({ error: "Game metadata not found" }, { status: 404 });
   }
 
@@ -63,7 +97,11 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ slug: string 
   if (typeof body.title === "string" && body.title.trim()) meta.title = body.title.trim();
   if (typeof body.description === "string") meta.description = body.description;
   if (typeof body.players === "string") meta.players = body.players.trim() || undefined;
-  if (typeof body.playtimeMinutes === "number" && Number.isFinite(body.playtimeMinutes)) {
+  if (
+    typeof body.playtimeMinutes === "number" &&
+    Number.isFinite(body.playtimeMinutes) &&
+    body.playtimeMinutes >= 0
+  ) {
     meta.playtimeMinutes = body.playtimeMinutes;
   }
   if (typeof body.ageRating === "string") meta.ageRating = body.ageRating.trim() || undefined;
@@ -75,5 +113,6 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ slug: string 
   await fs.writeFile(metaPath, JSON.stringify(meta, null, 2));
   invalidateGamesCache();
 
+  logRequest({ ip, route, method: "PATCH", status: 200, durationMs: Date.now() - start });
   return NextResponse.json(meta);
 }

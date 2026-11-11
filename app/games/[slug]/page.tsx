@@ -49,7 +49,7 @@ export default async function GamePage({
             fill
             priority
             sizes="100%"
-            className="object-cover"
+            className="object-contain"
           />
         ) : (
           <div className="flex h-48 items-center justify-center bg-latte/30 text-cocoa dark:bg-cocoa/20 dark:text-latte">
