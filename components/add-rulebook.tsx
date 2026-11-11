@@ -40,16 +40,20 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
     if (uploaded) alrightRef.current?.focus();
   }, [uploaded]);
 
-  // The modal can be closed at any time — the server-side digest continues
-  // regardless. If the upload already completed, dispatch rulebook-updated
-  // so the PDF viewer and other components refresh.
-  const { panelRef } = useDialog<HTMLFormElement>(open, () => {
-    if (!uploading) {
-      if (uploaded) {
-        window.dispatchEvent(new CustomEvent("rulebook-updated", { detail: { slug } }));
-      }
-      setOpen(false);
+  // Shared close logic: dispatch rulebook-updated if the upload completed,
+  // so the PDF viewer and other components refresh. Used by both the
+  // "Alright" button and the Escape/backdrop handler.
+  const closeModal = useCallback(() => {
+    if (uploaded) {
+      window.dispatchEvent(new CustomEvent("rulebook-updated", { detail: { slug } }));
     }
+    setOpen(false);
+  }, [uploaded, slug]);
+
+  // The modal can be closed at any time — the server-side digest continues
+  // regardless.
+  const { panelRef } = useDialog<HTMLFormElement>(open, () => {
+    if (!uploading) closeModal();
   });
 
   // Clear state when modal closes.
@@ -227,7 +231,7 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
     ? createPortal(
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-espresso/40 p-4 backdrop-blur-sm [transform:translateZ(0)]"
-          onClick={() => !uploading && setOpen(false)}
+          onClick={() => { if (!uploading) closeModal(); }}
         >
           <form
             ref={panelRef}
@@ -406,7 +410,7 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
               <div className="mt-5 flex justify-center gap-3">
                 <button
                   type="button"
-                  onClick={() => setOpen(false)}
+                  onClick={closeModal}
                   disabled={uploading}
                   className="rounded-lg px-4 py-2 text-sm text-cocoa hover:bg-parchment/60 dark:text-latte dark:hover:bg-cocoa/20"
                 >
@@ -425,7 +429,7 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
               <div className="mt-5 flex justify-center">
                 <button
                   type="button"
-                  onClick={() => setOpen(false)}
+                  onClick={closeModal}
                   ref={alrightRef}
                   className="rounded-lg bg-sage/70 px-5 py-2 text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
                 >
