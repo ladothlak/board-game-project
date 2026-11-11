@@ -436,7 +436,8 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
                   type="button"
                   onClick={() => {
                     setOpen(false);
-                    router.refresh();
+                    // Notify other components that the rulebook content was regenerated.
+                    window.dispatchEvent(new CustomEvent("rulebook-updated", { detail: { slug } }));
                   }}
                   className="mt-3 rounded-lg bg-sage/70 px-5 py-2 text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
                 >

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { Suggestion } from "@/lib/games";
 
 type Field = "players" | "playtimeMinutes" | "ageRating";
@@ -32,6 +32,25 @@ export default function GameMeta({
   const [ageV, setAgeV] = useState(ageRating);
   const [suggestions, setSuggestions] = useState<Suggestion[]>(initialSuggestions ?? []);
   const [busy, setBusy] = useState<Field | null>(null);
+
+  // Re-fetch metadata when the rulebook is updated via the modal.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.slug !== slug) return;
+      fetch(`/api/games/${slug}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!data) return;
+          if (data.players != null) setPlayersV(data.players);
+          if (data.playtimeMinutes != null) setPlaytimeV(data.playtimeMinutes);
+          if (data.ageRating != null) setAgeV(data.ageRating);
+        })
+        .catch(() => {});
+    };
+    window.addEventListener("rulebook-updated", handler);
+    return () => window.removeEventListener("rulebook-updated", handler);
+  }, [slug]);
 
   function suggestionFor(field: Field) {
     return suggestions.find((s) => s.field === field) ?? null;

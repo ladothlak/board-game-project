@@ -67,6 +67,30 @@ export default function SetupChecklist({ slug }: { slug: string }) {
     };
   }, [slug]);
 
+  // Re-fetch when the rulebook is updated via the modal.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.slug !== slug) return;
+      setLoaded(false);
+      setSteps(null);
+      setDone(new Set());
+      setError(null);
+      fetch(`/api/games/${slug}/checklist`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error("Server error"))))
+        .then((data) => {
+          setSteps(data.steps ?? null);
+          setLoaded(true);
+        })
+        .catch(() => {
+          setLoaded(true);
+          setError("Couldn't load the checklist right now.");
+        });
+    };
+    window.addEventListener("rulebook-updated", handler);
+    return () => window.removeEventListener("rulebook-updated", handler);
+  }, [slug]);
+
   async function generate(force: boolean) {
     setGenerating(true);
     setError(null);

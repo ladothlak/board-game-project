@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 
 const POLL_INTERVAL = 5000;
 const MAX_POLLS = 12; // ~60 seconds
@@ -10,6 +10,10 @@ const MAX_POLLS = 12; // ~60 seconds
  * digest is still running), shows a "brewing" state and polls until the
  * description lands — the page is fully usable in the meantime.
  * Stops polling after 60s and shows a fallback message.
+ *
+ * Also listens for the `rulebook-updated` event (dispatched by AddRulebook
+ * after a re-digest completes) to pick up a freshly generated description
+ * without a page refresh.
  */
 export default function DescriptionBlock({
   slug,
@@ -20,6 +24,27 @@ export default function DescriptionBlock({
 }) {
   const [description, setDescription] = useState(initialDescription ?? "");
   const [gaveUp, setGaveUp] = useState(false);
+
+  // Re-fetch when the rulebook is updated via the modal.
+  const refetch = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/games/${slug}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.description) setDescription(data.description);
+    } catch {
+      /* ignore */
+    }
+  }, [slug]);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.slug === slug) void refetch();
+    };
+    window.addEventListener("rulebook-updated", handler);
+    return () => window.removeEventListener("rulebook-updated", handler);
+  }, [slug, refetch]);
 
   useEffect(() => {
     if (description) return;

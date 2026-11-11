@@ -21,7 +21,7 @@ export default function KeyConcepts({ slug }: { slug: string }) {
   const [open, setOpen] = useState(false);
 
   // Load stored concepts on mount.
-  useEffect(() => {
+  const loadConcepts = useCallback(() => {
     setLoading(true);
     setError(null);
     fetch(`/api/games/${slug}/concepts`)
@@ -30,6 +30,20 @@ export default function KeyConcepts({ slug }: { slug: string }) {
       .catch(() => setError("Couldn't load concepts right now."))
       .finally(() => setLoading(false));
   }, [slug]);
+
+  useEffect(() => {
+    loadConcepts();
+  }, [loadConcepts]);
+
+  // Re-fetch when the rulebook is updated via the modal.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.slug === slug) loadConcepts();
+    };
+    window.addEventListener("rulebook-updated", handler);
+    return () => window.removeEventListener("rulebook-updated", handler);
+  }, [slug, loadConcepts]);
 
   const generate = useCallback(async () => {
     setLoading(true);
