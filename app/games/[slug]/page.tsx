@@ -10,6 +10,7 @@ import PdfViewer from "@/components/pdf-viewer";
 import ChatBar from "@/components/chat-bar";
 import Rating from "@/components/rating";
 import EditRulebook from "@/components/edit-rulebook";
+import AddRulebook from "@/components/add-rulebook";
 import EditGame from "@/components/edit-game";
 import BelowFold from "@/components/below-fold";
 import Expansions from "@/components/expansions";
@@ -100,7 +101,11 @@ export default async function GamePage({
       <section className="mt-10">
         <div className="flex items-center justify-between">
           <h2 className="font-serif text-2xl text-espresso dark:text-parchment">The rulebook</h2>
-          <EditRulebook slug={slug} />
+          {pdfSrc ? (
+            <EditRulebook slug={slug} />
+          ) : (
+            <AddRulebook slug={slug} title={game.title} />
+          )}
         </div>
         {pdfSrc ? (
           <PdfViewer
@@ -112,8 +117,9 @@ export default async function GamePage({
           />
         ) : (
           <div className="mt-4 rounded-xl border border-dashed border-latte bg-parchment/40 p-6 text-center text-cocoa dark:border-cocoa/50 dark:bg-nightcard dark:text-latte">
-            No rulebook PDF yet — drop one into content/games/{slug}/ and run{" "}
-            <code className="rounded bg-latte/40 px-1 py-0.5 text-xs dark:bg-cocoa/30">npm run build:search</code>.
+            No rulebook yet. Use the{" "}
+            <span className="font-medium">Add a rulebook</span> button above to get one started —
+            the description, key concepts, and setup checklist will brew themselves once it&apos;s shelved.
           </div>
         )}
       </section>
