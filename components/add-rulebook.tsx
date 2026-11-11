@@ -22,6 +22,7 @@ interface Props {
 export default function AddRulebook({ slug, title, label = "Add a rulebook" }: Props) {
   const [open, setOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [digesting, setDigesting] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fetchLoading, setFetchLoading] = useState(false);
@@ -51,6 +52,7 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
       setAttachedPdf(null);
       setDragOver(false);
       setUploading(false);
+      setDigesting(false);
       setDone(false);
     }
   }, [open]);
@@ -147,6 +149,29 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
   }
 
   // Upload the PDF to the server.
+  // Poll the server for digest completion.
+  function pollDigest() {
+    setDigesting(true);
+    let interval: ReturnType<typeof setInterval> | null = null;
+    const check = async () => {
+      try {
+        const res = await fetch(`/api/games/${slug}/rulebook`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.done) {
+          if (interval) clearInterval(interval);
+          setDigesting(false);
+          setDone(true);
+        }
+      } catch {
+        /* keep polling */
+      }
+    };
+    // Immediate first check, then every 3s.
+    void check();
+    interval = setInterval(() => void check(), 3000);
+  }
+
   async function handleUpload(file: File) {
     setUploading(true);
     setError(null);
@@ -161,9 +186,9 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
         const d = await res.json().catch(() => ({}));
         throw new Error(d.error ?? `Upload failed (${res.status})`);
       }
-      // Server started re-digesting in the background. Show confirmation.
-      setDone(true);
+      // Server started re-digesting in the background. Poll for completion.
       setUploading(false);
+      pollDigest();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
       setUploading(false);
@@ -209,7 +234,7 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
     ? createPortal(
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-espresso/40 p-4 backdrop-blur-sm [transform:translateZ(0)]"
-          onClick={() => !uploading && !done && setOpen(false)}
+          onClick={() => !uploading && !digesting && !done && setOpen(false)}
         >
           <form
             ref={panelRef}
@@ -383,6 +408,19 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
               )}
             </div>
 
+            {/* ─── Digesting ─── */}
+            {digesting && (
+              <div className="mt-4 rounded-lg bg-sage/20 p-4 text-center dark:bg-cocoa/20">
+                <p className="text-sm text-espresso dark:text-parchment">
+                  ☕ Regenerating content from the new rulebook…
+                </p>
+                <p className="mt-1 text-xs text-cocoa/70 dark:text-latte/70">
+                  Description, key concepts, setup checklist, and complexity
+                  score are being rebuilt. This takes a minute or two.
+                </p>
+              </div>
+            )}
+
             {/* ─── Confirmation ─── */}
             {done && (
               <div className="mt-4 rounded-lg bg-sage/20 p-4 text-center dark:bg-cocoa/20">
@@ -408,7 +446,7 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
             )}
 
             {/* ─── Actions ─── */}
-            {!done && (
+            {!done && !digesting && (
               <div className="mt-5 flex justify-end gap-3">
                 <button
                   type="button"

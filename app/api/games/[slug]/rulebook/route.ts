@@ -155,12 +155,12 @@ async function reDigest(slug: string) {
       const catalog = await generateCatalog(meta.title ?? slug, buildContext(pages));
       if (catalog?.description) {
         meta.description = catalog.description;
-        // Update metadata fields (players, playtime, age, tags).
+        // Overwrite metadata fields with values from the new rulebook.
         const stats = extractStats(pages);
-        if (stats.players && !meta.players) meta.players = stats.players;
-        if (stats.playtimeMinutes && !meta.playtimeMinutes) meta.playtimeMinutes = stats.playtimeMinutes;
-        if (stats.ageRating && !meta.ageRating) meta.ageRating = stats.ageRating;
-        if (catalog.tags.length > 0 && (!meta.tags || meta.tags.length === 0)) {
+        if (stats.players) meta.players = stats.players;
+        if (stats.playtimeMinutes != null) meta.playtimeMinutes = stats.playtimeMinutes;
+        if (stats.ageRating) meta.ageRating = stats.ageRating;
+        if (catalog.tags.length > 0) {
           meta.tags = catalog.tags;
         }
       }

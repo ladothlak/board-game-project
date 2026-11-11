@@ -148,10 +148,14 @@ describe("AddRulebook", () => {
   });
 
   it("shows confirmation state after successful upload", async () => {
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({ status: "digesting" }),
+    const mockFetch = vi.fn().mockImplementation((url: string, opts?: any) => {
+      // POST (upload) returns digesting; GET (poll) returns done.
+      const isPost = opts?.method === "POST";
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => (isPost ? { status: "digesting" } : { done: true }),
+      });
     });
     vi.stubGlobal("fetch", mockFetch);
 
@@ -181,10 +185,13 @@ describe("AddRulebook", () => {
   });
 
   it("closes the modal when Alright is clicked", async () => {
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({ status: "digesting" }),
+    const mockFetch = vi.fn().mockImplementation((url: string, opts?: any) => {
+      const isPost = opts?.method === "POST";
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => (isPost ? { status: "digesting" } : { done: true }),
+      });
     });
     vi.stubGlobal("fetch", mockFetch);
 
