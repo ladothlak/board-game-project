@@ -30,11 +30,17 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
   // Cache-buster: bumped when the rulebook is replaced so the PDF re-fetches.
   const [version, setVersion] = useState(0);
 
-  // Re-load the PDF when the rulebook is updated via the modal.
+  // Re-load the PDF when the rulebook is updated via the modal. Reset
+  // ready/numPages so the brewing overlay shows during the re-fetch, and
+  // bump version so Phase 2 re-rasterizes even if page count is unchanged.
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail?.slug === slug) setVersion((v) => v + 1);
+      if (detail?.slug === slug) {
+        setReady(false);
+        setNumPages(0);
+        setVersion((v) => v + 1);
+      }
     };
     window.addEventListener("rulebook-updated", handler);
     return () => window.removeEventListener("rulebook-updated", handler);
@@ -145,7 +151,7 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
     return () => {
       cancelled = true;
     };
-  }, [numPages]);
+  }, [numPages, version]);
 
   // Phase 3: apply zoom as a CSS width change (no re-render). The canvases
   // are always 2× pixels wide; we just display them at the chosen fraction.

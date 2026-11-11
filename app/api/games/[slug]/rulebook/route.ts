@@ -8,6 +8,9 @@ import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 import { MAX_PDF_SIZE } from "@/lib/fetch-rulebook-utils";
 
+// Tracks in-flight reDigest calls per slug to prevent concurrent digests.
+const reDigestInFlight = new Set<string>();
+
 /**
  * Replace a game's rulebook PDF and re-digest all LLM-generated content.
  * Accepts a multipart form with a "pdf" file field.
@@ -99,10 +102,20 @@ export async function POST(
   logRequest({ ip, route: `/api/games/${slug}/rulebook`, method: "POST", status: 200, durationMs: Date.now() - start });
 
   // Fire-and-forget: re-digest everything in the background.
-  // The client polls for completion via GET on this same route.
-  reDigest(slug).catch((e) => {
-    console.error(`rulebook re-digest failed for ${slug}:`, e);
-  });
+  // Guard against concurrent digests for the same slug (rate limit allows
+  // 3/min, so a rapid second upload could race).
+  if (reDigestInFlight.has(slug)) {
+    return NextResponse.json(
+      { error: "A digest is already in progress for this game." },
+      { status: 409 }
+    );
+  }
+  reDigestInFlight.add(slug);
+  reDigest(slug)
+    .catch((e) => {
+      console.error(`rulebook re-digest failed for ${slug}:`, e);
+    })
+    .finally(() => reDigestInFlight.delete(slug));
 
   return NextResponse.json({
     status: "digesting",

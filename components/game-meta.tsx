@@ -35,9 +35,10 @@ export default function GameMeta({
   const [busy, setBusy] = useState<Field | null>(null);
 
   // Re-fetch metadata when the rulebook is updated via the modal.
-  // Fetches immediately (may get empty description if digest still in flight)
-  // and again after 30s to pick up the final values once reDigest completes.
+  // Fetches immediately, then repeats every 30s while the description is
+  // still empty (i.e., digest in flight). Stops once fresh data lands.
   useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail?.slug !== slug) return;
@@ -46,6 +47,12 @@ export default function GameMeta({
           .then((r) => (r.ok ? r.json() : null))
           .then((data) => {
             if (!data) return;
+            // While digesting, the server returns an empty description.
+            // Keep polling until it's populated.
+            if (data.description === "") {
+              timer = setTimeout(doFetch, 30_000);
+              return;
+            }
             if (data.players != null) setPlayersV(data.players);
             if (data.playtimeMinutes != null) setPlaytimeV(data.playtimeMinutes);
             if (data.ageRating != null) setAgeV(data.ageRating);
@@ -53,11 +60,12 @@ export default function GameMeta({
           })
           .catch(() => {});
       doFetch();
-      const id = setTimeout(doFetch, 30_000);
-      return () => clearTimeout(id);
     };
     window.addEventListener("rulebook-updated", handler);
-    return () => window.removeEventListener("rulebook-updated", handler);
+    return () => {
+      window.removeEventListener("rulebook-updated", handler);
+      if (timer) clearTimeout(timer);
+    };
   }, [slug]);
 
   function suggestionFor(field: Field) {
