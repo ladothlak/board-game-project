@@ -49,7 +49,7 @@ export default function FindGameModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm [transform:translateZ(0)]"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}

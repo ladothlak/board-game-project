@@ -56,7 +56,7 @@ export default function RemoveGame({ slug, title }: Props) {
 
       {open && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-espresso/40 p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-espresso/40 p-4 backdrop-blur-sm [transform:translateZ(0)]"
           onClick={() => !busy && setOpen(false)}
         >
           <div
