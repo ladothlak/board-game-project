@@ -364,6 +364,7 @@ export default function BulkAdd({ variant = "shelf", onDone }: { variant?: "shel
   return (
     <>
       <button
+        type="button"
         onClick={() => setOpen(true)}
         className={
           variant === "inline"

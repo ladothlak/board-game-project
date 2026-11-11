@@ -26,17 +26,23 @@ export default function ShelfSection({ games: initialGames }: { games: GameMeta[
       try {
         const res = await fetch("/api/games/meta");
         if (!res.ok) return;
-        const data = await res.json();
+        const data: { games: GameMeta[] } = await res.json();
         if (cancelled) return;
         setGames((prev) => {
-          // Only update if something actually changed.
-          const incoming: GameMeta[] = data.games;
-          const changed = prev.some((g, i) => {
-            const n = incoming.find((x) => x.slug === g.slug);
-            return !n || n.description !== g.description || n.complexity !== g.complexity;
+          // Merge per-slug so fields absent from the payload (e.g. rating)
+          // are preserved. Also pick up newly added games.
+          const incoming = new Map(data.games.map((n) => [n.slug, n]));
+          const merged = prev.map((g) => {
+            const n = incoming.get(g.slug);
+            return n ? { ...g, ...n } : g;
           });
-          const newSlugs = incoming.some((n) => !prev.some((g) => g.slug === n.slug));
-          return changed || newSlugs ? incoming : prev;
+          // Append any new slugs not already in the list.
+          for (const n of data.games) {
+            if (!prev.some((g) => g.slug === n.slug)) {
+              merged.push(n);
+            }
+          }
+          return merged;
         });
       } catch {
         // Network error — silently skip this poll.

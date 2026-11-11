@@ -78,7 +78,14 @@ export function startBulkJob(names: string[]): string {
   // time the first rulebook fetch finishes.
   processJob(job).catch((e) => {
     console.error(`bulk-add job ${id} crashed:`, e);
-    // Defensive: mark everything left as done so the client stops polling.
+    // Defensive: settle any items still in-flight so the client doesn't
+    // show spinners forever.
+    for (const r of job.results) {
+      if (r.status === "pending" || r.status === "working") {
+        r.status = "error";
+        r.error = "Job crashed";
+      }
+    }
     job.status = "done";
   });
 
