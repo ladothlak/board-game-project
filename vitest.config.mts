@@ -1,7 +1,9 @@
 import { defineConfig } from "vitest/config";
 import path from "path";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
+  plugins: [react()],
   resolve: {
     // Match the tsconfig "@/*" alias (→ project root).
     alias: [
@@ -10,6 +12,7 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["**/__tests__/**/*.test.ts"],
+    include: ["**/__tests__/**/*.test.{ts,tsx}"],
+    setupFiles: ["./vitest.setup.tsx"],
   },
 });
