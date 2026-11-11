@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { useDialog } from "@/hooks/use-dialog";
 
@@ -43,18 +44,8 @@ export default function RemoveGame({ slug, title }: Props) {
     }
   }
 
-  return (
-    <>
-      <button
-        onClick={() => setOpen(true)}
-        aria-label={`Remove ${title} from the shelf`}
-        title="Remove from shelf"
-        className="flex h-7 w-7 items-center justify-center rounded-full border border-latte/60 bg-cream/85 text-cocoa shadow-sm transition-colors hover:bg-terracotta hover:text-cream dark:border-cocoa/50 dark:bg-night/85 dark:text-latte dark:hover:bg-terracotta"
-      >
-        ×
-      </button>
-
-      {open && (
+  const modal = open
+    ? createPortal(
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-espresso/40 p-4 backdrop-blur-sm [transform:translateZ(0)]"
           onClick={() => !busy && setOpen(false)}
@@ -118,8 +109,22 @@ export default function RemoveGame({ slug, title }: Props) {
               </button>
             </div>
           </div>
-        </div>
-      )}
+        </div>,
+        document.body,
+      )
+    : null;
+
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        aria-label={`Remove ${title} from the shelf`}
+        title="Remove from shelf"
+        className="flex h-7 w-7 items-center justify-center rounded-full border border-latte/60 bg-cream/85 text-cocoa shadow-sm transition-colors hover:bg-terracotta hover:text-cream dark:border-cocoa/50 dark:bg-night/85 dark:text-latte dark:hover:bg-terracotta"
+      >
+        ×
+      </button>
+      {modal}
     </>
   );
 }
