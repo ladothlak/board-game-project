@@ -28,7 +28,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Too many bulk add jobs — wait a minute." }, { status: 429 });
   }
 
-  let body: { names?: unknown };
+  let body: { names?: unknown; includeNoRulebook?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -71,7 +71,9 @@ export async function POST(req: Request) {
     );
   }
 
-  const jobId = startBulkJob(names);
+  // When true, games without a rulebook are shelved anyway (no PDF).
+  const includeNoRulebook = body.includeNoRulebook === true;
+  const jobId = startBulkJob(names, includeNoRulebook);
 
   logRequest({ ip, route: "/api/games/bulk-add", method: "POST", status: 202, durationMs: Date.now() - start });
   return NextResponse.json({ jobId }, { status: 202 });

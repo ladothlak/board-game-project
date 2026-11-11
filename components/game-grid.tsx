@@ -43,9 +43,12 @@ export default function GameGrid({ games }: { games: GameMeta[] }) {
         </label>
       </div>
 
+      {/* Each card is isolated: the .fade-up transform creates a stacking
+          context, so without isolation the card's z-10 remove button can
+          paint above modal backdrops. */}
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
         {visible.map((game) => (
-          <div key={game.slug} className="relative">
+          <div key={game.slug} className="relative isolate">
             <Link
               href={`/games/${game.slug}`}
               className="fade-up group block overflow-hidden rounded-2xl border border-latte/60 bg-parchment/50 shadow-sm transition-shadow hover:shadow-md dark:border-cocoa/40 dark:bg-nightcard"

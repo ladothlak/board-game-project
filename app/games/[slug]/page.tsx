@@ -10,6 +10,7 @@ import PdfViewer from "@/components/pdf-viewer";
 import ChatBar from "@/components/chat-bar";
 import Rating from "@/components/rating";
 import EditRulebook from "@/components/edit-rulebook";
+import EditGame from "@/components/edit-game";
 import BelowFold from "@/components/below-fold";
 import Expansions from "@/components/expansions";
 
@@ -59,9 +60,12 @@ export default async function GamePage({
 
       {/* 2) Description */}
       <section className="mt-8">
-        <h1 className="font-serif text-4xl tracking-wide text-espresso dark:text-parchment">
-          {game.title}
-        </h1>
+        <div className="flex items-start justify-between gap-4">
+          <h1 className="font-serif text-4xl tracking-wide text-espresso dark:text-parchment">
+            {game.title}
+          </h1>
+          <EditGame slug={slug} game={game} />
+        </div>
         <GameMeta
           slug={slug}
           players={game.players}
@@ -70,7 +74,15 @@ export default async function GamePage({
           tags={game.tags}
           suggestions={game.suggestions}
         />
-        <DescriptionBlock slug={slug} initialDescription={game.description} />
+        {game.pdf ? (
+          <DescriptionBlock slug={slug} initialDescription={game.description} />
+        ) : (
+          /* No rulebook yet — themed placeholder until it's shelved. */
+          <p className="mt-4 rounded-lg border border-dashed border-latte/40 p-4 text-sm italic text-cocoa/70 dark:border-cocoa/40 dark:text-latte/60">
+            The rulebook hasn&apos;t arrived yet. Once it&apos;s shelved, the
+            description, key concepts, and setup checklist will brew themselves.
+          </p>
+        )}
         <div className="mt-4">
           <Rating slug={slug} />
         </div>
