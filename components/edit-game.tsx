@@ -60,19 +60,19 @@ export default function EditGame({ slug, game }: Props) {
 
     // Only include fields the user actually modified, so we don't overwrite
     // metadata (e.g. LLM-generated description/tags) that may have changed
-    // since the modal opened.
+    // since the modal opened. Use null for cleared fields so JSON preserves them.
     const initial = initialRef.current!;
     const payload: Record<string, unknown> = {};
     if (title.trim() !== initial.title) payload.title = title.trim();
     if (description !== initial.description) payload.description = description;
     if (players.trim() !== initial.players) {
-      payload.players = players.trim() || undefined;
+      payload.players = players.trim() || null;
     }
     if (playtime !== initial.playtime) {
-      payload.playtimeMinutes = playtime === "" ? undefined : Number(playtime);
+      payload.playtimeMinutes = playtime === "" ? null : Number(playtime);
     }
     if (ageRating.trim() !== initial.ageRating) {
-      payload.ageRating = ageRating.trim() || undefined;
+      payload.ageRating = ageRating.trim() || null;
     }
     if (tags !== initial.tags) {
       payload.tags = tags

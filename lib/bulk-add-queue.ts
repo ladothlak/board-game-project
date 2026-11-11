@@ -17,7 +17,7 @@ import fs from "fs/promises";
 import path from "path";
 import { lookupGame, type LookupResult } from "@/lib/lookup";
 import { findRulebookPdf, downloadRulebookPdf } from "@/lib/fetch-rulebook-core";
-import { listGames, invalidateGamesCache } from "@/lib/games";
+import { listGames, listHiddenGames, invalidateGamesCache } from "@/lib/games";
 import { digestRulebook } from "@/lib/digest-rulebook.mjs";
 import { renderCoverFromPdf } from "@/lib/render-cover.mjs";
 
@@ -187,7 +187,10 @@ async function createGame(name: string, meta: LookupResult, pdfBytes: Buffer): P
   if (!baseSlug) {
     throw new Error("Title could not be converted to a slug");
   }
-  const taken = new Set((await listGames()).map((g) => g.slug));
+  const taken = new Set([
+    ...(await listGames()).map((g) => g.slug),
+    ...(await listHiddenGames()).map((g) => g.slug),
+  ]);
   let slug = baseSlug;
   let n = 2;
   while (taken.has(slug)) slug = `${baseSlug}-${n++}`;
@@ -238,7 +241,10 @@ async function createGameWithoutPdf(name: string, meta: LookupResult | null): Pr
   if (!baseSlug) {
     throw new Error("Title could not be converted to a slug");
   }
-  const taken = new Set((await listGames()).map((g) => g.slug));
+  const taken = new Set([
+    ...(await listGames()).map((g) => g.slug),
+    ...(await listHiddenGames()).map((g) => g.slug),
+  ]);
   let slug = baseSlug;
   let n = 2;
   while (taken.has(slug)) slug = `${baseSlug}-${n++}`;

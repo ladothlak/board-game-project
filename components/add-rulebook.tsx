@@ -21,7 +21,7 @@ interface Props {
 export default function AddRulebook({ slug, title }: Props) {
   const [open, setOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [digesting, setDigesting] = useState(false);
+  const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fetchLoading, setFetchLoading] = useState(false);
   const [fetchMsg, setFetchMsg] = useState<string | null>(null);
@@ -50,29 +50,9 @@ export default function AddRulebook({ slug, title }: Props) {
       setAttachedPdf(null);
       setDragOver(false);
       setUploading(false);
-      setDigesting(false);
+      setDone(false);
     }
   }, [open]);
-
-  // Poll the server for digest completion.
-  function pollDigest() {
-    setDigesting(true);
-    const interval = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/games/${slug}/rulebook`);
-        if (!res.ok) return;
-        const data = await res.json();
-        if (data.done) {
-          clearInterval(interval);
-          setDigesting(false);
-          setOpen(false);
-          router.refresh();
-        }
-      } catch {
-        /* keep polling */
-      }
-    }, 3000);
-  }
 
   // Intellisearch: use the game's existing name to find a rulebook.
   async function handleFetchRulebook() {
@@ -180,7 +160,9 @@ export default function AddRulebook({ slug, title }: Props) {
         const d = await res.json().catch(() => ({}));
         throw new Error(d.error ?? `Upload failed (${res.status})`);
       }
-      pollDigest();
+      // Server started re-digesting in the background. Show confirmation.
+      setDone(true);
+      setUploading(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
       setUploading(false);
@@ -191,7 +173,6 @@ export default function AddRulebook({ slug, title }: Props) {
     const file = e.target.files?.[0];
     if (file) {
       setAttachedPdf(file);
-      handleUpload(file);
     }
   }
 
@@ -212,7 +193,6 @@ export default function AddRulebook({ slug, title }: Props) {
       dt.items.add(file);
       pdfRef.current.files = dt.files;
       setAttachedPdf(file);
-      handleUpload(file);
     }
   }, []);
 
@@ -228,7 +208,7 @@ export default function AddRulebook({ slug, title }: Props) {
     ? createPortal(
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-espresso/40 p-4 backdrop-blur-sm [transform:translateZ(0)]"
-          onClick={() => !uploading && !digesting && setOpen(false)}
+          onClick={() => !uploading && !done && setOpen(false)}
         >
           <form
             ref={panelRef}
@@ -390,31 +370,44 @@ export default function AddRulebook({ slug, title }: Props) {
             )}
 
             {/* ─── Status messages ─── */}
-            {fetchMsg && (
-              <p className="mt-3 text-xs text-cocoa dark:text-latte">{fetchMsg}</p>
-            )}
-            {uploading && (
-              <p className="mt-2 text-xs text-cocoa dark:text-latte">Uploading…</p>
-            )}
-            {error && (
-              <p className="mt-2 text-xs text-terracotta dark:text-amberglow">{error}</p>
-            )}
+            <div role="status">
+              {fetchMsg && (
+                <p className="mt-3 text-xs text-cocoa dark:text-latte">{fetchMsg}</p>
+              )}
+              {uploading && (
+                <p className="mt-2 text-xs text-cocoa dark:text-latte">Uploading…</p>
+              )}
+              {error && (
+                <p className="mt-2 text-xs text-terracotta dark:text-amberglow">{error}</p>
+              )}
+            </div>
 
-            {/* ─── Digest progress ─── */}
-            {digesting && (
-              <div className="mt-4 text-center">
+            {/* ─── Confirmation ─── */}
+            {done && (
+              <div className="mt-4 rounded-lg bg-sage/20 p-4 text-center dark:bg-cocoa/20">
                 <p className="text-sm text-espresso dark:text-parchment">
-                  ☕ Regenerating content from the rulebook…
+                  ☕ Rulebook shelved!
                 </p>
                 <p className="mt-1 text-xs text-cocoa/70 dark:text-latte/70">
-                  Description, search index, key concepts, setup checklist, and
-                  complexity are being built. This takes a minute or two.
+                  The description, key concepts, setup checklist, and complexity
+                  score are brewing in the background. You can head back to the
+                  shelf — everything will fill in as it&apos;s ready.
                 </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpen(false);
+                    router.refresh();
+                  }}
+                  className="mt-3 rounded-lg bg-sage/70 px-5 py-2 text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
+                >
+                  Alright
+                </button>
               </div>
             )}
 
             {/* ─── Actions ─── */}
-            {!digesting && (
+            {!done && (
               <div className="mt-5 flex justify-end gap-3">
                 <button
                   type="button"

@@ -94,19 +94,23 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ slug: string 
   }
 
   // Only update the fields that are present in the body.
+  // null means "clear this field" (e.g. user emptied an input).
   if (typeof body.title === "string" && body.title.trim()) meta.title = body.title.trim();
   if (typeof body.description === "string") meta.description = body.description;
-  if (typeof body.players === "string") meta.players = body.players.trim() || undefined;
-  if (
+  if (body.players === null) delete meta.players;
+  else if (typeof body.players === "string") meta.players = body.players.trim() || undefined;
+  if (body.playtimeMinutes === null) delete meta.playtimeMinutes;
+  else if (
     typeof body.playtimeMinutes === "number" &&
     Number.isFinite(body.playtimeMinutes) &&
     body.playtimeMinutes >= 0
   ) {
     meta.playtimeMinutes = body.playtimeMinutes;
   }
-  if (typeof body.ageRating === "string") meta.ageRating = body.ageRating.trim() || undefined;
+  if (body.ageRating === null) delete meta.ageRating;
+  else if (typeof body.ageRating === "string") meta.ageRating = body.ageRating.trim() || undefined;
   if (Array.isArray(body.tags)) {
-    meta.tags = body.tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean);
+    meta.tags = body.tags.filter((t) => typeof t === "string" || typeof t === "number").map((t) => String(t).trim().toLowerCase()).filter(Boolean);
   }
   if (typeof body.image === "string") meta.image = body.image.trim() || undefined;
 
