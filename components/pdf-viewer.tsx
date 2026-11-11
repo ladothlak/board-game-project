@@ -13,7 +13,7 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
   const stageRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasesRef = useRef<Map<number, HTMLCanvasElement>>(new Map());
-  const docsRef = useRef<{ numPages: number; getPage: (n: number) => Promise<any> }[]>([]);
+  const docsRef = useRef<{ numPages: number; getPage: (n: number) => Promise<any>; destroy: () => Promise<void> }[]>([]);
   const pendingJumpRef = useRef<number | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [ready, setReady] = useState(false);
@@ -74,6 +74,10 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
     })();
     return () => {
       cancelled = true;
+      // Destroy pdfjs documents to release worker-side state and prevent
+      // slow accumulation over repeated rulebook replacements.
+      for (const d of docsRef.current) void d.destroy();
+      docsRef.current = [];
     };
   }, [effectiveSrc, expansionSrcs]);
 
@@ -125,6 +129,7 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
               batch[j] = canvas;
             })
           );
+          if (cancelled) return;
 
           // Append in order.
           for (let j = 0; j < batch.length; j++) {
@@ -150,8 +155,8 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
     })();
     return () => {
       cancelled = true;
-      // Clear the container immediately so any in-flight batch from the
-      // previous run can't append stale canvases after the new run starts.
+      // Ensure the container is empty before the new run starts. The
+      // `cancelled` check after each batch await prevents late appends.
       const c = containerRef.current;
       if (c) c.innerHTML = "";
       canvasesRef.current.clear();
