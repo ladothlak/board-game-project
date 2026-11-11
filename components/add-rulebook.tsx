@@ -38,10 +38,10 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const router = useRouter();
 
-  // The modal must not close while an upload or digest is in flight —
-  // closing would discard the polling state and the "Alright" confirmation.
+  // The modal can be closed at any time — the server-side digest continues
+  // regardless, and DescriptionBlock's periodic poll picks up the result.
   const { panelRef } = useDialog<HTMLFormElement>(open, () => {
-    if (!uploading && !digesting && !done) setOpen(false);
+    if (!uploading) setOpen(false);
   });
 
   // Clear the digest poller if the component unmounts mid-digest (e.g. the
@@ -252,7 +252,7 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
     ? createPortal(
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-espresso/40 p-4 backdrop-blur-sm [transform:translateZ(0)]"
-          onClick={() => !uploading && !digesting && !done && setOpen(false)}
+          onClick={() => !uploading && !done && setOpen(false)}
         >
           <form
             ref={panelRef}
@@ -465,7 +465,7 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
             )}
 
             {/* ─── Actions ─── */}
-            {!done && !digesting && (
+            {!done && (
               <div className="mt-5 flex justify-end gap-3">
                 <button
                   type="button"

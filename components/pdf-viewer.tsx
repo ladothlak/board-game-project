@@ -27,6 +27,20 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
   const [toc, setToc] = useState<{ page: number; label: string }[]>([]);
   const [showToc, setShowToc] = useState(false);
   const [pdfTheme, setPdfTheme] = useState<"normal" | "sepia" | "dark">("normal");
+  // Cache-buster: bumped when the rulebook is replaced so the PDF re-fetches.
+  const [version, setVersion] = useState(0);
+
+  // Re-load the PDF when the rulebook is updated via the modal.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.slug === slug) setVersion((v) => v + 1);
+    };
+    window.addEventListener("rulebook-updated", handler);
+    return () => window.removeEventListener("rulebook-updated", handler);
+  }, [slug]);
+
+  const effectiveSrc = version > 0 ? `${src}${src.includes("?") ? "&" : "?"}t=${version}` : src;
 
   // Phase 1: load all documents (base + expansions).
   useEffect(() => {
@@ -39,7 +53,7 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
           import.meta.url
         ).toString();
 
-        const allSrcs = [src, ...expansionSrcs];
+        const allSrcs = [effectiveSrc, ...expansionSrcs];
         const docs = await Promise.all(
           allSrcs.map((s) => pdfjs.getDocument(s).promise)
         );
@@ -55,7 +69,7 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
     return () => {
       cancelled = true;
     };
-  }, [src, expansionSrcs]);
+  }, [effectiveSrc, expansionSrcs]);
 
   // Phase 2: render every page into the (always-mounted) container. Runs once
   // per document set — pages are rasterized at a fixed high resolution (2×) so

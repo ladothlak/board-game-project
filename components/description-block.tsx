@@ -31,11 +31,13 @@ export default function DescriptionBlock({
       const res = await fetch(`/api/games/${slug}`);
       if (!res.ok) return;
       const data = await res.json();
-      if (data.description) setDescription(data.description);
+      if (data.description && data.description !== description) {
+        setDescription(data.description);
+      }
     } catch {
       /* ignore */
     }
-  }, [slug]);
+  }, [slug, description]);
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -45,6 +47,13 @@ export default function DescriptionBlock({
     window.addEventListener("rulebook-updated", handler);
     return () => window.removeEventListener("rulebook-updated", handler);
   }, [slug, refetch]);
+
+  // Safety-net: periodic poll in case the modal was closed mid-digest
+  // and the rulebook-updated event never fired.
+  useEffect(() => {
+    const id = setInterval(() => void refetch(), 10_000);
+    return () => clearInterval(id);
+  }, [refetch]);
 
   useEffect(() => {
     if (description) return;
