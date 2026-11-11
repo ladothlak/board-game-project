@@ -13,10 +13,16 @@ export async function GET(_req: Request, ctx: { params: Promise<{ slug: string }
   if (!game) {
     return NextResponse.json({ error: "Unknown game" }, { status: 404 });
   }
+  // Include the LLM-generated metadata fields so client components can
+  // refresh them in place after a rulebook re-digest (rulebook-updated).
   return NextResponse.json({
     slug,
     title: game.title,
     description: game.description ?? "",
+    players: game.players ?? null,
+    playtimeMinutes: game.playtimeMinutes ?? null,
+    ageRating: game.ageRating ?? null,
+    tags: game.tags ?? [],
   });
 }
 

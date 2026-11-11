@@ -35,8 +35,24 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
   const [attachedPdf, setAttachedPdf] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const pdfRef = useRef<HTMLInputElement>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const router = useRouter();
-  const { panelRef } = useDialog<HTMLFormElement>(open, () => setOpen(false));
+
+  // The modal must not close while an upload or digest is in flight —
+  // closing would discard the polling state and the "Alright" confirmation.
+  const { panelRef } = useDialog<HTMLFormElement>(open, () => {
+    if (!uploading && !digesting && !done) setOpen(false);
+  });
+
+  // Clear the digest poller if the component unmounts mid-digest (e.g. the
+  // user navigates away), so no timer is leaked and no state updates fire
+  // after unmount.
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    };
+  }, []);
 
   // Clear state when modal closes.
   useEffect(() => {
@@ -149,17 +165,19 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
   }
 
   // Upload the PDF to the server.
-  // Poll the server for digest completion.
+  // Poll the server for digest completion. The server writes the .digesting
+  // marker before the POST responds, so every poll here sees done:false
+  // until the re-digest truly finishes.
   function pollDigest() {
     setDigesting(true);
-    let interval: ReturnType<typeof setInterval> | null = null;
     const check = async () => {
       try {
         const res = await fetch(`/api/games/${slug}/rulebook`);
         if (!res.ok) return;
         const data = await res.json();
         if (data.done) {
-          if (interval) clearInterval(interval);
+          if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+          pollTimerRef.current = null;
           setDigesting(false);
           setDone(true);
         }
@@ -169,7 +187,7 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
     };
     // Immediate first check, then every 3s.
     void check();
-    interval = setInterval(() => void check(), 3000);
+    pollTimerRef.current = setInterval(() => void check(), 3000);
   }
 
   async function handleUpload(file: File) {

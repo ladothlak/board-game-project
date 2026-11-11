@@ -30,6 +30,7 @@ export default function GameMeta({
   const [playersV, setPlayersV] = useState(players);
   const [playtimeV, setPlaytimeV] = useState(playtimeMinutes);
   const [ageV, setAgeV] = useState(ageRating);
+  const [tagsV, setTagsV] = useState<string[]>(tags ?? []);
   const [suggestions, setSuggestions] = useState<Suggestion[]>(initialSuggestions ?? []);
   const [busy, setBusy] = useState<Field | null>(null);
 
@@ -45,6 +46,7 @@ export default function GameMeta({
           if (data.players != null) setPlayersV(data.players);
           if (data.playtimeMinutes != null) setPlaytimeV(data.playtimeMinutes);
           if (data.ageRating != null) setAgeV(data.ageRating);
+          if (Array.isArray(data.tags)) setTagsV(data.tags);
         })
         .catch(() => {});
     };
@@ -148,7 +150,7 @@ export default function GameMeta({
           )}
         </span>
       )}
-      {(tags ?? []).map((tag) => pill(tag, "sage"))}
+      {tagsV.map((tag) => pill(tag, "sage"))}
     </div>
   );
 }

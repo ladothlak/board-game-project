@@ -184,6 +184,45 @@ describe("AddRulebook", () => {
     expect(screen.getByRole("button", { name: /alright/i })).toBeInTheDocument();
   });
 
+  it("stays open when Escape is pressed while digesting", async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string, opts?: any) => {
+      // POST (upload) returns digesting; GET (poll) keeps returning done:false.
+      const isPost = opts?.method === "POST";
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => (isPost ? { status: "digesting" } : { done: false }),
+      });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const user = userEvent.setup();
+    render(<AddRulebook slug="test-game" title="Test Game" />);
+    await user.click(triggerBtn());
+
+    const select = screen.getByRole("combobox", { name: /rulebook source/i });
+    await user.selectOptions(select, "manual");
+    const fileInput = (await waitFor(() => {
+      const el = document.querySelector('input[type="file"]');
+      if (!el) throw new Error("file input not in DOM yet");
+      return el;
+    })) as HTMLInputElement;
+
+    const file = new File(["%PDF-1.4 fake"], "test.pdf", { type: "application/pdf" });
+    await user.upload(fileInput, file);
+    await user.click(submitBtn());
+
+    // The digest-in-progress state is showing.
+    await waitFor(() => {
+      expect(screen.getByText(/regenerating content/i)).toBeInTheDocument();
+    });
+
+    // Escape must not dismiss the modal mid-digest — doing so would drop the
+    // polling state and the "Alright" confirmation would never be seen.
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
   it("closes the modal when Alright is clicked", async () => {
     const mockFetch = vi.fn().mockImplementation((url: string, opts?: any) => {
       const isPost = opts?.method === "POST";

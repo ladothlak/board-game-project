@@ -92,6 +92,11 @@ export async function POST(
 
   invalidateGamesCache();
 
+  // Write the digesting marker BEFORE responding, so the client's first poll
+  // can never race ahead of it and see done:true while the digest is still
+  // in flight. reDigest only ever removes the marker (in its finally block).
+  await fs.writeFile(path.join(dir, ".digesting"), new Date().toISOString());
+
   logRequest({ ip, route: `/api/games/${slug}/rulebook`, method: "POST", status: 200, durationMs: Date.now() - start });
 
   // Fire-and-forget: re-digest everything in the background.
@@ -137,13 +142,13 @@ export async function GET(
 async function reDigest(slug: string) {
   const dir = path.join(process.cwd(), "content", "games", slug);
   const metaPath = path.join(dir, "meta.json");
-  const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
-  const pdfPath = path.join(dir, meta.pdf ?? "rules.pdf");
 
-  // Mark as digesting.
-  await fs.writeFile(path.join(dir, ".digesting"), new Date().toISOString());
-
+  // The .digesting marker is written by the POST handler before it responds,
+  // so this function only ever removes it (in the finally block below).
   try {
+    const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
+    const pdfPath = path.join(dir, meta.pdf ?? "rules.pdf");
+
     // 1. Extract text from the PDF (child process).
     const pages = await extractPdf(pdfPath);
 
