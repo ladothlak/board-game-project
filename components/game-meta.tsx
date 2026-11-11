@@ -39,7 +39,7 @@ export default function GameMeta({
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail?.slug !== slug) return;
-      fetch(`/api/games/${slug}`)
+      fetch(`/api/games/${slug}`, { cache: "no-store" })
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
           if (!data) return;

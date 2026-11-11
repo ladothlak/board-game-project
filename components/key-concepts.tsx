@@ -24,7 +24,7 @@ export default function KeyConcepts({ slug }: { slug: string }) {
   const loadConcepts = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch(`/api/games/${slug}/concepts`)
+    fetch(`/api/games/${slug}/concepts`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error("Server error"))))
       .then(setData)
       .catch(() => setError("Couldn't load concepts right now."))

@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 
 const POLL_INTERVAL = 5000;
 const MAX_POLLS = 12; // ~60 seconds
+const SAFETY_NET_INTERVAL = 10_000;
 
 /**
  * Shows the game description. If it hasn't been generated yet (the async
@@ -13,7 +14,8 @@ const MAX_POLLS = 12; // ~60 seconds
  *
  * Also listens for the `rulebook-updated` event (dispatched by AddRulebook
  * after a re-digest completes) to pick up a freshly generated description
- * without a page refresh.
+ * without a page refresh. A safety-net periodic poll covers the case where
+ * the modal was closed mid-digest and the event never fired.
  */
 export default function DescriptionBlock({
   slug,
@@ -24,21 +26,28 @@ export default function DescriptionBlock({
 }) {
   const [description, setDescription] = useState(initialDescription ?? "");
   const [gaveUp, setGaveUp] = useState(false);
+  // Ref mirrors the current description so the refetch callback can compare
+  // without depending on `description` (which would change its identity on
+  // every update and reset the safety-net interval).
+  const descRef = useRef(description);
+  descRef.current = description;
 
-  // Re-fetch when the rulebook is updated via the modal.
+  // Stable refetch: only depends on slug. Uses the ref for comparison so
+  // the callback identity never changes after mount.
   const refetch = useCallback(async () => {
     try {
-      const res = await fetch(`/api/games/${slug}`);
+      const res = await fetch(`/api/games/${slug}`, { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json();
-      if (data.description && data.description !== description) {
+      if (data.description && data.description !== descRef.current) {
         setDescription(data.description);
       }
     } catch {
       /* ignore */
     }
-  }, [slug, description]);
+  }, [slug]);
 
+  // Re-fetch when the rulebook is updated via the modal.
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
@@ -51,10 +60,12 @@ export default function DescriptionBlock({
   // Safety-net: periodic poll in case the modal was closed mid-digest
   // and the rulebook-updated event never fired.
   useEffect(() => {
-    const id = setInterval(() => void refetch(), 10_000);
+    const id = setInterval(() => void refetch(), SAFETY_NET_INTERVAL);
     return () => clearInterval(id);
   }, [refetch]);
 
+  // Initial-load polling: if the description is empty on mount, poll until it
+  // arrives (the async digest may still be running).
   useEffect(() => {
     if (description) return;
     let polls = 0;
@@ -69,7 +80,7 @@ export default function DescriptionBlock({
         return;
       }
       try {
-        const res = await fetch(`/api/games/${slug}`);
+        const res = await fetch(`/api/games/${slug}`, { cache: "no-store" });
         if (!res.ok) return;
         const data = await res.json();
         if (data.description) setDescription(data.description);

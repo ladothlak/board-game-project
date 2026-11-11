@@ -15,15 +15,20 @@ export async function GET(_req: Request, ctx: { params: Promise<{ slug: string }
   }
   // Include the LLM-generated metadata fields so client components can
   // refresh them in place after a rulebook re-digest (rulebook-updated).
-  return NextResponse.json({
-    slug,
-    title: game.title,
-    description: game.description ?? "",
-    players: game.players ?? null,
-    playtimeMinutes: game.playtimeMinutes ?? null,
-    ageRating: game.ageRating ?? null,
-    tags: game.tags ?? [],
-  });
+  // no-store prevents the browser from caching this response, ensuring
+  // client polls always see fresh data.
+  return NextResponse.json(
+    {
+      slug,
+      title: game.title,
+      description: game.description ?? "",
+      players: game.players ?? null,
+      playtimeMinutes: game.playtimeMinutes ?? null,
+      ageRating: game.ageRating ?? null,
+      tags: game.tags ?? [],
+    },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 /**

@@ -49,7 +49,7 @@ export default function SetupChecklist({ slug }: { slug: string }) {
     setSteps(null);
     setDone(new Set());
     setError(null);
-    fetch(`/api/games/${slug}/checklist`)
+    fetch(`/api/games/${slug}/checklist`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error("Server error"))))
       .then((data) => {
         if (cancelled) return;
@@ -76,7 +76,7 @@ export default function SetupChecklist({ slug }: { slug: string }) {
       setSteps(null);
       setDone(new Set());
       setError(null);
-      fetch(`/api/games/${slug}/checklist`)
+      fetch(`/api/games/${slug}/checklist`, { cache: "no-store" })
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error("Server error"))))
         .then((data) => {
           setSteps(data.steps ?? null);

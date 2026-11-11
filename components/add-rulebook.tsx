@@ -473,7 +473,7 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
                   disabled={uploading}
                   className="rounded-lg px-4 py-2 text-sm text-cocoa hover:bg-parchment/60 dark:text-latte dark:hover:bg-cocoa/20"
                 >
-                  Cancel
+                  {digesting ? "Alright" : "Cancel"}
                 </button>
                 <button
                   type="submit"
