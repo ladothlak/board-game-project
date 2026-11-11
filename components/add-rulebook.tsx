@@ -33,11 +33,23 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
   const [attachedPdf, setAttachedPdf] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const pdfRef = useRef<HTMLInputElement>(null);
+  const alrightRef = useRef<HTMLButtonElement>(null);
+
+  // Move focus to the "Alright" button when it appears (upload completed).
+  useEffect(() => {
+    if (uploaded) alrightRef.current?.focus();
+  }, [uploaded]);
 
   // The modal can be closed at any time — the server-side digest continues
-  // regardless, and DescriptionBlock's periodic poll picks up the result.
+  // regardless. If the upload already completed, dispatch rulebook-updated
+  // so the PDF viewer and other components refresh.
   const { panelRef } = useDialog<HTMLFormElement>(open, () => {
-    if (!uploading) setOpen(false);
+    if (!uploading) {
+      if (uploaded) {
+        window.dispatchEvent(new CustomEvent("rulebook-updated", { detail: { slug } }));
+      }
+      setOpen(false);
+    }
   });
 
   // Clear state when modal closes.
@@ -413,11 +425,8 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
               <div className="mt-5 flex justify-center">
                 <button
                   type="button"
-                  onClick={() => {
-                    setOpen(false);
-                    // Notify other components that the rulebook content was regenerated.
-                    window.dispatchEvent(new CustomEvent("rulebook-updated", { detail: { slug } }));
-                  }}
+                  onClick={() => setOpen(false)}
+                  ref={alrightRef}
                   className="rounded-lg bg-sage/70 px-5 py-2 text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
                 >
                   Alright

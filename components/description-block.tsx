@@ -61,27 +61,35 @@ export default function DescriptionBlock({
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail?.slug === slug) setDescription("");
+      if (detail?.slug === slug) {
+        setDescription("");
+        setGaveUp(false);
+      }
     };
     window.addEventListener("rulebook-replaced", handler);
     return () => window.removeEventListener("rulebook-replaced", handler);
   }, [slug]);
 
-  // Safety-net: periodic poll in case the modal was closed mid-digest
-  // and the rulebook-updated event never fired.
+  // Safety-net: periodic poll while the description is empty (brewing state).
+  // Stops automatically once the description lands. Restarts when
+  // rulebook-replaced resets description to "".
   useEffect(() => {
+    if (description) return;
     const id = setInterval(() => void refetch(), SAFETY_NET_INTERVAL);
     return () => clearInterval(id);
-  }, [refetch]);
+  }, [description, refetch]);
 
   // Initial-load polling: if the description is empty on mount, poll until it
   // arrives (the async digest may still be running).
+  const initialMountRef = useRef(true);
   useEffect(() => {
     if (description) return;
     let polls = 0;
-    // Nudge the server in case it restarted mid-generation. No-op if a
-    // digest is already running or the description exists.
-    fetch(`/api/games/${slug}`, { method: "POST" }).catch(() => {});
+    // Nudge the server only on initial mount (not on rulebook-replaced reset).
+    if (initialMountRef.current) {
+      fetch(`/api/games/${slug}`, { method: "POST" }).catch(() => {});
+      initialMountRef.current = false;
+    }
     const id = setInterval(async () => {
       polls++;
       if (polls > MAX_POLLS) {

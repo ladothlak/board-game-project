@@ -35,20 +35,26 @@ export default function GameMeta({
   const [busy, setBusy] = useState<Field | null>(null);
 
   // Re-fetch metadata when the rulebook is updated via the modal.
+  // Fetches immediately (may get empty description if digest still in flight)
+  // and again after 30s to pick up the final values once reDigest completes.
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail?.slug !== slug) return;
-      fetch(`/api/games/${slug}`, { cache: "no-store" })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((data) => {
-          if (!data) return;
-          if (data.players != null) setPlayersV(data.players);
-          if (data.playtimeMinutes != null) setPlaytimeV(data.playtimeMinutes);
-          if (data.ageRating != null) setAgeV(data.ageRating);
-          if (Array.isArray(data.tags)) setTagsV(data.tags);
-        })
-        .catch(() => {});
+      const doFetch = () =>
+        fetch(`/api/games/${slug}`, { cache: "no-store" })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data) => {
+            if (!data) return;
+            if (data.players != null) setPlayersV(data.players);
+            if (data.playtimeMinutes != null) setPlaytimeV(data.playtimeMinutes);
+            if (data.ageRating != null) setAgeV(data.ageRating);
+            if (Array.isArray(data.tags)) setTagsV(data.tags);
+          })
+          .catch(() => {});
+      doFetch();
+      const id = setTimeout(doFetch, 30_000);
+      return () => clearTimeout(id);
     };
     window.addEventListener("rulebook-updated", handler);
     return () => window.removeEventListener("rulebook-updated", handler);
