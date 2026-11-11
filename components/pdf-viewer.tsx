@@ -150,6 +150,11 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
     })();
     return () => {
       cancelled = true;
+      // Clear the container immediately so any in-flight batch from the
+      // previous run can't append stale canvases after the new run starts.
+      const c = containerRef.current;
+      if (c) c.innerHTML = "";
+      canvasesRef.current.clear();
     };
   }, [numPages, version]);
 
