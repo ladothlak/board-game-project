@@ -114,6 +114,7 @@ export async function POST(
 /**
  * GET: report the digest status so the client can poll.
  * Returns { done: true } once all content has been regenerated.
+ * If the marker is stale (>30 min), assumes the server crashed and reports done.
  */
 export async function GET(
   _req: Request,
@@ -123,15 +124,20 @@ export async function GET(
 
   // Check if the digest is still in flight.
   const statusPath = path.join(process.cwd(), "content", "games", slug, ".digesting");
-  let digesting = false;
+  let st: import("fs").Stats | null = null;
   try {
-    await fs.access(statusPath);
-    digesting = true;
+    st = await fs.stat(statusPath);
   } catch {
     /* no marker — digest complete */
   }
-  if (digesting) {
-    return NextResponse.json({ done: false });
+  if (st) {
+    // Stale marker (>30 min) means the server crashed mid-digest.
+    const age = Date.now() - st.mtimeMs;
+    if (age < 30 * 60_000) {
+      return NextResponse.json({ done: false });
+    }
+    // Clean up the stale marker.
+    try { await fs.unlink(statusPath); } catch { /* already gone */ }
   }
 
   return NextResponse.json({ done: true });

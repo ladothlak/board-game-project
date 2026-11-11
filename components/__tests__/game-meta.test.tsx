@@ -6,6 +6,7 @@ import GameMeta from "../game-meta";
 describe("GameMeta", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("renders initial metadata pills from props", () => {
