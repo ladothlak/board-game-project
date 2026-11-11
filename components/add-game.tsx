@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useDialog } from "@/hooks/use-dialog";
+import BulkAdd from "@/components/bulk-add";
 
 interface LookupResult {
   title: string;
@@ -19,6 +20,11 @@ interface LookupResult {
   source?: string;
 }
 
+/** Simple slugification (mirrors app/api/games/route.ts). */
+function slugify(title: string): string {
+  return title.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
 export default function AddGame() {
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -27,6 +33,7 @@ export default function AddGame() {
   const [lookupResult, setLookupResult] = useState<LookupResult | null>(null);
   const [fetchLoading, setFetchLoading] = useState(false);
   const [fetchMsg, setFetchMsg] = useState<string | null>(null);
+  const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
   const [pendingPdf, setPendingPdf] = useState<{ url: string; blob: Blob } | null>(null);
   const [dismissedUrls, setDismissedUrls] = useState<string[]>([]);
   const [urlInput, setUrlInput] = useState("");
@@ -39,6 +46,26 @@ export default function AddGame() {
   const router = useRouter();
   const { panelRef } = useDialog<HTMLFormElement>(open, () => setOpen(false));
 
+  // Clear all modal state when the dialog closes (success, cancel, escape, backdrop).
+  useEffect(() => {
+    if (!open) {
+      setError(null);
+      setLookupLoading(false);
+      setLookupResult(null);
+      setFetchLoading(false);
+      setFetchMsg(null);
+      setDuplicateWarning(null);
+      setPendingPdf(null);
+      setDismissedUrls([]);
+      setUrlInput("");
+      setSourceMethod("intellisearch");
+      setLanguage("en");
+      setAttachedPdf(null);
+      setDragOver(false);
+      setSaving(false);
+    }
+  }, [open]);
+
   // BGG lookup with fuzzy search + publisher hint
   async function handleLookup() {
     const titleInput = (document.querySelector('input[name="title"]') as HTMLInputElement)?.value?.trim();
@@ -47,6 +74,7 @@ export default function AddGame() {
     setLookupLoading(true);
     setError(null);
     setDismissedUrls([]);
+    setDuplicateWarning(null);
     try {
       const res = await fetch("/api/games/lookup", {
         method: "POST",
@@ -59,6 +87,20 @@ export default function AddGame() {
       }
       const data: LookupResult = await res.json();
       setLookupResult(data);
+
+      // Non-blocking check: is this game already on the shelf?
+      try {
+        const visRes = await fetch("/api/games/visible");
+        if (visRes.ok) {
+          const visData: { slugs?: string[] } = await visRes.json();
+          const slug = slugify(data.title);
+          if (slug && (visData.slugs ?? []).includes(slug)) {
+            setDuplicateWarning("This game is already on the shelf — you can still add it as a duplicate.");
+          }
+        }
+      } catch {
+        /* Non-critical: skip the duplicate check */
+      }
 
       // Auto-fill the form fields.
       const form = document.querySelector("form") as HTMLFormElement;
@@ -206,13 +248,15 @@ export default function AddGame() {
 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (!attachedPdf) {
+      setError("Please attach a rulebook PDF before adding the game.");
+      return;
+    }
     const formEl = e.currentTarget;
     const data = new FormData(formEl);
     // Ensure the PDF from state is included (covers intellisearch/link acceptance).
-    if (attachedPdf) {
-      data.delete("pdf");
-      data.append("pdf", attachedPdf);
-    }
+    data.delete("pdf");
+    data.append("pdf", attachedPdf);
     setSaving(true);
     setError(null);
     try {
@@ -252,6 +296,7 @@ export default function AddGame() {
             role="dialog"
             aria-modal="true"
             aria-label="Add a game"
+            noValidate
             onSubmit={submit}
             onClick={(e) => e.stopPropagation()}
             onDragOver={onDragOver}
@@ -322,7 +367,6 @@ export default function AddGame() {
                       name="pdf"
                       type="file"
                       accept="application/pdf"
-                      required
                       className="hidden"
                       onChange={(e) => {
                         const f = e.target.files?.[0];
@@ -476,6 +520,12 @@ export default function AddGame() {
                   </div>
                 )}
 
+                {duplicateWarning && (
+                  <p className="mt-1 text-xs text-terracotta/90 dark:text-amberglow/90">
+                    ⚠️ {duplicateWarning}
+                  </p>
+                )}
+
                 {lookupResult ? (
                   <button
                     type="button"
@@ -578,26 +628,29 @@ export default function AddGame() {
               <p className="mt-3 text-sm text-terracotta dark:text-amberglow">{error}</p>
             )}
 
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                disabled={saving}
-                className="rounded-lg px-4 py-2 text-sm text-cocoa hover:bg-parchment/60 dark:text-latte dark:hover:bg-cocoa/20"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={saving}
-                className="rounded-lg bg-terracotta px-4 py-2 text-sm text-cream transition-colors hover:bg-terracotta/90 disabled:opacity-50 dark:text-espresso"
-              >
-                {saving
-                  ? attachedPdf
-                    ? `Uploading ${(attachedPdf.size / 1024 / 1024).toFixed(1)} MB…`
-                    : "Adding…"
-                  : "Add to shelf"}
-              </button>
+            <div className="mt-5 flex items-center justify-between gap-2">
+              <BulkAdd variant="inline" onDone={() => setOpen(false)} />
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setOpen(false)}
+                  disabled={saving}
+                  className="rounded-lg px-4 py-2 text-sm text-cocoa hover:bg-parchment/60 dark:text-latte dark:hover:bg-cocoa/20"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="rounded-lg bg-terracotta px-4 py-2 text-sm text-cream transition-colors hover:bg-terracotta/90 disabled:opacity-50 dark:text-espresso"
+                >
+                  {saving
+                    ? attachedPdf
+                      ? `Uploading ${(attachedPdf.size / 1024 / 1024).toFixed(1)} MB…`
+                      : "Adding…"
+                    : "Add to shelf"}
+                </button>
+              </div>
             </div>
           </form>
         </div>

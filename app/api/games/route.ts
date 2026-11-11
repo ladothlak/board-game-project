@@ -33,10 +33,12 @@ export async function POST(req: Request) {
 
   const cover = form.get("cover") as File | null;
   const pdf = form.get("pdf") as File | null;
-  if (!pdf || pdf.size === 0) {
+  const hasPdf = !!pdf && pdf.size > 0;
+
+  if (!hasPdf) {
     return NextResponse.json({ error: "A rulebook PDF is required" }, { status: 400 });
   }
-  if (pdf.size > MAX_FILE_SIZE) {
+  if (pdf!.size > MAX_FILE_SIZE) {
     return NextResponse.json({ error: "Rulebook PDF is too large (100 MB max)" }, { status: 413 });
   }
   if (cover && cover.size > MAX_FILE_SIZE) {
@@ -55,11 +57,12 @@ export async function POST(req: Request) {
   const dir = path.join(process.cwd(), "content", "games", slug);
   await fs.mkdir(dir, { recursive: true });
 
-  // Save the rulebook; save a cover if one was provided, or render one from page 1.
-  const pdfPath = path.join(dir, "rules.pdf");
-  await fs.writeFile(pdfPath, Buffer.from(await pdf.arrayBuffer()));
-
+  // Save the rulebook; save a cover if one was provided, or render one from
+  // page 1 of the PDF.
   let hasCover = !!cover && cover.size > 0;
+  const pdfPath = path.join(dir, "rules.pdf");
+  await fs.writeFile(pdfPath, Buffer.from(await pdf!.arrayBuffer()));
+
   if (hasCover && cover) {
     await fs.writeFile(path.join(dir, "cover.jpg"), Buffer.from(await cover.arrayBuffer()));
   } else {
@@ -90,10 +93,9 @@ export async function POST(req: Request) {
   invalidateGamesCache();
 
   // Fire-and-forget: digest the rulebook (search index + LLM description).
-  // The response returns immediately; the game is navigable right away.
   void digestRulebook(slug).catch((e) =>
     console.error(`digest ${slug} failed:`, e instanceof Error ? e.message : e)
   );
 
-  return NextResponse.json({ slug }, { status: 201 });
+  return NextResponse.json({ slug, hasPdf: true }, { status: 201 });
 }

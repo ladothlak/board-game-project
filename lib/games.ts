@@ -42,6 +42,10 @@ export interface GameMeta {
   expansions?: Expansion[];
   // LLM-generated "pairs well with" suggestions (complementary games).
   pairsWith?: PairSuggestion[];
+  // Shelf fingerprint ("slug:title" pairs, sorted, joined with "|") at the
+  // time pairsWith was generated. Used to detect when the shelf changed
+  // and the cached pairs need regenerating.
+  pairsFingerprint?: string;
 }
 
 const gamesDir = path.join(process.cwd(), "content", "games");

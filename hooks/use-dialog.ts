@@ -13,6 +13,10 @@ export function useDialog<T extends HTMLElement = HTMLDivElement>(
 ) {
   const panelRef = useRef<T>(null);
   const triggerRef = useRef<HTMLElement | null>(null);
+  // Store onClose in a ref so the effect below only re-runs when `open`
+  // changes, not on every render (which would steal focus from nested modals).
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   // Save the active element before the modal opens so we can restore focus.
   useEffect(() => {
@@ -27,7 +31,7 @@ export function useDialog<T extends HTMLElement = HTMLDivElement>(
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        onCloseRef.current();
       }
     };
     document.addEventListener("keydown", onKey);
@@ -46,7 +50,7 @@ export function useDialog<T extends HTMLElement = HTMLDivElement>(
       // Restore focus to the trigger.
       triggerRef.current?.focus();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   const setTrigger = useCallback(
     (el: HTMLElement | null) => {

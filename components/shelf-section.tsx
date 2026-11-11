@@ -1,21 +1,56 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { GameMeta } from "@/lib/games";
 import GameGrid from "@/components/game-grid";
 import FindGameModal from "@/components/find-game-modal";
 import GameNightPicker from "@/components/game-night-picker";
 import AddGame from "@/components/add-game";
 
+
 /**
- * Wraps the shelf header (three action buttons on one line) with the find-game
+ * Wraps the shelf header (four action buttons on one line) with the find-game
  * modal and the filtered grid. Owns the filter state so the trigger button
  * and the modal stay in sync.
  */
-export default function ShelfSection({ games }: { games: GameMeta[] }) {
+export default function ShelfSection({ games: initialGames }: { games: GameMeta[] }) {
+  const [games, setGames] = useState<GameMeta[]>(initialGames);
   const [findOpen, setFindOpen] = useState(false);
   const [activeTags, setActiveTags] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
+
+  // Poll for description updates from the digest pipeline.
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const res = await fetch("/api/games/meta");
+        if (!res.ok) return;
+        const data: { games: GameMeta[] } = await res.json();
+        if (cancelled) return;
+        setGames((prev) => {
+          // Merge per-slug so fields absent from the payload (e.g. rating)
+          // are preserved. Also pick up newly added games.
+          const incoming = new Map(data.games.map((n) => [n.slug, n]));
+          const merged = prev.map((g) => {
+            const n = incoming.get(g.slug);
+            return n ? { ...g, ...n } : g;
+          });
+          // Append any new slugs not already in the list.
+          for (const n of data.games) {
+            if (!prev.some((g) => g.slug === n.slug)) {
+              merged.push(n);
+            }
+          }
+          return merged;
+        });
+      } catch {
+        // Network error — silently skip this poll.
+      }
+    }
+    const id = setInterval(poll, 10_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
