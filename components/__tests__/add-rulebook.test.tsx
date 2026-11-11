@@ -18,7 +18,7 @@ vi.mock("@/hooks/use-dialog", () => ({
 const triggerBtn = () => screen.getByRole("button", { name: /📖/i });
 /** The submit button lives inside the dialog. */
 const submitBtn = () =>
-  within(screen.getByRole("dialog")).getByRole("button", { name: /add a rulebook/i });
+  within(screen.getByRole("dialog")).getByRole("button", { name: /upload/i });
 
 describe("AddRulebook", () => {
   beforeEach(() => {
@@ -147,15 +147,11 @@ describe("AddRulebook", () => {
     });
   });
 
-  it("shows confirmation state after successful upload", async () => {
-    const mockFetch = vi.fn().mockImplementation((url: string, opts?: any) => {
-      // POST (upload) returns digesting; GET (poll) returns done.
-      const isPost = opts?.method === "POST";
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: async () => (isPost ? { status: "digesting" } : { done: true }),
-      });
+  it("shows Alright button after successful upload", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: "digesting" }),
     });
     vi.stubGlobal("fetch", mockFetch);
 
@@ -175,26 +171,25 @@ describe("AddRulebook", () => {
     const file = new File(["%PDF-1.4 fake"], "test.pdf", { type: "application/pdf" });
     await user.upload(fileInput, file);
 
-    // Click the submit button to trigger upload
+    // Click the Upload button to trigger upload
     await user.click(submitBtn());
 
+    // After successful upload, the Alright button appears.
     await waitFor(() => {
-      expect(screen.getByText(/rulebook shelved/i)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /alright/i })).toBeInTheDocument();
     });
-    expect(screen.getByRole("button", { name: /alright/i })).toBeInTheDocument();
   });
 
-  it("stays open when Escape is pressed while digesting", async () => {
-    const mockFetch = vi.fn().mockImplementation((url: string, opts?: any) => {
-      // POST (upload) returns digesting; GET (poll) keeps returning done:false.
-      const isPost = opts?.method === "POST";
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: async () => (isPost ? { status: "digesting" } : { done: false }),
-      });
+  it("dispatches rulebook-replaced event on successful upload", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: "digesting" }),
     });
     vi.stubGlobal("fetch", mockFetch);
+
+    const handler = vi.fn();
+    window.addEventListener("rulebook-replaced", handler);
 
     const user = userEvent.setup();
     render(<AddRulebook slug="test-game" title="Test Game" />);
@@ -212,25 +207,19 @@ describe("AddRulebook", () => {
     await user.upload(fileInput, file);
     await user.click(submitBtn());
 
-    // The digest-in-progress state is showing.
+    // After upload, the event should have been dispatched.
     await waitFor(() => {
-      expect(screen.getByText(/regenerating content/i)).toBeInTheDocument();
+      expect(handler).toHaveBeenCalledWith(expect.any(Event));
     });
 
-    // Escape must not dismiss the modal mid-digest — doing so would drop the
-    // polling state and the "Alright" confirmation would never be seen.
-    await user.keyboard("{Escape}");
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    window.removeEventListener("rulebook-replaced", handler);
   });
 
   it("closes the modal when Alright is clicked", async () => {
-    const mockFetch = vi.fn().mockImplementation((url: string, opts?: any) => {
-      const isPost = opts?.method === "POST";
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: async () => (isPost ? { status: "digesting" } : { done: true }),
-      });
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: "digesting" }),
     });
     vi.stubGlobal("fetch", mockFetch);
 

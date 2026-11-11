@@ -177,27 +177,9 @@ async function reDigest(slug: string) {
       }
     }
 
-    // 4. Regenerate key concepts.
+    // 4. Update complexity score.
     const apiKey = process.env.UNSLOTH_API_KEY;
     if (apiKey) {
-      try {
-        const { generateConcepts, writeConcepts } = await import("@/lib/generate-concepts");
-        const concepts = await generateConcepts(slug, apiKey);
-        writeConcepts(slug, concepts);
-      } catch (e) {
-        console.error(`reDigest: concepts failed for ${slug}:`, e);
-      }
-
-      // 5. Regenerate setup checklist.
-      try {
-        const { generateChecklist, writeChecklist } = await import("@/lib/generate-checklist");
-        const checklist = await generateChecklist(slug);
-        if (checklist) writeChecklist(slug, checklist);
-      } catch (e) {
-        console.error(`reDigest: checklist failed for ${slug}:`, e);
-      }
-
-      // 6. Update complexity score.
       try {
         const BASE_URL = process.env.UNSLOTH_BASE_URL ?? "http://localhost:8888/v1";
         const MODEL = process.env.UNSLOTH_MODEL ?? "ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF";

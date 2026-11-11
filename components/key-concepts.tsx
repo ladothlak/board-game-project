@@ -45,6 +45,21 @@ export default function KeyConcepts({ slug }: { slug: string }) {
     return () => window.removeEventListener("rulebook-updated", handler);
   }, [slug, loadConcepts]);
 
+  // Reset to not-loaded state when a new rulebook is uploaded (concepts are
+  // not auto-regenerated; the user can trigger generation manually).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.slug === slug) {
+        setData(null);
+        setLoading(false);
+        setError(null);
+      }
+    };
+    window.addEventListener("rulebook-replaced", handler);
+    return () => window.removeEventListener("rulebook-replaced", handler);
+  }, [slug]);
+
   const generate = useCallback(async () => {
     setLoading(true);
     setError(null);

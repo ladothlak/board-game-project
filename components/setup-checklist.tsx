@@ -91,6 +91,21 @@ export default function SetupChecklist({ slug }: { slug: string }) {
     return () => window.removeEventListener("rulebook-updated", handler);
   }, [slug]);
 
+  // Reset to not-loaded state when a new rulebook is uploaded (checklist is
+  // not auto-regenerated; the user can trigger generation manually).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.slug !== slug) return;
+      setLoaded(false);
+      setSteps(null);
+      setDone(new Set());
+      setError(null);
+    };
+    window.addEventListener("rulebook-replaced", handler);
+    return () => window.removeEventListener("rulebook-replaced", handler);
+  }, [slug]);
+
   async function generate(force: boolean) {
     setGenerating(true);
     setError(null);

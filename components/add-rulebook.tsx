@@ -2,7 +2,6 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
 import { useDialog } from "@/hooks/use-dialog";
 
 interface Props {
@@ -22,8 +21,7 @@ interface Props {
 export default function AddRulebook({ slug, title, label = "Add a rulebook" }: Props) {
   const [open, setOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [digesting, setDigesting] = useState(false);
-  const [done, setDone] = useState(false);
+  const [uploaded, setUploaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fetchLoading, setFetchLoading] = useState(false);
   const [fetchMsg, setFetchMsg] = useState<string | null>(null);
@@ -35,24 +33,12 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
   const [attachedPdf, setAttachedPdf] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const pdfRef = useRef<HTMLInputElement>(null);
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const router = useRouter();
 
   // The modal can be closed at any time — the server-side digest continues
   // regardless, and DescriptionBlock's periodic poll picks up the result.
   const { panelRef } = useDialog<HTMLFormElement>(open, () => {
     if (!uploading) setOpen(false);
   });
-
-  // Clear the digest poller if the component unmounts mid-digest (e.g. the
-  // user navigates away), so no timer is leaked and no state updates fire
-  // after unmount.
-  useEffect(() => {
-    return () => {
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-      pollTimerRef.current = null;
-    };
-  }, []);
 
   // Clear state when modal closes.
   useEffect(() => {
@@ -68,8 +54,7 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
       setAttachedPdf(null);
       setDragOver(false);
       setUploading(false);
-      setDigesting(false);
-      setDone(false);
+      setUploaded(false);
     }
   }, [open]);
 
@@ -164,32 +149,8 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
     setFetchMsg("Rulebook attached ✓");
   }
 
-  // Upload the PDF to the server.
-  // Poll the server for digest completion. The server writes the .digesting
-  // marker before the POST responds, so every poll here sees done:false
-  // until the re-digest truly finishes.
-  function pollDigest() {
-    setDigesting(true);
-    const check = async () => {
-      try {
-        const res = await fetch(`/api/games/${slug}/rulebook`);
-        if (!res.ok) return;
-        const data = await res.json();
-        if (data.done) {
-          if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-          pollTimerRef.current = null;
-          setDigesting(false);
-          setDone(true);
-        }
-      } catch {
-        /* keep polling */
-      }
-    };
-    // Immediate first check, then every 3s.
-    void check();
-    pollTimerRef.current = setInterval(() => void check(), 3000);
-  }
-
+  // Upload the PDF to the server. The server starts the re-digest in the
+  // background; the page picks up new content via polling/events.
   async function handleUpload(file: File) {
     setUploading(true);
     setError(null);
@@ -204,9 +165,11 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
         const d = await res.json().catch(() => ({}));
         throw new Error(d.error ?? `Upload failed (${res.status})`);
       }
-      // Server started re-digesting in the background. Poll for completion.
       setUploading(false);
-      pollDigest();
+      setUploaded(true);
+      // Notify the page that a new rulebook was uploaded so generated
+      // content resets to its "brewing" state.
+      window.dispatchEvent(new CustomEvent("rulebook-replaced", { detail: { slug } }));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
       setUploading(false);
@@ -252,7 +215,7 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
     ? createPortal(
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-espresso/40 p-4 backdrop-blur-sm [transform:translateZ(0)]"
-          onClick={() => !uploading && !done && setOpen(false)}
+          onClick={() => !uploading && setOpen(false)}
         >
           <form
             ref={panelRef}
@@ -426,30 +389,28 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
               )}
             </div>
 
-            {/* ─── Digesting ─── */}
-            {digesting && (
-              <div className="mt-4 rounded-lg bg-sage/20 p-4 text-center dark:bg-cocoa/20">
-                <p className="text-sm text-espresso dark:text-parchment">
-                  ☕ Regenerating content from the new rulebook…
-                </p>
-                <p className="mt-1 text-xs text-cocoa/70 dark:text-latte/70">
-                  Description, key concepts, setup checklist, and complexity
-                  score are being rebuilt. This takes a minute or two.
-                </p>
+            {/* ─── Actions ─── */}
+            {!uploaded && (
+              <div className="mt-5 flex justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setOpen(false)}
+                  disabled={uploading}
+                  className="rounded-lg px-4 py-2 text-sm text-cocoa hover:bg-parchment/60 dark:text-latte dark:hover:bg-cocoa/20"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!attachedPdf || uploading}
+                  className="rounded-lg bg-sage/70 px-4 py-2 text-sm text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
+                >
+                  {uploading ? "Working…" : "Upload"}
+                </button>
               </div>
             )}
-
-            {/* ─── Confirmation ─── */}
-            {done && (
-              <div className="mt-4 rounded-lg bg-sage/20 p-4 text-center dark:bg-cocoa/20">
-                <p className="text-sm text-espresso dark:text-parchment">
-                  ☕ Rulebook shelved!
-                </p>
-                <p className="mt-1 text-xs text-cocoa/70 dark:text-latte/70">
-                  The description, key concepts, setup checklist, and complexity
-                  score are brewing in the background. You can head back to the
-                  shelf — everything will fill in as it&apos;s ready.
-                </p>
+            {uploaded && (
+              <div className="mt-5 flex justify-center">
                 <button
                   type="button"
                   onClick={() => {
@@ -457,30 +418,9 @@ export default function AddRulebook({ slug, title, label = "Add a rulebook" }: P
                     // Notify other components that the rulebook content was regenerated.
                     window.dispatchEvent(new CustomEvent("rulebook-updated", { detail: { slug } }));
                   }}
-                  className="mt-3 rounded-lg bg-sage/70 px-5 py-2 text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
+                  className="rounded-lg bg-sage/70 px-5 py-2 text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
                 >
                   Alright
-                </button>
-              </div>
-            )}
-
-            {/* ─── Actions ─── */}
-            {!done && (
-              <div className="mt-5 flex justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => setOpen(false)}
-                  disabled={uploading}
-                  className="rounded-lg px-4 py-2 text-sm text-cocoa hover:bg-parchment/60 dark:text-latte dark:hover:bg-cocoa/20"
-                >
-                  {digesting ? "Alright" : "Cancel"}
-                </button>
-                <button
-                  type="submit"
-                  disabled={!attachedPdf || uploading}
-                  className="rounded-lg bg-sage/70 px-4 py-2 text-sm text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
-                >
-                  {uploading ? "Working…" : label}
                 </button>
               </div>
             )}

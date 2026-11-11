@@ -57,6 +57,16 @@ export default function DescriptionBlock({
     return () => window.removeEventListener("rulebook-updated", handler);
   }, [slug, refetch]);
 
+  // Reset to "brewing" state when a new rulebook is uploaded.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.slug === slug) setDescription("");
+    };
+    window.addEventListener("rulebook-replaced", handler);
+    return () => window.removeEventListener("rulebook-replaced", handler);
+  }, [slug]);
+
   // Safety-net: periodic poll in case the modal was closed mid-digest
   // and the rulebook-updated event never fired.
   useEffect(() => {
