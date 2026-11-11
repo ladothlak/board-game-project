@@ -8,6 +8,7 @@ import { useDialog } from "@/hooks/use-dialog";
 interface Props {
   slug: string;
   title: string;
+  label?: string;
 }
 
 /**
@@ -18,7 +19,7 @@ interface Props {
  * On success, uploads to /api/games/[slug]/rulebook which triggers the
  * re-digest pipeline (description, search index, concepts, checklist, complexity).
  */
-export default function AddRulebook({ slug, title }: Props) {
+export default function AddRulebook({ slug, title, label = "Add a rulebook" }: Props) {
   const [open, setOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [done, setDone] = useState(false);
@@ -214,7 +215,7 @@ export default function AddRulebook({ slug, title }: Props) {
             ref={panelRef}
             role="dialog"
             aria-modal="true"
-            aria-label={`Add a rulebook for ${title}`}
+            aria-label={`${label} for ${title}`}
             noValidate
             onSubmit={(e) => {
               e.preventDefault();
@@ -229,7 +230,7 @@ export default function AddRulebook({ slug, title }: Props) {
             }`}
           >
             <h2 className="font-serif text-2xl text-espresso dark:text-parchment">
-              Add a rulebook
+              {label}
             </h2>
             <p className="mt-1 text-sm text-cocoa dark:text-latte">
               Pick how to get the rulebook for {title}.
@@ -422,7 +423,7 @@ export default function AddRulebook({ slug, title }: Props) {
                   disabled={!attachedPdf || uploading}
                   className="rounded-lg bg-sage/70 px-4 py-2 text-sm text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
                 >
-                  {uploading ? "Working…" : "Add rulebook"}
+                  {uploading ? "Working…" : label}
                 </button>
               </div>
             )}
@@ -439,7 +440,7 @@ export default function AddRulebook({ slug, title }: Props) {
         onClick={() => setOpen(true)}
         className="rounded-lg border border-latte/50 bg-parchment/30 px-3 py-1.5 text-xs text-cocoa transition-colors hover:bg-parchment/60 dark:border-cocoa/40 dark:bg-night/40 dark:text-latte"
       >
-        📖 Add a rulebook
+        📖 {label}
       </button>
       {modal}
     </>

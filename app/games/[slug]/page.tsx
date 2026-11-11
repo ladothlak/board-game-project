@@ -9,7 +9,6 @@ import GameMeta from "@/components/game-meta";
 import PdfViewer from "@/components/pdf-viewer";
 import ChatBar from "@/components/chat-bar";
 import Rating from "@/components/rating";
-import EditRulebook from "@/components/edit-rulebook";
 import AddRulebook from "@/components/add-rulebook";
 import EditGame from "@/components/edit-game";
 import BelowFold from "@/components/below-fold";
@@ -101,11 +100,7 @@ export default async function GamePage({
       <section className="mt-10">
         <div className="flex items-center justify-between">
           <h2 className="font-serif text-2xl text-espresso dark:text-parchment">The rulebook</h2>
-          {pdfSrc ? (
-            <EditRulebook slug={slug} />
-          ) : (
-            <AddRulebook slug={slug} title={game.title} />
-          )}
+          <AddRulebook slug={slug} title={game.title} label={pdfSrc ? "Edit rulebook" : "Add a rulebook"} />
         </div>
         {pdfSrc ? (
           <PdfViewer

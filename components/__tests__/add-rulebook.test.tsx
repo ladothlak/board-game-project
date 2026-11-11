@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import AddRulebook from "../add-rulebook";
 
@@ -14,6 +14,12 @@ vi.mock("@/hooks/use-dialog", () => ({
   useDialog: (_open: boolean, _onClose: () => void) => ({ panelRef: null }),
 }));
 
+/** The trigger button has a 📖 emoji prefix, making it unique. */
+const triggerBtn = () => screen.getByRole("button", { name: /📖/i });
+/** The submit button lives inside the dialog. */
+const submitBtn = () =>
+  within(screen.getByRole("dialog")).getByRole("button", { name: /add a rulebook/i });
+
 describe("AddRulebook", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -21,7 +27,7 @@ describe("AddRulebook", () => {
 
   it("renders the trigger button with correct label", () => {
     render(<AddRulebook slug="test-game" title="Test Game" />);
-    expect(screen.getByRole("button", { name: /add a rulebook/i })).toBeInTheDocument();
+    expect(triggerBtn()).toBeInTheDocument();
   });
 
   it("does not render the modal when closed", () => {
@@ -32,14 +38,14 @@ describe("AddRulebook", () => {
   it("opens the modal when the button is clicked", async () => {
     const user = userEvent.setup();
     render(<AddRulebook slug="test-game" title="Test Game" />);
-    await user.click(screen.getByRole("button", { name: /add a rulebook/i }));
+    await user.click(triggerBtn());
     expect(screen.getByRole("dialog", { name: /add a rulebook for test game/i })).toBeInTheDocument();
   });
 
   it("shows the source method dropdown with three options", async () => {
     const user = userEvent.setup();
     render(<AddRulebook slug="test-game" title="Test Game" />);
-    await user.click(screen.getByRole("button", { name: /add a rulebook/i }));
+    await user.click(triggerBtn());
 
     const select = screen.getByRole("combobox", { name: /rulebook source/i });
     expect(select).toBeInTheDocument();
@@ -51,7 +57,7 @@ describe("AddRulebook", () => {
   it("shows the manual drag-drop zone when manual is selected", async () => {
     const user = userEvent.setup();
     render(<AddRulebook slug="test-game" title="Test Game" />);
-    await user.click(screen.getByRole("button", { name: /add a rulebook/i }));
+    await user.click(triggerBtn());
 
     const select = screen.getByRole("combobox", { name: /rulebook source/i });
     await user.selectOptions(select, "manual");
@@ -62,7 +68,7 @@ describe("AddRulebook", () => {
   it("shows the URL input when link method is selected", async () => {
     const user = userEvent.setup();
     render(<AddRulebook slug="test-game" title="Test Game" />);
-    await user.click(screen.getByRole("button", { name: /add a rulebook/i }));
+    await user.click(triggerBtn());
 
     const select = screen.getByRole("combobox", { name: /rulebook source/i });
     await user.selectOptions(select, "link");
@@ -74,7 +80,7 @@ describe("AddRulebook", () => {
   it("shows the intellisearch button when intellisearch method is selected", async () => {
     const user = userEvent.setup();
     render(<AddRulebook slug="test-game" title="Test Game" />);
-    await user.click(screen.getByRole("button", { name: /add a rulebook/i }));
+    await user.click(triggerBtn());
 
     const select = screen.getByRole("combobox", { name: /rulebook source/i });
     await user.selectOptions(select, "intellisearch");
@@ -85,25 +91,25 @@ describe("AddRulebook", () => {
   it("shows a Cancel button when not in done state", async () => {
     const user = userEvent.setup();
     render(<AddRulebook slug="test-game" title="Test Game" />);
-    await user.click(screen.getByRole("button", { name: /add a rulebook/i }));
+    await user.click(triggerBtn());
 
     expect(screen.getByRole("button", { name: /cancel/i })).toBeInTheDocument();
   });
 
-  it("shows an Add rulebook submit button (disabled without PDF)", async () => {
+  it("shows a submit button (disabled without PDF)", async () => {
     const user = userEvent.setup();
     render(<AddRulebook slug="test-game" title="Test Game" />);
-    await user.click(screen.getByRole("button", { name: /add a rulebook/i }));
+    await user.click(triggerBtn());
 
-    const submitBtn = screen.getByRole("button", { name: /add rulebook/i });
-    expect(submitBtn).toBeInTheDocument();
-    expect(submitBtn).toBeDisabled();
+    const btn = submitBtn();
+    expect(btn).toBeInTheDocument();
+    expect(btn).toBeDisabled();
   });
 
   it("closes the modal when Cancel is clicked", async () => {
     const user = userEvent.setup();
     render(<AddRulebook slug="test-game" title="Test Game" />);
-    await user.click(screen.getByRole("button", { name: /add a rulebook/i }));
+    await user.click(triggerBtn());
 
     await user.click(screen.getByRole("button", { name: /cancel/i }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -119,7 +125,7 @@ describe("AddRulebook", () => {
 
     const user = userEvent.setup();
     render(<AddRulebook slug="test-game" title="Test Game" />);
-    await user.click(screen.getByRole("button", { name: /add a rulebook/i }));
+    await user.click(triggerBtn());
 
     // Select manual and wait for the file input to appear (in portal)
     const select = screen.getByRole("combobox", { name: /rulebook source/i });
@@ -134,7 +140,7 @@ describe("AddRulebook", () => {
     await user.upload(fileInput, file);
 
     // Click the submit button to trigger upload
-    await user.click(screen.getByRole("button", { name: /add rulebook/i }));
+    await user.click(submitBtn());
 
     await waitFor(() => {
       expect(screen.getByText(/server exploded/i)).toBeInTheDocument();
@@ -151,7 +157,7 @@ describe("AddRulebook", () => {
 
     const user = userEvent.setup();
     render(<AddRulebook slug="test-game" title="Test Game" />);
-    await user.click(screen.getByRole("button", { name: /add a rulebook/i }));
+    await user.click(triggerBtn());
 
     // Select manual and wait for the file input to appear (in portal)
     const select = screen.getByRole("combobox", { name: /rulebook source/i });
@@ -166,7 +172,7 @@ describe("AddRulebook", () => {
     await user.upload(fileInput, file);
 
     // Click the submit button to trigger upload
-    await user.click(screen.getByRole("button", { name: /add rulebook/i }));
+    await user.click(submitBtn());
 
     await waitFor(() => {
       expect(screen.getByText(/rulebook shelved/i)).toBeInTheDocument();
@@ -184,7 +190,7 @@ describe("AddRulebook", () => {
 
     const user = userEvent.setup();
     render(<AddRulebook slug="test-game" title="Test Game" />);
-    await user.click(screen.getByRole("button", { name: /add a rulebook/i }));
+    await user.click(triggerBtn());
 
     const select = screen.getByRole("combobox", { name: /rulebook source/i });
     await user.selectOptions(select, "manual");
@@ -197,7 +203,7 @@ describe("AddRulebook", () => {
     const file = new File(["%PDF-1.4 fake"], "test.pdf", { type: "application/pdf" });
     await user.upload(fileInput, file);
 
-    await user.click(screen.getByRole("button", { name: /add rulebook/i }));
+    await user.click(submitBtn());
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /alright/i })).toBeInTheDocument();
