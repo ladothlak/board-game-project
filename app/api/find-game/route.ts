@@ -6,7 +6,7 @@ import { validateQuery } from "@/lib/guard";
 import { withQueue } from "@/lib/llm-queue";
 import { logRequest } from "@/lib/audit-log";
 
-const UNSLOTH_URL = process.env.UNSLOTH_URL ?? "http://localhost:8888/v1";
+const BASE_URL = process.env.UNSLOTH_BASE_URL ?? "http://localhost:8888/v1";
 const MODEL = process.env.UNSLOTH_MODEL ?? "ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF";
 
 /**
@@ -192,7 +192,7 @@ Include at most 3 recommendations, ordered best-first. Prefer to recommend at le
   try {
     // Single-flight queue + 45s timeout.
     const res = await withQueue(() =>
-      fetch(`${UNSLOTH_URL}/chat/completions`, {
+      fetch(`${BASE_URL}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

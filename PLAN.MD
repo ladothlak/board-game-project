@@ -1,3 +1,9 @@
+> **Historical document.** This was the original project plan and is kept for
+> context only. Several details have since changed (the `/search` page was
+> removed, OCR is fully implemented, and chat history is in-memory only). For
+> the current, authoritative description see [`README.md`](./README.md) and
+> [`DOCUMENTATION.md`](./DOCUMENTATION.md).
+
 # Board Game Catalog — Project Plan
 
 A personal website that catalogs the board games I own. It hosts the PDF rulebooks for every game, makes all rules text searchable, and gives each game its own subpage with a picture, a description, and an AI chat bar (powered by the Unsloth provider) for asking questions about that game's rules.

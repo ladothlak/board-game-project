@@ -4,6 +4,10 @@ A cozy, self-hosted catalog of board games. Every game gets its own page with a 
 
 Theme: relaxing, bookish coffee shop. ☕
 
+> **Full technical documentation:** see [`DOCUMENTATION.md`](./DOCUMENTATION.md)
+> for the architecture, complete feature inventory, data flows, and a list of
+> known gaps (unfinished features and dead code).
+
 ---
 
 ## Tech Stack
@@ -79,9 +83,13 @@ Each game subpage (`/games/<slug>`) includes:
 - **Expansions** — collapsible section for managing expansion rulebooks.
 - **Key Gameplay Concepts** — LLM-generated index of major rulebook elements with page links.
 - **Setup checklist** — collapsible, on-demand tick-off list with a setup timer.
+- **"Pairs well with"** — LLM-generated complementary games with reasons.
 - **"If you liked this, try…"** — uniform-sized suggestion cards.
 - **Game night log** — "🎲 We played this" button.
-- **Edit Rulebook** — replace the PDF and trigger a full LLM content refresh.
+- **Edit Game** — pencil icon opens a modal to edit title, description, players,
+  playtime, age, tags, and cover.
+- **Add / Edit Rulebook** — one modal for both; uploading replaces the PDF and
+  triggers a full LLM content refresh (no page reload).
 
 ### PDF Viewer
 
@@ -139,7 +147,7 @@ Additional chat features:
 
 The modal offers three rulebook source methods:
 
-1. **Intellisearch** (default) — type a name, click 🔍 to look up metadata from Wikipedia/BGG/web. The system auto-fills description, players, playtime, age, tags, and publisher. Then it attempts to find the rulebook PDF via a 4-strategy pipeline:
+1. **Intellisearch** (default) — type a name, click 🔍 to look up metadata (BGG → Wikipedia → officialgamerules.org → web search). The system auto-fills description, players, playtime, age, tags, and publisher. Then it attempts to find the rulebook PDF via a 4-strategy pipeline:
    - Known cache + static dictionary + publisher patterns
    - Publisher base URL probe (learned directory structure)
    - Targeted web search (domain-scoped if known)
@@ -155,6 +163,13 @@ All methods support:
 - Base-game validation (rejects expansion/sequel URLs when a base game is requested).
 - Cover auto-rendering from the rulebook's first page if no cover is provided.
 - Background LLM digest on submit (description, metadata fill, search index refresh).
+- An "already on the shelf" check, with an alert if the game exists.
+
+**Bulk Add** (button in the lower-left of the Add Game footer) ingests a BGG
+collection CSV or a pasted list of names, looks them up in bulk, and shelves the
+selected games via a server-side background job (13 s spacing between external
+fetches). A checkbox lets games be shelved even when no rulebook is found; the
+game page then shows "waiting for the rulebook" placeholders until one is added.
 
 ### Expansions
 
@@ -169,8 +184,8 @@ All methods support:
 
 | Feature | Implementation |
 |---------|---------------|
-| Rate limiting | In-memory per-IP: chat 10/min, find-game 5/min, lookup 5/min, fetch-rulebook 5/min, upload 3/min |
-| Input caps | 1000 chars (chat), 500 chars (finder) |
+| Rate limiting | In-memory: chat 10/min, find-game 5/min, lookup 5/min, fetch-rulebook 5/min, upload 3/min, bulk-lookup 5/min, bulk-add 3/min (all share one `"direct"` bucket — see DOCUMENTATION.md) |
+| Input caps | 1000 chars (chat), 500 chars (finder), 50×200 chars (bulk) |
 | Prompt-injection guard | `lib/guard.ts` — strips/flags injection patterns in user input |
 | Single-flight LLM queue | `lib/llm-queue.ts` — serializes concurrent LLM calls |
 | Request timeout | All LLM calls have a timeout |
@@ -216,23 +231,28 @@ First-visit welcome toast (localStorage-gated) introduces the site's features.
 app/
   layout.tsx              Root layout: fonts, header, HealthStrip, PWA, SW registration
   page.tsx                Home: hero, GameFinder, ShelfSection, GameNightPlanner, HiddenGames
-  search/page.tsx          /search?q=… text results and /search?tag=… tag lists
+  not-found.tsx           404 page
   games/[slug]/page.tsx    Game subpage: cover, description, FAQ, chat, PDF viewer, expansions
   api/
     chat/route.ts          Enhanced RAG → streaming SSE chat
     chat/prewarm/route.ts  Speculative RAG prewarm (60s TTL)
     find-game/route.ts     LLM game recommendations (two-stage pipeline)
     health/route.ts        Provider/index/shelf status probe
-    games/route.ts         POST — add a game (PDF upload)
-    games/lookup/route.ts  Game metadata lookup (Wikipedia → BGG → web search)
+    games/route.ts         GET list / POST add a game (PDF required)
+    games/meta/route.ts    Lightweight shelf list for live-updating cards
+    games/visible/route.ts Slugs currently on the shelf
+    games/lookup/route.ts  Game metadata lookup (Wikipedia → BGG → officialgamerules → web)
     games/fetch-rulebook/  4-strategy rulebook PDF fetch + persistent cache
-    games/[slug]/route.ts  GET single game
+    games/bulk-lookup/     Bulk metadata lookup
+    games/bulk-add/        Start + poll async bulk-add jobs
+    games/[slug]/route.ts  GET single game / PATCH edit metadata
     games/[slug]/file/     Serve cover/PDF on demand from content/games/<slug>/
+    games/[slug]/cover/    Upload/replace cover image
     games/[slug]/rulebook/ Replace rulebook + full re-digest pipeline
     games/[slug]/expansions/  POST/DELETE/PATCH expansion management
     games/[slug]/checklist/   Setup checklist (LLM-generated)
     games/[slug]/concepts/    Key gameplay concepts (LLM-generated)
-    games/[slug]/complexity/  LLM-estimated 1–5 complexity score
+    games/[slug]/pairs/       "Pairs well with" suggestions
     games/[slug]/rating/      1–5 star rating
     games/[slug]/bookmarks/   PDF page bookmarks
     games/[slug]/plays/       Play log
@@ -240,22 +260,24 @@ app/
     games/[slug]/toc/         Per-page TOC labels
     games/[slug]/suggestions/ Accept/dismiss metadata suggestions
     games/[slug]/remove/      Hide / restore / delete
-    games/visible/             Slugs currently on the shelf
     notes/route.ts           Personal notes (aggregate)
     plays/route.ts             Aggregate last-played per game
 
 components/               32 client components
   add-game.tsx            Add-game modal (Intellisearch/Link/Manual)
+  add-rulebook.tsx        Unified Add/Edit Rulebook modal (Upload → Alright)
+  bulk-add.tsx            Bulk add from CSV / pasted list
+  edit-game.tsx           Edit title/description/players/playtime/age/tags/cover
   expansions.tsx          Expansion management UI + modal
   pdf-viewer.tsx          PDF viewer (zoom, bookmarks, TOC, themes, jump)
   chat-bar.tsx            Streaming RAG chat with citations
   game-finder.tsx         LLM-based natural language game search
   find-game-modal.tsx     "Find a Game" modal
   game-night-picker.tsx   Player/time-based recommendation
+  game-night-planner.tsx  "What should we play tonight?" planner
   setup-checklist.tsx     Collapsible tick-off list + timer
   key-concepts.tsx        LLM-generated rulebook index
-  edit-rulebook.tsx       Replace PDF + re-digest trigger
-  search-bar.tsx          Client-side fuse.js search
+  pairs-with.tsx          "Pairs well with" suggestion cards
   game-grid.tsx           Game card grid with sort
   shelf-section.tsx       Three-button row (Find / Pick / Add)
   health-strip.tsx         AI status + game count + index date
@@ -272,17 +294,24 @@ components/               32 client components
   notes-section.tsx       Personal notes editor
   remove-game.tsx         Hide / delete modal
   hidden-games.tsx        "Off the shelf" section
-  game-meta.tsx           Players/playtime/age/tags display
+  game-meta.tsx           Players/playtime/age/tags display + suggestions
   description-block.tsx   LLM-generated description with "brewing" state
-  faq.tsx                 FAQ grid
-  theme-toggle.tsx        Dark mode toggle
+
+hooks/
+  use-dialog.ts           Accessible modal hook (Escape, focus, restoration)
 
 lib/                      Server-side utilities
   games.ts                GameMeta interface, listGames/getGame (30s TTL cache)
   rag.ts                  Enhanced RAG pipeline (11 stages)
   retrieve.ts             TF-IDF retrieval + sanitizeChunkText()
+  lookup.ts               Shared metadata lookup (BGG/Wikipedia/officialgamerules/web)
+  fetch-rulebook-core.ts  4-strategy rulebook PDF finder + downloader
+  fetch-rulebook-utils.ts URL/PDF/SSRF/language helpers + size caps
+  bulk-add-queue.ts       In-memory bulk-add job queue
   generate-checklist.ts   LLM setup checklist generation
   generate-concepts.ts    LLM key concepts generation
+  generate-pairs.ts       LLM "pairs well with" generation
+  digest-rulebook.mjs     Async digest: extract → index → description → metadata
   llm-queue.ts            Single-flight LLM call serialization
   rate-limit.ts           In-memory per-IP rate limiter
   guard.ts                Prompt-injection guard
