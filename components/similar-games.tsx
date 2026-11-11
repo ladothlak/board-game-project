@@ -37,25 +37,25 @@ export default function SimilarGames({
       <h2 className="font-serif text-lg text-espresso dark:text-parchment">
         If you liked this, try…
       </h2>
-      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
         {similar.map(({ game, shared }) => (
           <Link
             key={game.slug}
             href={`/games/${game.slug}`}
-            className="flex min-h-[7rem] items-center gap-3 rounded-xl border border-latte/60 bg-parchment/40 p-3 shadow-sm transition-colors hover:border-terracotta/50 dark:border-cocoa/40 dark:bg-nightcard/60 dark:hover:border-amberglow/50"
+            className="flex min-h-[7.5rem] items-center gap-3 rounded-xl border border-latte/60 bg-parchment/40 p-3 shadow-sm transition-colors hover:border-terracotta/50 dark:border-cocoa/40 dark:bg-nightcard/60 dark:hover:border-amberglow/50"
           >
             {game.image && (
               <img
                 src={`/api/games/${game.slug}/file?name=${encodeURIComponent(game.image)}`}
                 alt={game.title}
-                className="h-14 w-14 rounded-lg object-cover"
+                className="h-24 w-24 shrink-0 rounded-lg object-cover"
               />
             )}
             <div>
               <span className="font-serif text-base text-espresso dark:text-parchment">
                 {game.title}
               </span>
-              <p className="mt-0.5 text-xs text-cocoa/70 dark:text-latte/60">
+              <p className="mt-1 text-sm text-cocoa/70 dark:text-latte/60">
                 Shared: {shared.join(", ")}
               </p>
             </div>

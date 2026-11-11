@@ -1,11 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { getGame, invalidateGamesCache } from "@/lib/games";
+import { getGame, invalidateGamesCache, listGames, type GameMeta } from "@/lib/games";
 import { generatePairs } from "@/lib/generate-pairs";
 import { logRequest } from "@/lib/audit-log";
 
 const start = Date.now();
+
+/**
+ * Fingerprint of the current shelf (same format as find-game): sorted
+ * "slug:title" pairs joined with "|". If any game is added or removed,
+ * this changes and cached pairs are regenerated on the next visit.
+ */
+function computeFingerprint(games: GameMeta[]): string {
+  return games.map((g) => `${g.slug}:${g.title}`).sort().join("|");
+}
 
 export async function GET(
   _req: NextRequest,
@@ -18,13 +27,16 @@ export async function GET(
     return NextResponse.json({ error: "Game not found" }, { status: 404 });
   }
 
-  // Return cached pairs if they exist.
-  if (game.pairsWith && game.pairsWith.length > 0) {
+  // Return cached pairs if they exist AND the shelf hasn't changed since
+  // they were generated. A stale fingerprint (or a missing one from older
+  // data) means games were added/removed, so we regenerate below.
+  const currentFingerprint = computeFingerprint(await listGames());
+  if (game.pairsWith && game.pairsWith.length > 0 && game.pairsFingerprint === currentFingerprint) {
     logRequest({ ip: "", route: `/api/games/${slug}/pairs`, method: "GET", status: 200, durationMs: Date.now() - start });
     return NextResponse.json({ pairs: game.pairsWith });
   }
 
-  // No cached pairs — generate them now.
+  // No cached pairs (or the shelf changed) — generate them now.
   const apiKey = process.env.UNSLOTH_API_KEY ?? "";
   if (!apiKey) {
     logRequest({ ip: "", route: `/api/games/${slug}/pairs`, method: "GET", status: 503, durationMs: Date.now() - start });
@@ -34,10 +46,12 @@ export async function GET(
   try {
     const pairs = await generatePairs(slug, apiKey);
     if (pairs.length > 0) {
-      // Persist to meta.json.
+      // Persist to meta.json along with the shelf fingerprint so we can
+      // tell when the shelf changes and needs a re-generation.
       const metaPath = path.join(process.cwd(), "content", "games", slug, "meta.json");
       const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
       meta.pairsWith = pairs;
+      meta.pairsFingerprint = currentFingerprint;
       await fs.writeFile(metaPath, JSON.stringify(meta, null, 2));
       invalidateGamesCache();
     }

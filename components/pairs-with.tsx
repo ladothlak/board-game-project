@@ -86,20 +86,20 @@ export default function PairsWith({ slug, games }: { slug: string; games: GameMe
             <Link
               key={p.slug}
               href={`/games/${p.slug}`}
-              className="flex min-h-[5rem] items-center gap-3 rounded-xl border border-latte/60 bg-parchment/40 p-3 shadow-sm transition-colors hover:border-terracotta/50 dark:border-cocoa/40 dark:bg-nightcard/60 dark:hover:border-amberglow/50"
+              className="flex min-h-[7.5rem] items-center gap-3 rounded-xl border border-latte/60 bg-parchment/40 p-3 shadow-sm transition-colors hover:border-terracotta/50 dark:border-cocoa/40 dark:bg-nightcard/60 dark:hover:border-amberglow/50"
             >
               {game?.image && (
                 <img
                   src={`/api/games/${p.slug}/file?name=${encodeURIComponent(game.image)}`}
                   alt={game.title}
-                  className="h-12 w-12 rounded-lg object-cover"
+                  className="h-24 w-24 shrink-0 rounded-lg object-cover"
                 />
               )}
               <div>
                 <span className="font-serif text-base text-espresso dark:text-parchment">
                   {game?.title ?? p.slug.replace(/-/g, " ")}
                 </span>
-                <p className="mt-0.5 text-xs text-cocoa/70 dark:text-latte/60">
+                <p className="mt-1 text-sm text-cocoa/70 dark:text-latte/60">
                   {p.reason}
                 </p>
               </div>
