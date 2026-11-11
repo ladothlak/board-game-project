@@ -88,6 +88,7 @@ export async function POST(
   const metaPath = path.join(dir, "meta.json");
   const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
   meta.pdf = pdfName;
+  await fs.writeFile(metaPath, JSON.stringify(meta, null, 2));
 
   invalidateGamesCache();
 
@@ -209,8 +210,16 @@ async function reDigest(slug: string) {
       }
     }
 
-    // Persist updated meta.
-    await fs.writeFile(metaPath, JSON.stringify(meta, null, 2));
+    // Persist updated meta. Re-read from disk to avoid clobbering concurrent
+    // changes (e.g. a PATCH from the edit modal that landed during digest).
+    const freshMeta = JSON.parse(await fs.readFile(metaPath, "utf8"));
+    if (meta.description) freshMeta.description = meta.description;
+    if (meta.players) freshMeta.players = meta.players;
+    if (meta.playtimeMinutes != null) freshMeta.playtimeMinutes = meta.playtimeMinutes;
+    if (meta.ageRating) freshMeta.ageRating = meta.ageRating;
+    if (meta.tags?.length) freshMeta.tags = meta.tags;
+    if (meta.complexity != null) freshMeta.complexity = meta.complexity;
+    await fs.writeFile(metaPath, JSON.stringify(freshMeta, null, 2));
     invalidateGamesCache();
   } finally {
     // Clear the digesting marker.

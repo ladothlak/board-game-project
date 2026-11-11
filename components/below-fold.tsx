@@ -27,17 +27,34 @@ export default function BelowFold({
   game: GameMeta;
   games: GameMeta[];
 }) {
+  // The LLM-generated sections (concepts, checklist, pairs, similar) all
+  // depend on a rulebook. Without one, show a single themed placeholder
+  // instead — personal notes and the play log still work fine.
+  const hasRulebook = Boolean(game.pdf);
+
   return (
     <>
-      {/* Key gameplay concepts — LLM-generated index of major rulebook elements. */}
-      <section className="mt-6">
-        <KeyConcepts slug={slug} />
-      </section>
+      {hasRulebook ? (
+        <>
+          {/* Key gameplay concepts — LLM-generated index of major rulebook elements. */}
+          <section className="mt-6">
+            <KeyConcepts slug={slug} />
+          </section>
 
-      {/* Setup checklist — tick-off list generated from the rulebook. */}
-      <section className="mt-6">
-        <SetupChecklist slug={slug} />
-      </section>
+          {/* Setup checklist — tick-off list generated from the rulebook. */}
+          <section className="mt-6">
+            <SetupChecklist slug={slug} />
+          </section>
+        </>
+      ) : (
+        <section className="mt-6">
+          <p className="rounded-lg border border-dashed border-latte/40 p-4 text-sm italic text-cocoa/70 dark:border-cocoa/40 dark:text-latte/60">
+            Waiting for the rulebook. The &apos;Pairs well with&apos;,
+            &apos;If you liked this, try…&apos;, Key Concepts, and Setup
+            Checklist sections will populate once the rulebook is added.
+          </p>
+        </section>
+      )}
 
       {/* Personal notes */}
       <section className="mt-10">
@@ -49,11 +66,15 @@ export default function BelowFold({
         <PlayLog slug={slug} />
       </section>
 
-      {/* Pairs well with — LLM-generated complementary game suggestions. */}
-      <PairsWith slug={slug} games={games} />
+      {hasRulebook && (
+        <>
+          {/* Pairs well with — LLM-generated complementary game suggestions. */}
+          <PairsWith slug={slug} games={games} />
 
-      {/* Similar games — tag-based recommendations. */}
-      <SimilarGames current={game} games={games} />
+          {/* Similar games — tag-based recommendations. */}
+          <SimilarGames current={game} games={games} />
+        </>
+      )}
     </>
   );
 }

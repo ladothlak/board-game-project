@@ -17,7 +17,7 @@ import fs from "fs/promises";
 import path from "path";
 import { lookupGame, type LookupResult } from "@/lib/lookup";
 import { findRulebookPdf, downloadRulebookPdf } from "@/lib/fetch-rulebook-core";
-import { listGames, invalidateGamesCache } from "@/lib/games";
+import { listGames, listHiddenGames, invalidateGamesCache } from "@/lib/games";
 import { digestRulebook } from "@/lib/digest-rulebook.mjs";
 import { renderCoverFromPdf } from "@/lib/render-cover.mjs";
 
@@ -34,6 +34,8 @@ export interface BulkJob {
   status: "processing" | "done";
   total: number;
   results: BulkGameResult[];
+  // When true, games without a rulebook are shelved anyway (no PDF).
+  includeNoRulebook: boolean;
 }
 
 const jobs = new Map<string, BulkJob>();
@@ -60,8 +62,11 @@ function pruneOldJobs(): void {
 /**
  * Create a bulk-add job and kick off its background processing. Returns the
  * job ID immediately — the work continues after this resolves.
+ *
+ * When `includeNoRulebook` is true, games whose rulebook can't be found are
+ * still shelved (without a PDF) instead of being skipped.
  */
-export function startBulkJob(names: string[]): string {
+export function startBulkJob(names: string[], includeNoRulebook = false): string {
   pruneOldJobs();
 
   const id = randomUUID();
@@ -70,6 +75,7 @@ export function startBulkJob(names: string[]): string {
     status: "processing",
     total: names.length,
     results: names.map((name) => ({ name, status: "pending" as const })),
+    includeNoRulebook,
   };
   jobs.set(id, job);
   jobStartTimes.set(id, Date.now());
@@ -109,8 +115,14 @@ async function processJob(job: BulkJob): Promise<void> {
       // 1. Look up metadata (BGG → Wikipedia → web).
       const meta = await lookupGame(result.name);
       if (!meta) {
-        result.status = "no_rulebook";
-        result.error = "Not found";
+        if (job.includeNoRulebook) {
+          // Shelf it with just the name — no metadata, no rulebook.
+          await createGameWithoutPdf(result.name, null);
+          result.status = "added";
+        } else {
+          result.status = "no_rulebook";
+          result.error = "Not found";
+        }
         continue;
       }
 
@@ -130,7 +142,13 @@ async function processJob(job: BulkJob): Promise<void> {
         isExpansion: false,
       });
       if (!found) {
-        result.status = "no_rulebook";
+        if (job.includeNoRulebook) {
+          // Shelf it anyway, without a rulebook — no PDF to digest.
+          await createGameWithoutPdf(result.name, meta);
+          result.status = "added";
+        } else {
+          result.status = "no_rulebook";
+        }
         continue;
       }
 
@@ -169,7 +187,10 @@ async function createGame(name: string, meta: LookupResult, pdfBytes: Buffer): P
   if (!baseSlug) {
     throw new Error("Title could not be converted to a slug");
   }
-  const taken = new Set((await listGames()).map((g) => g.slug));
+  const taken = new Set([
+    ...(await listGames()).map((g) => g.slug),
+    ...(await listHiddenGames()).map((g) => g.slug),
+  ]);
   let slug = baseSlug;
   let n = 2;
   while (taken.has(slug)) slug = `${baseSlug}-${n++}`;
@@ -207,4 +228,38 @@ async function createGame(name: string, meta: LookupResult, pdfBytes: Buffer): P
   void digestRulebook(slug).catch((e) =>
     console.error(`bulk-add: digest ${slug} failed:`, e instanceof Error ? e.message : e)
   );
+}
+
+/**
+ * Create a game without a rulebook PDF (used when the caller opted in to
+ * shelve games even if no rulebook was found). Writes meta.json with the
+ * looked-up metadata but NO pdf field and an empty description — no cover is
+ * rendered and no digest is fired, since there's nothing to read from.
+ */
+async function createGameWithoutPdf(name: string, meta: LookupResult | null): Promise<void> {
+  const baseSlug = slugify(name);
+  if (!baseSlug) {
+    throw new Error("Title could not be converted to a slug");
+  }
+  const taken = new Set([
+    ...(await listGames()).map((g) => g.slug),
+    ...(await listHiddenGames()).map((g) => g.slug),
+  ]);
+  let slug = baseSlug;
+  let n = 2;
+  while (taken.has(slug)) slug = `${baseSlug}-${n++}`;
+
+  const dir = path.join(process.cwd(), "content", "games", slug);
+  await fs.mkdir(dir, { recursive: true });
+
+  const gameMeta = {
+    title: name,
+    description: "", // no rulebook to digest — filled in later if one is added
+    players: meta?.players,
+    playtimeMinutes: meta?.playtimeMinutes,
+    ageRating: meta?.ageRating,
+    tags: (meta?.tags ?? []).map((t) => t.trim().toLowerCase()).filter(Boolean),
+  };
+  await fs.writeFile(path.join(dir, "meta.json"), JSON.stringify(gameMeta, null, 2));
+  invalidateGamesCache();
 }

@@ -159,6 +159,8 @@ export default function BulkAdd({ variant = "shelf", onDone }: { variant?: "shel
   const [parsing, setParsing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pasteText, setPasteText] = useState("");
+  // When checked, games without a rulebook are shelved anyway (no PDF).
+  const [includeNoRulebook, setIncludeNoRulebook] = useState(false);
   const router = useRouter();
   const { panelRef } = useDialog<HTMLDivElement>(open, () => setOpen(false));
 
@@ -176,6 +178,7 @@ export default function BulkAdd({ variant = "shelf", onDone }: { variant?: "shel
       setParsing(false);
       setError(null);
       setPasteText("");
+      setIncludeNoRulebook(false);
     }
   }, [open]);
 
@@ -343,7 +346,10 @@ export default function BulkAdd({ variant = "shelf", onDone }: { variant?: "shel
       const res = await fetch("/api/games/bulk-add", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ names: toAdd.map((it) => it.name) }),
+        body: JSON.stringify({
+          names: toAdd.map((it) => it.name),
+          includeNoRulebook,
+        }),
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
@@ -377,7 +383,7 @@ export default function BulkAdd({ variant = "shelf", onDone }: { variant?: "shel
 
       {open && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm [transform:translateZ(0)]"
           onClick={(e) => {
             if (!adding && e.target === e.currentTarget) setOpen(false);
           }}
@@ -526,6 +532,32 @@ export default function BulkAdd({ variant = "shelf", onDone }: { variant?: "shel
                         </button>
                       </div>
                     </div>
+
+                    {/* Shelf games even when no rulebook is found. */}
+                    <label
+                      className={`mt-3 flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-2 text-xs transition-colors ${
+                        includeNoRulebook
+                          ? "border-terracotta/50 bg-parchment/60 dark:bg-cocoa/20"
+                          : "border-latte/40 bg-parchment/30 dark:border-cocoa/30 dark:bg-night/40"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={includeNoRulebook}
+                        onChange={(e) => setIncludeNoRulebook(e.target.checked)}
+                        aria-label="Add to shelf even if no rulebook found"
+                        className="mt-0.5 h-4 w-4 accent-terracotta"
+                      />
+                      <span>
+                        <span className="block font-bold text-espresso dark:text-parchment">
+                          Add to shelf even if no rulebook found
+                        </span>
+                        <span className="mt-0.5 block text-cocoa/70 dark:text-latte/60">
+                          Games without a rulebook are shelved with empty details —
+                          you can add the rulebook later from their page.
+                        </span>
+                      </span>
+                    </label>
 
                     <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto pr-1" aria-label="Game checklist">
                       {items.map((it) => (
