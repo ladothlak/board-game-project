@@ -5,8 +5,6 @@ import { getGame, invalidateGamesCache, listGames, type GameMeta } from "@/lib/g
 import { generatePairs } from "@/lib/generate-pairs";
 import { logRequest } from "@/lib/audit-log";
 
-const start = Date.now();
-
 /**
  * Fingerprint of the current shelf (same format as find-game): sorted
  * "slug:title" pairs joined with "|". If any game is added or removed,
@@ -20,6 +18,7 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ slug: string }> }
 ) {
+  const start = Date.now();
   const { slug } = await params;
   const game = await getGame(slug);
   if (!game) {
