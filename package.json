@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "sh -c 'set -a; . ./.env 2>/dev/null || true; set +a; exec next dev -p ${PORT:-3111}'",
     "build": "npm run build:search && next build",
-    "start": "next start",
+    "start": "sh -c 'set -a; . ./.env 2>/dev/null || true; set +a; exec next start -p ${PORT:-3111}'",
     "build:search": "node scripts/build-index.mjs",
     "backup": "node scripts/backup.mjs",
     "test": "vitest run",
