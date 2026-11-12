@@ -34,8 +34,15 @@ export interface RagContext {
   toc: string;
   /** Confidence 0–1: how well the retrieval matched the question. */
   confidence: number;
-  /** Pages cited in the excerpts. */
+  /** Pages cited in the excerpts, sorted by page number (display order). */
   pages: number[];
+  /**
+   * The selected pages in retrieval-relevance order — the candidate order
+   * after re-rank + cross-ref following, deduplicated with first occurrence
+   * kept. Unlike `pages`, this preserves the ranking so metrics like MRR can
+   * be computed over relevance, not page number.
+   */
+  rankedPages: number[];
 }
 
 export interface RagOptions {
@@ -624,7 +631,7 @@ export async function buildRagContext(
 
   const chunks = (await loadIndex()).filter((c) => c.slug === slug);
   if (chunks.length === 0) {
-    return { excerpts: "", toc: "", confidence: 0, pages: [] };
+    return { excerpts: "", toc: "", confidence: 0, pages: [], rankedPages: [] };
   }
 
   // Resolve classification: the decision model's verdict when available,
@@ -730,7 +737,12 @@ export async function buildRagContext(
   const flatMap = pageMap(chunks).join("\n");
   const toc = hToc ? `${hToc}\n\n${flatMap}` : flatMap;
 
-  const pages = [...new Set(candidates.map((c) => c.page))].sort((a, b) => a - b);
+  // Pages in retrieval-relevance order (candidate order after re-rank +
+  // cross-ref following), deduplicated with first occurrence kept — this is
+  // the ranking metrics like MRR should be computed over.
+  const rankedPages = [...new Set(candidates.map((c) => c.page))];
+  // Display order: sorted by page number, as before.
+  const pages = [...rankedPages].sort((a, b) => a - b);
 
-  return { excerpts, toc, confidence, pages };
+  return { excerpts, toc, confidence, pages, rankedPages };
 }

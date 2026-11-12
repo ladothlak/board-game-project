@@ -102,11 +102,6 @@ function reciprocalRank(pages: number[], expected: number[]): number {
   return 0;
 }
 
-/** 1 when the first page retrieved is an expected answer page, else 0. */
-function top1Hit(pages: number[], expected: number[]): number {
-  return pages.length > 0 && expected.includes(pages[0]) ? 1 : 0;
-}
-
 /** Fraction of `expected` pages present in the top-k of `pages`. */
 function recallAtK(pages: number[], expected: number[], k = 3): number {
   if (expected.length === 0) return 0;
@@ -201,14 +196,27 @@ describe("RAG decision-model benchmark", () => {
     // The core question of the benchmark: for each labelled question, does each
     // pipeline pull the right documentation into the answer context? We run
     // BOTH pipelines on every case and report per-case results (so the wins and
-    // losses are visible, not just averaged away) plus aggregate metrics:
-    // top-1 hit rate, MRR, recall@3, and end-to-end latency.
+    // losses are visible, not just averaged away) plus aggregate metrics.
+    //
+    // Metrics measure what the LLM actually sees, not page-number order:
+    //   - in-context hit rate — any expected page is in the selected page set
+    //     (`pages`; membership only, so ordering can't fake a miss).
+    //   - in-excerpts hit rate — the expected page's text made it into the
+    //     injected `excerpts`, checked via the `--- Page N ---` markers.
+    //   - MRR / recall@3 over `rankedPages` — the pages in retrieval-relevance
+    //     order, so ranking quality is scored on relevance, not page number.
+    // (The old top-1/MRR/recall@3 ran over page-number order — a metric artifact
+    // that counted "misses" even when the answer text was in the context.)
     interface Row {
       c: Case;
       baseMs: number;
       enhMs: number;
       basePages: number[];
       enhPages: number[];
+      baseRanked: number[];
+      enhRanked: number[];
+      baseExcerpts: string;
+      enhExcerpts: string;
     }
     const rows: Row[] = [];
 
@@ -219,38 +227,56 @@ describe("RAG decision-model benchmark", () => {
       const enh = await timed(() =>
         buildRagContext(c.slug, c.question, KEY, undefined, { useDecisionModel: true })
       );
-      rows.push({ c, baseMs: base.ms, enhMs: enh.ms, basePages: base.value.pages, enhPages: enh.value.pages });
+      rows.push({
+        c,
+        baseMs: base.ms,
+        enhMs: enh.ms,
+        basePages: base.value.pages,
+        enhPages: enh.value.pages,
+        baseRanked: base.value.rankedPages,
+        enhRanked: enh.value.rankedPages,
+        baseExcerpts: base.value.excerpts,
+        enhExcerpts: enh.value.excerpts,
+      });
     }
 
     const avg = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
     const fmtPages = (pages: number[]) => (pages.length > 0 ? pages.slice(0, 3).join(",") : "—");
-    const hit = (pages: number[], expected: number[]) => expected.some((p) => pages.slice(0, 3).includes(p)) ? "✓" : "✗";
+    // In-context membership: any expected page is in the selected page set.
+    const inContext = (pages: number[], expected: number[]) =>
+      expected.some((p) => pages.includes(p)) ? "✓" : "✗";
+    // Did the expected page's text make it into the injected excerpts?
+    const inExcerpts = (excerpts: string, expected: number[]) =>
+      expected.some((p) => excerpts.includes(`--- Page ${p} ---`)) ? "✓" : "✗";
 
     console.log("\n──────── RAG benchmark: retrieval effectiveness (LIVE) ────────");
     console.log(`cases: ${rows.length}`);
-    console.log("idx  slug               question                                        exp      existing top-3   enhanced top-3");
+    console.log("idx  slug               question                                        exp      existing top-3 (rel.)   ctx exc | enhanced top-3 (rel.)   ctx exc");
     rows.forEach((r, i) => {
       console.log(
-        `${String(i + 1).padStart(3)}  ${r.c.slug.padEnd(17)} ${r.c.question.slice(0, 52).padEnd(52)} [${r.c.expectedPages.join(",")}]   ${fmtPages(r.basePages).padEnd(16)}${hit(r.basePages, r.c.expectedPages)}    ${fmtPages(r.enhPages).padEnd(16)}${hit(r.enhPages, r.c.expectedPages)}`
+        `${String(i + 1).padStart(3)}  ${r.c.slug.padEnd(17)} ${r.c.question.slice(0, 52).padEnd(52)} [${r.c.expectedPages.join(",")}]   ${fmtPages(r.baseRanked).padEnd(16)}${inContext(r.basePages, r.c.expectedPages)} ${inExcerpts(r.baseExcerpts, r.c.expectedPages)} | ${fmtPages(r.enhRanked).padEnd(16)}${inContext(r.enhPages, r.c.expectedPages)} ${inExcerpts(r.enhExcerpts, r.c.expectedPages)}`
       );
     });
 
-    const baseTop1 = rows.map((r) => top1Hit(r.basePages, r.c.expectedPages));
-    const enhTop1 = rows.map((r) => top1Hit(r.enhPages, r.c.expectedPages));
-    const baseMrr = rows.map((r) => reciprocalRank(r.basePages, r.c.expectedPages));
-    const enhMrr = rows.map((r) => reciprocalRank(r.enhPages, r.c.expectedPages));
-    const baseRecall = rows.map((r) => recallAtK(r.basePages, r.c.expectedPages));
-    const enhRecall = rows.map((r) => recallAtK(r.enhPages, r.c.expectedPages));
+    const baseCtxHits = rows.map((r) => (inContext(r.basePages, r.c.expectedPages) === "✓" ? 1 : 0));
+    const enhCtxHits = rows.map((r) => (inContext(r.enhPages, r.c.expectedPages) === "✓" ? 1 : 0));
+    const baseExcHits = rows.map((r) => (inExcerpts(r.baseExcerpts, r.c.expectedPages) === "✓" ? 1 : 0));
+    const enhExcHits = rows.map((r) => (inExcerpts(r.enhExcerpts, r.c.expectedPages) === "✓" ? 1 : 0));
+    // Ranking metrics over relevance order (`rankedPages`), not page number.
+    const baseMrr = rows.map((r) => reciprocalRank(r.baseRanked, r.c.expectedPages));
+    const enhMrr = rows.map((r) => reciprocalRank(r.enhRanked, r.c.expectedPages));
+    const baseRecall = rows.map((r) => recallAtK(r.baseRanked, r.c.expectedPages));
+    const enhRecall = rows.map((r) => recallAtK(r.enhRanked, r.c.expectedPages));
 
-    console.log(`existing pipeline — top-1 ${pct(baseTop1)} | MRR ${pct(baseMrr)} | recall@3 ${pct(baseRecall)} | latency ~${avg(rows.map((r) => r.baseMs)).toFixed(0)} ms`);
-    console.log(`enhanced pipeline — top-1 ${pct(enhTop1)} | MRR ${pct(enhMrr)} | recall@3 ${pct(enhRecall)} | latency ~${avg(rows.map((r) => r.enhMs)).toFixed(0)} ms`);
+    console.log(`existing pipeline — in-context ${pct(baseCtxHits)} | in-excerpts ${pct(baseExcHits)} | MRR (ranked) ${pct(baseMrr)} | recall@3 (ranked) ${pct(baseRecall)} | latency ~${avg(rows.map((r) => r.baseMs)).toFixed(0)} ms`);
+    console.log(`enhanced pipeline — in-context ${pct(enhCtxHits)} | in-excerpts ${pct(enhExcHits)} | MRR (ranked) ${pct(enhMrr)} | recall@3 (ranked) ${pct(enhRecall)} | latency ~${avg(rows.map((r) => r.enhMs)).toFixed(0)} ms`);
 
-    // Count the divergent cases explicitly: where one mode finds the answer
-    // and the other does not (within top-3).
-    const baseWins = rows.filter((r) => hit(r.basePages, r.c.expectedPages) === "✓" && hit(r.enhPages, r.c.expectedPages) === "✗").length;
-    const enhWins = rows.filter((r) => hit(r.basePages, r.c.expectedPages) === "✗" && hit(r.enhPages, r.c.expectedPages) === "✓").length;
-    const bothMiss = rows.filter((r) => hit(r.basePages, r.c.expectedPages) === "✗" && hit(r.enhPages, r.c.expectedPages) === "✗").length;
-    console.log(`divergence: existing-only hits ${baseWins} | enhanced-only hits ${enhWins} | both miss ${bothMiss}`);
+    // Count the divergent cases explicitly: where one mode puts an answer page
+    // in context and the other does not.
+    const baseWins = rows.filter((r) => inContext(r.basePages, r.c.expectedPages) === "✓" && inContext(r.enhPages, r.c.expectedPages) === "✗").length;
+    const enhWins = rows.filter((r) => inContext(r.basePages, r.c.expectedPages) === "✗" && inContext(r.enhPages, r.c.expectedPages) === "✓").length;
+    const bothMiss = rows.filter((r) => inContext(r.basePages, r.c.expectedPages) === "✗" && inContext(r.enhPages, r.c.expectedPages) === "✗").length;
+    console.log(`divergence (in-context): existing-only hits ${baseWins} | enhanced-only hits ${enhWins} | both miss ${bothMiss}`);
 
     // Harness sanity: metrics are well-defined proportions.
     expect(baseMrr.every((x) => x >= 0 && x <= 1)).toBe(true);

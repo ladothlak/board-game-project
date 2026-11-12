@@ -219,7 +219,7 @@ describe("buildRagContext", () => {
 
     const result = await buildRagContext("other-game", "How do I win?", KEY);
 
-    expect(result).toEqual({ excerpts: "", toc: "", confidence: 0, pages: [] });
+    expect(result).toEqual({ excerpts: "", toc: "", confidence: 0, pages: [], rankedPages: [] });
     // No LLM work is done for a game with no index.
     expect(mockFetch).not.toHaveBeenCalled();
   });
