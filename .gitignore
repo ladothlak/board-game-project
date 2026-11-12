@@ -8,3 +8,6 @@ logs/
 backups/
 content/*
 tsconfig.tsbuildinfo
+
+# Generated search index (rebuilt by npm run build:search)
+public/search-index.json
