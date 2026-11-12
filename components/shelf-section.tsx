@@ -9,7 +9,7 @@ import AddGame from "@/components/add-game";
 
 
 /**
- * Wraps the shelf header (four action buttons on one line) with the find-game
+ * Wraps the shelf header (three action buttons on one line) with the find-game
  * modal and the filtered grid. Owns the filter state so the trigger button
  * and the modal stay in sync.
  */
@@ -18,6 +18,13 @@ export default function ShelfSection({ games: initialGames }: { games: GameMeta[
   const [findOpen, setFindOpen] = useState(false);
   const [activeTags, setActiveTags] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
+
+  // Ctrl/⌘+K on the shelf opens the find modal.
+  useEffect(() => {
+    const handler = () => setFindOpen(true);
+    window.addEventListener("parlor:open-find", handler);
+    return () => window.removeEventListener("parlor:open-find", handler);
+  }, []);
 
   // Poll for description updates from the digest pipeline.
   useEffect(() => {
@@ -84,25 +91,40 @@ export default function ShelfSection({ games: initialGames }: { games: GameMeta[
 
   return (
     <>
-      <section className="mt-10 flex flex-wrap items-center justify-between gap-4">
+      <section data-parlor-shelf className="mt-10 flex flex-wrap items-center justify-between gap-4">
         <h2 className="font-serif text-2xl text-espresso dark:text-parchment">
           On the shelf
         </h2>
-        <div className="flex items-stretch gap-2 sm:gap-3">
-          <button
-            onClick={() => setFindOpen(true)}
-            className="flex-1 rounded-lg bg-sage/70 px-4 py-2 text-center text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
-          >
-            🔍 Find a Game
-          </button>
-          <GameNightPicker games={games} />
+        <div className="flex w-full flex-wrap items-stretch gap-2 sm:w-auto sm:gap-3">
+          {games.length > 0 && (
+            <>
+              <button
+                onClick={() => setFindOpen(true)}
+                className="flex-1 rounded-lg bg-sage/70 px-4 py-2 text-center text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
+              >
+                🔍 Find a game
+              </button>
+              <GameNightPicker games={games} />
+            </>
+          )}
           <AddGame />
         </div>
       </section>
 
       {hasFilters && (
-        <p className="mt-2 text-xs text-cocoa/70 dark:text-latte/60">
-          Showing {filtered.length} of {games.length} games
+        <p className="mt-2 flex flex-wrap items-center gap-2 text-xs text-cocoa/70 dark:text-latte/60">
+          <span>
+            Showing {filtered.length} of {games.length} games
+          </span>
+          <button
+            onClick={() => {
+              setActiveTags(new Set());
+              setQuery("");
+            }}
+            className="rounded text-xs text-terracotta underline underline-offset-2 hover:text-espresso dark:text-amberglow dark:hover:text-parchment"
+          >
+            Clear filters
+          </button>
         </p>
       )}
 
@@ -123,15 +145,34 @@ export default function ShelfSection({ games: initialGames }: { games: GameMeta[
 
       <section className="mt-6">
         {games.length === 0 ? (
-          <div className="flex flex-col items-center gap-4 rounded-2xl bg-parchment/40 px-8 py-12 text-center dark:bg-nightcard/60">
+          <div className="flex flex-col items-center gap-4 rounded-xl border border-dashed border-latte bg-parchment/40 px-8 py-12 text-center dark:border-cocoa/50 dark:bg-nightcard/60">
             <span className="text-5xl" aria-hidden>📦</span>
-            <h2 className="font-serif text-2xl font-bold text-espresso dark:text-parchment">
+            <h2 className="font-serif text-2xl text-espresso dark:text-parchment">
               The shelf is empty
             </h2>
             <p className="max-w-sm text-cocoa/70 dark:text-latte/70">
               No games on the menu yet. Add your first rulebook and the
               parlor will be ready to brew.
             </p>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="flex flex-col items-center gap-4 rounded-xl border border-dashed border-latte bg-parchment/40 px-8 py-12 text-center dark:border-cocoa/50 dark:bg-nightcard/60">
+            <span className="text-5xl" aria-hidden>🔍</span>
+            <h2 className="font-serif text-2xl text-espresso dark:text-parchment">
+              Nothing matches those filters
+            </h2>
+            <p className="max-w-sm text-cocoa/70 dark:text-latte/70">
+              Try a different genre or clear the search to see the whole shelf.
+            </p>
+            <button
+              onClick={() => {
+                setActiveTags(new Set());
+                setQuery("");
+              }}
+              className="rounded-lg bg-latte/40 px-4 py-2 text-sm text-cocoa transition-colors hover:bg-terracotta/30 dark:bg-cocoa/30 dark:text-latte dark:hover:bg-terracotta/40"
+            >
+              Clear filters
+            </button>
           </div>
         ) : (
           <GameGrid games={filtered} />

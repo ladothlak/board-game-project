@@ -93,9 +93,10 @@ export default function GameMeta({
     }
   }
 
-  function pill(label: string, tone = "latte") {
+  function pill(label: string, tone = "latte", key?: string) {
     return (
       <span
+        key={key}
         className={
           tone === "sage"
             ? "rounded-full bg-sage/25 px-3 py-1 text-cocoa dark:text-latte"
@@ -123,7 +124,7 @@ export default function GameMeta({
         <button
           onClick={() => act(field, "accept")}
           disabled={busy !== null}
-          className="rounded-md bg-terracotta/90 px-2 py-0.5 font-medium text-cream transition-colors hover:bg-terracotta disabled:opacity-50 dark:text-espresso"
+          className="rounded-md bg-sage/70 px-2 py-0.5 font-medium text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
         >
           Accept
         </button>
@@ -164,7 +165,7 @@ export default function GameMeta({
           )}
         </span>
       )}
-      {tagsV.map((tag) => pill(tag, "sage"))}
+      {tagsV.map((tag) => pill(tag, "sage", tag))}
     </div>
   );
 }

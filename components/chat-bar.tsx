@@ -235,7 +235,7 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
           <button
             type="submit"
             disabled={loading || !input.trim()}
-            className="rounded-lg bg-terracotta px-4 py-2 text-sm text-cream transition-colors hover:bg-terracotta/90 disabled:opacity-50 dark:text-espresso"
+            className="rounded-lg bg-sage/70 px-4 py-2 text-sm text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
           >
             {loading ? "…" : "Ask"}
           </button>
@@ -349,7 +349,7 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
                 <span />
                 <span />
               </span>
-              {slowBrew ? "Still brewing — the model is thinking…" : "brewing an answer…"}
+              {slowBrew ? "Still brewing — the model is thinking…" : "Brewing an answer…"}
             </div>
           )}
           {error && (
@@ -375,7 +375,7 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
           <button
             type="submit"
             disabled={loading || !input.trim()}
-            className="rounded-lg bg-terracotta px-4 py-2 text-sm text-cream transition-colors hover:bg-terracotta/90 disabled:opacity-50 dark:text-espresso"
+            className="rounded-lg bg-sage/70 px-4 py-2 text-sm text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
           >
             Ask
           </button>

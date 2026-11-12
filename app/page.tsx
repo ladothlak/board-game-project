@@ -29,9 +29,11 @@ export default async function HomePage() {
 
       <ShelfSection games={games} />
 
-      <section className="mt-10">
-        <GameNightPlanner games={games} />
-      </section>
+      {games.length > 0 && (
+        <section className="mt-10">
+          <GameNightPlanner games={games} />
+        </section>
+      )}
 
       <HiddenGames games={hidden} />
     </div>

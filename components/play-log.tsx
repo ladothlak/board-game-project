@@ -58,7 +58,7 @@ export default function PlayLog({ slug }: { slug: string }) {
         <button
           onClick={logPlay}
           disabled={!loaded || logging}
-          className="rounded-lg bg-terracotta px-4 py-2 text-sm text-cream transition-colors hover:bg-terracotta/90 disabled:opacity-50 dark:text-espresso"
+          className="rounded-lg bg-sage/70 px-4 py-2 text-sm text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
         >
           {logging ? "Logging…" : "🎲 We played this"}
         </button>

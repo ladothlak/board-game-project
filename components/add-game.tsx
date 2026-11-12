@@ -40,6 +40,7 @@ export default function AddGame() {
   const [sourceMethod, setSourceMethod] = useState<"intellisearch" | "link" | "manual">("intellisearch");
   const [language, setLanguage] = useState<string>("en");
   const [attachedPdf, setAttachedPdf] = useState<File | null>(null);
+  const [attachedCover, setAttachedCover] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const pdfRef = useRef<HTMLInputElement>(null);
   const coverRef = useRef<HTMLInputElement>(null);
@@ -61,6 +62,7 @@ export default function AddGame() {
       setSourceMethod("intellisearch");
       setLanguage("en");
       setAttachedPdf(null);
+      setAttachedCover(null);
       setDragOver(false);
       setSaving(false);
     }
@@ -242,6 +244,7 @@ export default function AddGame() {
         const dt = new DataTransfer();
         dt.items.add(f);
         coverRef.current.files = dt.files;
+        setAttachedCover(f);
       }
     }
   }, []);
@@ -281,14 +284,14 @@ export default function AddGame() {
     <>
       <button
         onClick={() => setOpen(true)}
-        className="flex-1 rounded-lg bg-terracotta px-4 py-2 text-center text-sm text-cream transition-colors hover:bg-terracotta/90 dark:text-espresso"
+        className="flex-1 rounded-lg bg-sage/70 px-4 py-2 text-center text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
       >
-        + Add a Game
+        + Add a game
       </button>
 
       {open && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-espresso/40 p-4 backdrop-blur-sm [transform:translateZ(0)]"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm [transform:translateZ(0)]"
           onClick={() => !saving && setOpen(false)}
         >
           <form
@@ -302,10 +305,10 @@ export default function AddGame() {
             onDragOver={onDragOver}
             onDragLeave={onDragLeave}
             onDrop={onDrop}
-            className={`fade-up w-full max-w-lg rounded-2xl border p-6 shadow-xl transition-colors dark:border-cocoa/50 dark:bg-nightcard ${
+            className={`fade-up max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border p-6 shadow-xl transition-colors ${
               dragOver
-                ? "border-terracotta bg-parchment/80"
-                : "border-latte/70 bg-cream"
+                ? "border-terracotta bg-parchment/80 dark:border-terracotta/60 dark:bg-nightcard/95"
+                : "border-latte/60 bg-parchment/90 dark:border-cocoa/40 dark:bg-nightcard/95"
             }`}
           >
             <h2 className="font-serif text-2xl text-espresso dark:text-parchment">
@@ -333,7 +336,7 @@ export default function AddGame() {
                 <select
                   value={sourceMethod}
                   onChange={(e) => setSourceMethod(e.target.value as "intellisearch" | "link" | "manual")}
-                  className="mt-1 w-full rounded-lg border border-latte/50 bg-parchment/30 px-3 py-2 text-sm text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/40 dark:bg-night dark:text-parchment"
+                  className="mt-1 w-full rounded-lg border border-latte/70 bg-parchment/50 px-3 py-2 text-sm text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
                 >
                   <option value="manual">Manual</option>
                   <option value="link">Link</option>
@@ -347,7 +350,7 @@ export default function AddGame() {
               <div
                 className={`mt-3 rounded-xl border-2 border-dashed p-4 text-center text-sm transition-colors ${
                   dragOver
-                    ? "border-terracotta bg-parchment/60"
+                    ? "border-terracotta bg-parchment/60 dark:border-terracotta/60 dark:bg-cocoa/30"
                     : "border-latte/50 bg-parchment/30 dark:border-cocoa/40 dark:bg-night/40"
                 }`}
               >
@@ -382,6 +385,7 @@ export default function AddGame() {
                       type="file"
                       accept="image/*"
                       className="hidden"
+                      onChange={(e) => setAttachedCover(e.target.files?.[0] ?? null)}
                     />
                   </label>
                 </div>
@@ -392,9 +396,9 @@ export default function AddGame() {
                     ✓ {attachedPdf.name} ({(attachedPdf.size / 1024 / 1024).toFixed(1)} MB)
                   </p>
                 )}
-                {coverRef.current?.files?.[0] && (
+                {attachedCover && (
                   <p className="mt-1 text-xs text-sage dark:text-amberglow">
-                    ✓ {coverRef.current.files[0].name}
+                    ✓ {attachedCover.name}
                   </p>
                 )}
               </div>
@@ -409,7 +413,7 @@ export default function AddGame() {
                   value={urlInput}
                   onChange={(e) => setUrlInput(e.target.value)}
                   aria-label="Rulebook PDF URL"
-                  className="flex-1 rounded-lg border border-latte/50 bg-parchment/30 px-3 py-2 text-xs text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/40 dark:bg-night dark:text-parchment"
+                  className="flex-1 rounded-lg border border-latte/70 bg-parchment/50 px-3 py-2 text-xs text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
                 />
                 <button
                   type="button"
@@ -430,7 +434,7 @@ export default function AddGame() {
                     name="publisher"
                     placeholder="Publisher (optional)"
                     aria-label="Publisher (optional)"
-                    className="flex-1 rounded-lg border border-latte/50 bg-parchment/30 px-3 py-2 text-xs text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/40 dark:bg-night dark:text-parchment"
+                    className="flex-1 rounded-lg border border-latte/70 bg-parchment/50 px-3 py-2 text-xs text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
                   />
                   <button
                     type="button"
@@ -449,7 +453,7 @@ export default function AddGame() {
                     value={language}
                     onChange={(e) => setLanguage(e.target.value)}
                     aria-label="Rulebook language"
-                    className="rounded-lg border border-latte/50 bg-parchment/30 px-2 py-1 text-xs text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/40 dark:bg-night dark:text-parchment"
+                    className="rounded-lg border border-latte/70 bg-parchment/50 px-2 py-1 text-xs text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
                   >
                     <option value="en">English</option>
                     <option value="de">German</option>
@@ -635,14 +639,14 @@ export default function AddGame() {
                   type="button"
                   onClick={() => setOpen(false)}
                   disabled={saving}
-                  className="rounded-lg px-4 py-2 text-sm text-cocoa hover:bg-parchment/60 dark:text-latte dark:hover:bg-cocoa/20"
+                  className="rounded-lg bg-latte/40 px-4 py-2 text-sm text-cocoa transition-colors hover:bg-terracotta/30 dark:bg-cocoa/30 dark:text-latte dark:hover:bg-terracotta/40"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={saving}
-                  className="rounded-lg bg-terracotta px-4 py-2 text-sm text-cream transition-colors hover:bg-terracotta/90 disabled:opacity-50 dark:text-espresso"
+                  className="rounded-lg bg-sage/70 px-4 py-2 text-sm text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
                 >
                   {saving
                     ? attachedPdf

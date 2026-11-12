@@ -54,7 +54,7 @@ export default function NotesSection({ slug, title }: { slug: string; title: str
         rows={4}
         placeholder="e.g. We skip the optional outbreak rule on our first plays…"
         aria-label={`Notes about ${title}`}
-        className="mt-3 w-full rounded-lg border border-latte/70 bg-cream/70 px-3 py-2 text-sm text-espresso placeholder:text-cocoa/50 focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment dark:placeholder:text-latte/40"
+        className="mt-3 w-full rounded-lg border border-latte/70 bg-parchment/50 px-3 py-2 text-sm text-espresso placeholder:text-cocoa/50 focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment dark:placeholder:text-latte/40"
       />
       <div className="mt-2 flex items-center justify-between text-xs text-cocoa dark:text-latte">
         <span>
@@ -63,7 +63,7 @@ export default function NotesSection({ slug, title }: { slug: string; title: str
         <button
           onClick={save}
           disabled={saving || !loaded}
-          className="rounded-lg bg-sage/70 px-3 py-1.5 text-sm text-espresso hover:bg-sage dark:text-parchment"
+          className="rounded-lg bg-sage/70 px-3 py-1.5 text-sm text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
         >
           {saving ? "Saving…" : "Save notes"}
         </button>

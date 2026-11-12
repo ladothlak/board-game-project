@@ -64,7 +64,7 @@ export default function GameNightPlanner({ games }: { games: GameMeta[] }) {
           value={date}
           onChange={(e) => setDate(e.target.value)}
           aria-label="Game night date"
-          className="rounded-lg border border-latte/70 bg-parchment/60 px-3 py-2 text-sm text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-nightcard dark:text-parchment"
+          className="rounded-lg border border-latte/70 bg-parchment/50 px-3 py-2 text-sm text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
         />
         <label className="flex items-center gap-1.5 text-xs text-cocoa dark:text-latte">
           Players
@@ -73,7 +73,7 @@ export default function GameNightPlanner({ games }: { games: GameMeta[] }) {
             onChange={(e) => setPlayers(e.target.value)}
             inputMode="numeric"
             placeholder="4"
-            className="w-14 rounded-lg border border-latte/70 bg-parchment/60 px-2 py-2 text-sm text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-nightcard dark:text-parchment"
+            className="w-14 rounded-lg border border-latte/70 bg-parchment/50 px-2 py-2 text-sm text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
           />
         </label>
         <button

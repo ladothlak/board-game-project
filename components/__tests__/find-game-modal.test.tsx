@@ -33,7 +33,7 @@ describe("FindGameModal", () => {
 
   it("shows a search input", () => {
     renderModal();
-    expect(screen.getByRole("textbox", { name: /search games/i })).toBeInTheDocument();
+    expect(screen.getByRole("searchbox", { name: /search games/i })).toBeInTheDocument();
   });
 
   it("displays genre tag chips", () => {
@@ -68,7 +68,7 @@ describe("FindGameModal", () => {
   it("calls onQuery when the search input changes", () => {
     const onQuery = vi.fn();
     renderModal({ onQuery });
-    const input = screen.getByRole("textbox", { name: /search games/i });
+    const input = screen.getByRole("searchbox", { name: /search games/i });
     fireEvent.change(input, { target: { value: "nemesis" } });
     expect(onQuery).toHaveBeenCalledWith("nemesis");
   });

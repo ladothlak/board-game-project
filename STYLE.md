@@ -16,7 +16,7 @@ Keep this in sync with `app/globals.css` and the component files.
 | `espresso` | `#38291f` | Primary text, headings |
 | `cocoa` | `#5f4a3a` | Secondary text, body copy |
 | `latte` | `#cbb59b` | Borders, dividers, muted elements |
-| `terracotta` | `#c07a56` | Primary accents, links, active states |
+| `terracotta` | `#c07a56` | Links, active accents, destructive actions |
 | `sage` | `#8a9a7d` | Success/positive accents, primary buttons |
 | `amberglow` | `#dfa94f` | Highlights, ratings, warm glows |
 
@@ -48,7 +48,9 @@ Dark mode text: `parchment` for primary, `latte` for secondary, `cocoa` for bord
 | Headings (h1–h3) | `font-serif` | Lora (serif) |
 | Body text, UI | `font-sans` | Inter (sans) |
 | Page title (h1) | `font-serif text-4xl tracking-wide` | — |
-| Section heading (h2) | `font-serif text-2xl` or `font-serif text-lg` | — |
+| Page section heading (h2) | `font-serif text-2xl` | — |
+| Card / collapsible heading (h2) | `font-serif text-xl` | — |
+| Inline sub-section heading (h2) | `font-serif text-lg` | — |
 | Card title | `font-serif text-base` | — |
 | Body copy | `text-sm` | — |
 | Small/muted | `text-xs` | — |
@@ -65,7 +67,9 @@ transition-colors hover:bg-sage disabled:opacity-50
 dark:text-parchment
 ```
 
-Used for: "🎲 Pick", "Ask", "Fetch", "Add expansion", submit buttons.
+Used for: "Find a game", "Pick a game", "Add a game", "Ask", "Fetch", "Add expansion", save/log/generate actions — every non-destructive primary action.
+
+Small/inline primary buttons keep the same sage palette at a lighter opacity (`bg-sage/40`–`bg-sage/60`, `text-xs`/`text-sm`) to stay subordinate to the page's main action.
 
 ### Secondary / Ghost (latte)
 
@@ -75,7 +79,7 @@ transition-colors hover:bg-terracotta/30
 dark:bg-cocoa/30 dark:text-latte dark:hover:bg-terracotta/40
 ```
 
-Used for: "Cancel", dismiss, non-primary actions.
+Used for: "Cancel", dismiss, clear filters, non-primary actions.
 
 ### Destructive (terracotta)
 
@@ -85,7 +89,18 @@ transition-colors hover:bg-terracotta/90
 dark:text-espresso
 ```
 
-Used for: "+ Add a Game", delete confirmations.
+Used for: delete confirmations only ("Delete everything"). Never for adding or saving.
+
+When a destructive action needs to sit among other choices, use the tinted variant instead of a solid block: `border border-terracotta/50 bg-terracotta/10 hover:bg-terracotta/20` with `text-terracotta dark:text-amberglow` for the label.
+
+### Text / Inline Button
+
+```
+rounded px-2 py-1 text-sm text-cocoa underline-offset-2
+hover:bg-parchment/60 dark:text-latte dark:hover:bg-cocoa/20
+```
+
+Used for low-emphasis inline actions ("Dismiss", "Clear filters", "Start over"). Do not use this style for cancel buttons inside modal footers — those use the Secondary / Ghost style.
 
 ### Icon-only (h-8 w-8)
 
@@ -133,14 +148,16 @@ w-full max-w-md rounded-2xl border border-latte/60 bg-parchment/90 p-6 shadow-xl
 dark:border-cocoa/40 dark:bg-nightcard/95
 ```
 
-With backdrop: `fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm`
+With backdrop: `fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm`.
+Tall forms add `max-h-[85vh] overflow-y-auto` (or a flex column with a scrolling body).
+Modal titles are `font-serif text-2xl` and use `<h2>` for form dialogs / `<h3>` for compact choosers.
 
 ### Empty State Placeholder
 
 ```
 mt-4 rounded-xl border border-dashed border-latte bg-parchment/40 p-6
 text-center text-cocoa
-dark:border-cocoa/50 dark:bg-nightcard dark:text-latte
+dark:border-cocoa/50 dark:bg-nightcard/60 dark:text-latte
 ```
 
 ---
@@ -219,12 +236,12 @@ Footer (HealthStrip + tagline)
 {open && (
   <div className="fixed inset-0 z-50 ... backdrop" onClick={closeIfBackdrop}>
     <div className="w-full max-w-md rounded-2xl ...">
-      <h3>Title</h3>
+      <h2>Title</h2>
       <p>Subtitle</p>
       ...form content...
-      <div className="mt-4 flex items-center gap-2">
-        <button primary>Action</button>
+      <div className="mt-4 flex justify-end gap-2">
         <button secondary>Cancel</button>
+        <button primary>Action</button>
       </div>
       {result && <ResultCard />}
     </div>
@@ -247,6 +264,11 @@ Footer (HealthStrip + tagline)
 | Routing | `next/link` for navigation; `router.refresh()` after mutations |
 | Forms | Manual validation (no `required` attribute); `noValidate` on `<form>` |
 | File uploads | `FormData` + `fetch`; track file in state, not just ref |
+| Button & label case | Sentence case ("Find a game", "Add to shelf"), not Title Case |
+| Inputs | `border-latte/70 bg-parchment/50 dark:border-cocoa/50 dark:bg-night` |
+| Nested / sunken inputs (fields inside a drop zone or sub-panel) | `border-latte/50 bg-parchment/30 dark:border-cocoa/40 dark:bg-night/40` |
+| Collapsibles | `▾` when open, `▸` when closed (never `+`/`−`) |
+| Empty states | Dashed border, `rounded-xl`, warm copy — never developer instructions |
 
 ---
 

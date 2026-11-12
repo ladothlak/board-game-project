@@ -78,7 +78,7 @@ export default function GameFinder() {
           onChange={(e) => setQ(e.target.value)}
           placeholder='Describe your ideal game — "horror sci-fi cooperative for four players"'
           aria-label="Describe your ideal game"
-          className="min-w-0 flex-1 rounded-xl border border-latte/70 bg-parchment/60 px-4 py-3 text-espresso placeholder:text-cocoa/60 focus:border-terracotta focus:outline-none focus:ring-2 focus:ring-terracotta/30 dark:border-cocoa/50 dark:bg-nightcard dark:text-parchment dark:placeholder:text-latte/50"
+          className="min-w-0 flex-1 rounded-xl border border-latte/70 bg-parchment/50 px-4 py-3 text-espresso placeholder:text-cocoa/60 focus:border-terracotta focus:outline-none focus:ring-2 focus:ring-terracotta/30 dark:border-cocoa/50 dark:bg-night dark:text-parchment dark:placeholder:text-latte/50"
         />
         <button
           type="submit"

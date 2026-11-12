@@ -4,30 +4,47 @@ import { useEffect } from "react";
 
 /**
  * Global keyboard shortcuts:
- *   /        → focus the chat input
- *   Ctrl+K   → focus the search bar (home page)
+ *   /              → focus the chat input
+ *   Ctrl/⌘ + K     → open the shelf search and focus it
  */
 export default function KeyboardShortcuts() {
   useEffect(() => {
     function handler(e: KeyboardEvent) {
-      // Don't intercept when already in an input/textarea.
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      // Don't intercept while editing text or choosing from a control.
+      if (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
 
-      if (e.key === "/") {
-        e.preventDefault();
+      if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const chatInput = document.querySelector<HTMLInputElement>(
           'input[placeholder*="Ask about"]'
         );
-        chatInput?.focus();
+        if (chatInput) {
+          e.preventDefault();
+          chatInput.focus();
+        }
       }
 
-      if (e.ctrlKey && e.key === "k") {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        // Only handle the shortcut on the shelf page, where search exists.
+        if (!document.querySelector("[data-parlor-shelf]")) return;
         e.preventDefault();
-        const searchInput = document.querySelector<HTMLInputElement>(
-          'input[type="search"]'
+        const search = document.querySelector<HTMLInputElement>(
+          "#parlor-shelf-search"
         );
-        searchInput?.focus();
+        if (search) {
+          search.focus();
+        } else {
+          // The find modal isn't mounted yet — ask the shelf to open it.
+          window.dispatchEvent(new CustomEvent("parlor:open-find"));
+        }
       }
     }
 

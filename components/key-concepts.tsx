@@ -127,7 +127,7 @@ export default function KeyConcepts({ slug }: { slug: string }) {
               <button
                 onClick={generate}
                 disabled={loading}
-                className="flex items-center gap-2 rounded-lg bg-terracotta px-3 py-1.5 text-sm text-cream transition-colors hover:bg-terracotta/90 disabled:opacity-50 dark:text-espresso"
+                className="flex items-center gap-2 rounded-lg bg-sage/70 px-3 py-1.5 text-sm text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
               >
                 {loading ? (
                   <>

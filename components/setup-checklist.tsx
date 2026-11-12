@@ -169,7 +169,7 @@ export default function SetupChecklist({ slug }: { slug: string }) {
           {loaded && !steps && !generating && (
             <button
               onClick={() => generate(false)}
-              className="rounded-lg bg-terracotta px-4 py-2 text-sm text-cream transition-colors hover:bg-terracotta/90 dark:text-espresso"
+              className="rounded-lg bg-sage/70 px-4 py-2 text-sm text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
             >
               Generate setup checklist
             </button>
@@ -231,7 +231,7 @@ export default function SetupChecklist({ slug }: { slug: string }) {
                   onClick={() => setTimerRunning(!timerRunning)}
                   className={`rounded-lg px-3 py-1.5 text-sm transition-colors ${
                     timerRunning
-                      ? "bg-terracotta text-cream hover:bg-terracotta/90 dark:text-espresso"
+                      ? "border border-terracotta bg-terracotta/15 text-terracotta dark:border-amberglow dark:bg-amberglow/10 dark:text-amberglow"
                       : "bg-latte/40 text-cocoa hover:bg-terracotta/30 dark:bg-cocoa/30 dark:text-latte"
                   }`}
                   title={timerRunning ? "Pause timer" : "Start setup timer"}

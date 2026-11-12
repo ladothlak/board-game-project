@@ -58,22 +58,24 @@ export default function FindGameModal({
         ref={panelRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Find a Game"
-        className="w-full max-w-md rounded-2xl border border-latte/60 bg-parchment/90 p-6 shadow-xl dark:border-cocoa/40 dark:bg-nightcard/95"
+        aria-label="Find a game"
+        className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl border border-latte/60 bg-parchment/90 p-6 shadow-xl dark:border-cocoa/40 dark:bg-nightcard/95"
       >
-        <h3 className="font-serif text-xl text-espresso dark:text-parchment">
-          Find a Game
+        <h3 className="font-serif text-2xl text-espresso dark:text-parchment">
+          Find a game
         </h3>
         <p className="mt-1 text-sm text-cocoa dark:text-latte">
           Pick a genre and search the shelf.
         </p>
 
         <input
+          id="parlor-shelf-search"
+          type="search"
           value={query}
           onChange={(e) => onQuery(e.target.value)}
           placeholder="Search by name, tag, or description…"
           aria-label="Search games"
-          className="mt-4 w-full rounded-lg border border-latte/70 bg-parchment/60 px-3 py-2 text-sm text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
+          className="mt-4 w-full rounded-lg border border-latte/70 bg-parchment/50 px-3 py-2 text-sm text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
         />
 
         <div className="mt-4">
@@ -85,10 +87,10 @@ export default function FindGameModal({
               <button
                 key={tag}
                 onClick={() => onToggleTag(tag)}
-                className={`rounded-full px-3 py-1 text-sm transition-colors ${
+                className={`rounded-full border px-3 py-1 text-sm transition-colors ${
                   activeTags.has(tag)
-                    ? "bg-sage/70 text-espresso dark:text-parchment"
-                    : "bg-latte/40 text-cocoa hover:bg-terracotta/30 dark:bg-cocoa/30 dark:text-latte dark:hover:bg-terracotta/40"
+                    ? "border-terracotta bg-terracotta/15 text-terracotta dark:border-amberglow dark:bg-amberglow/10 dark:text-amberglow"
+                    : "border-transparent bg-latte/40 text-cocoa hover:bg-terracotta/30 dark:bg-cocoa/30 dark:text-latte dark:hover:bg-terracotta/40"
                 }`}
               >
                 {tag}
@@ -105,7 +107,7 @@ export default function FindGameModal({
             {hasFilters && (
               <button
                 onClick={onClear}
-                className="rounded-lg bg-terracotta/30 px-3 py-1.5 text-sm text-terracotta transition-colors hover:bg-terracotta/50 dark:text-amberglow"
+                className="rounded-lg bg-latte/40 px-3 py-1.5 text-sm text-cocoa transition-colors hover:bg-terracotta/30 dark:bg-cocoa/30 dark:text-latte dark:hover:bg-terracotta/40"
               >
                 Clear
               </button>

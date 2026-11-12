@@ -10,20 +10,27 @@ import type { GameMeta } from "@/lib/games";
  */
 export default function HiddenGames({ games }: { games: GameMeta[] }) {
   const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const router = useRouter();
 
   if (games.length === 0) return null;
 
   async function restore(slug: string) {
     setBusy(slug);
+    setError(null);
     try {
       const res = await fetch(`/api/games/${slug}/remove`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode: "restore" }),
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        setError("Couldn't restore that game right now. Please try again.");
+        return;
+      }
       router.refresh(); // the game reappears on the shelf
+    } catch {
+      setError("Couldn't restore that game right now. Please try again.");
     } finally {
       setBusy(null);
     }
@@ -31,7 +38,7 @@ export default function HiddenGames({ games }: { games: GameMeta[] }) {
 
   return (
     <section className="mt-10">
-      <h2 className="font-serif text-xl text-cocoa dark:text-latte">
+      <h2 className="font-serif text-2xl text-espresso dark:text-parchment">
         Off the shelf
       </h2>
       <p className="mt-1 text-sm text-cocoa/80 dark:text-latte/70">
@@ -48,13 +55,16 @@ export default function HiddenGames({ games }: { games: GameMeta[] }) {
             <button
               onClick={() => restore(g.slug)}
               disabled={busy !== null}
-              className="rounded-md bg-sage/70 px-2.5 py-1 text-xs font-medium text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
+              className="rounded-lg bg-sage/70 px-2.5 py-1 text-xs font-medium text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
             >
               {busy === g.slug ? "Restoring…" : "Restore"}
             </button>
           </li>
         ))}
       </ul>
+      {error && (
+        <p className="mt-3 text-sm text-terracotta dark:text-amberglow">{error}</p>
+      )}
     </section>
   );
 }

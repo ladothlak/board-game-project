@@ -26,6 +26,7 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
   const [bookmarkLabel, setBookmarkLabel] = useState("");
   const [toc, setToc] = useState<{ page: number; label: string }[]>([]);
   const [showToc, setShowToc] = useState(false);
+  const [copied, setCopied] = useState<"idle" | "copied" | "failed">("idle");
   const [pdfTheme, setPdfTheme] = useState<"normal" | "sepia" | "dark">("normal");
   // Cache-buster: bumped when the rulebook is replaced so the PDF re-fetches.
   const [version, setVersion] = useState(0);
@@ -329,6 +330,21 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
     window.dispatchEvent(new CustomEvent("parlor:ask-page", { detail: currentPage }));
   }
 
+  // Copy a deep link to the page currently in view, with brief confirmation.
+  function copyPageLink() {
+    const url = `${window.location.origin}/games/${slug}?page=${currentPage}`;
+    navigator.clipboard
+      .writeText(url)
+      .then(() => {
+        setCopied("copied");
+        window.setTimeout(() => setCopied("idle"), 1800);
+      })
+      .catch(() => {
+        setCopied("failed");
+        window.setTimeout(() => setCopied("idle"), 1800);
+      });
+  }
+
   // Listen for citation jumps from the chat bar. Attached immediately so
   // that clicks work even while the PDF is still rendering — the jump is
   // queued in pendingJumpRef and executed once the canvas exists.
@@ -398,14 +414,16 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
             </span>
 
             <button
-              onClick={() => {
-                const url = `${window.location.origin}/games/${slug}?page=${currentPage}`;
-                navigator.clipboard.writeText(url);
-              }}
-              className="rounded-lg bg-latte/40 px-3 py-1.5 text-sm text-cocoa hover:bg-terracotta/30 dark:bg-cocoa/30 dark:text-latte dark:hover:bg-terracotta/40"
+              onClick={copyPageLink}
+              aria-live="polite"
+              className="rounded-lg bg-latte/40 px-3 py-1.5 text-sm text-cocoa transition-colors hover:bg-terracotta/30 dark:bg-cocoa/30 dark:text-latte dark:hover:bg-terracotta/40"
               title="Copy a link to this page"
             >
-              🔗 Copy link
+              {copied === "copied"
+                ? "✓ Copied"
+                : copied === "failed"
+                  ? "Copy failed"
+                  : "🔗 Copy link"}
             </button>
 
             <button
@@ -413,7 +431,7 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
               aria-expanded={showToc}
               className={`rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 showToc
-                  ? "bg-terracotta text-cream dark:text-espresso"
+                  ? "border border-terracotta bg-terracotta/15 text-terracotta dark:border-amberglow dark:bg-amberglow/10 dark:text-amberglow"
                   : "bg-sage/70 text-espresso hover:bg-sage dark:text-parchment"
               }`}
               title="Toggle the table of contents"
@@ -446,7 +464,7 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
             </button>
             <button
               onClick={toggleFullscreen}
-              className="rounded-lg bg-terracotta/90 px-3 py-1.5 text-sm text-cream hover:bg-terracotta dark:text-espresso"
+              className="rounded-lg bg-latte/40 px-3 py-1.5 text-sm text-cocoa transition-colors hover:bg-terracotta/30 dark:bg-cocoa/30 dark:text-latte dark:hover:bg-terracotta/40"
               title="Toggle fullscreen"
             >
               {isFullscreen ? "✕ Exit fullscreen" : "⛶ Fullscreen"}
@@ -502,11 +520,11 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
                 onChange={(e) => setBookmarkLabel(e.target.value)}
                 placeholder={`Label for page ${currentPage} (optional)`}
                 aria-label="Bookmark label"
-                className="flex-1 rounded-lg border border-latte/70 bg-cream/70 px-3 py-1.5 text-sm text-espresso placeholder:text-cocoa/50 focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
+                className="flex-1 rounded-lg border border-latte/70 bg-parchment/50 px-3 py-1.5 text-sm text-espresso placeholder:text-cocoa/50 focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
               />
               <button
                 type="submit"
-                className="rounded-lg bg-terracotta px-3 py-1.5 text-sm text-cream hover:bg-terracotta/90 dark:text-espresso"
+                className="rounded-lg bg-sage/70 px-3 py-1.5 text-sm text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
               >
                 Save bookmark
               </button>

@@ -48,10 +48,10 @@ export default function BelowFold({
         </>
       ) : (
         <section className="mt-6">
-          <p className="rounded-lg border border-dashed border-latte/40 p-4 text-sm italic text-cocoa/70 dark:border-cocoa/40 dark:text-latte/60">
+          <p className="rounded-xl border border-dashed border-latte/40 p-4 text-sm italic text-cocoa/70 dark:border-cocoa/40 dark:text-latte/60">
             Waiting for the rulebook. The &apos;Pairs well with&apos;,
-            &apos;If you liked this, try…&apos;, Key Concepts, and Setup
-            Checklist sections will populate once the rulebook is added.
+            &apos;If you liked this, try…&apos;, key concepts, and setup
+            checklist sections will populate once the rulebook is added.
           </p>
         </section>
       )}

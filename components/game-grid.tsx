@@ -20,8 +20,8 @@ export default function GameGrid({ games }: { games: GameMeta[] }) {
 
   if (games.length === 0) {
     return (
-      <p className="rounded-xl border border-dashed border-latte bg-parchment/40 p-8 text-center text-cocoa dark:border-cocoa/50 dark:bg-nightcard dark:text-latte">
-        The shelf is empty so far. Add a game under content/games/ to get started.
+      <p className="rounded-xl border border-dashed border-latte bg-parchment/40 p-8 text-center text-cocoa dark:border-cocoa/50 dark:bg-nightcard/60 dark:text-latte">
+        The shelf is empty so far. Add your first game to get started.
       </p>
     );
   }
@@ -33,12 +33,12 @@ export default function GameGrid({ games }: { games: GameMeta[] }) {
           Sort
           <select
             value={sort}
-            onChange={(e) => setSort(e.target.value as "title" | "playtime")}
-            className="rounded-lg border border-latte/70 bg-parchment/60 px-2 py-1 text-espresso focus:outline-none dark:border-cocoa/50 dark:bg-nightcard dark:text-parchment"
+            onChange={(e) => setSort(e.target.value as "title" | "playtime" | "rating")}
+            className="rounded-lg border border-latte/70 bg-parchment/50 px-2 py-1 text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
           >
-            <option value="title">title</option>
-            <option value="playtime">playtime</option>
-            <option value="rating">our rating</option>
+            <option value="title">Title</option>
+            <option value="playtime">Playtime</option>
+            <option value="rating">Our rating</option>
           </select>
         </label>
       </div>
@@ -48,7 +48,7 @@ export default function GameGrid({ games }: { games: GameMeta[] }) {
           <div key={game.slug} className="relative">
             <Link
               href={`/games/${game.slug}`}
-              className="fade-up group block overflow-hidden rounded-2xl border border-latte/60 bg-parchment/50 shadow-sm transition-shadow hover:shadow-md dark:border-cocoa/40 dark:bg-nightcard"
+              className="fade-up group block overflow-hidden rounded-xl border border-latte/60 bg-parchment/50 shadow-sm transition-shadow hover:shadow-md dark:border-cocoa/40 dark:bg-nightcard"
             >
             <div className="relative h-40 overflow-hidden bg-latte/30 dark:bg-cocoa/20">
               {game.image ? (

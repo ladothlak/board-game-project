@@ -24,11 +24,11 @@ export default function RootLayout({
       <head>
         <link rel="manifest" href="/manifest.json" />
         <link rel="icon" href="/icon-192.png" />
-        <meta name="theme-color" content="#8b5e3c" />
+        <meta name="theme-color" content="#f7f1e6" />
         <link rel="preconnect" href="http://localhost:8888" />
         <script
           dangerouslySetInnerHTML={{
-            __html: `try { if (localStorage.getItem("parlor-theme") === "dark") document.documentElement.classList.add("dark"); } catch (e) {}`,
+            __html: `try { if (localStorage.getItem("parlor-theme") === "dark") { document.documentElement.classList.add("dark"); document.querySelector('meta[name="theme-color"]')?.setAttribute("content", "#171210"); } } catch (e) {}`,
           }}
         />
         <script
@@ -49,7 +49,7 @@ export default function RootLayout({
               Board Game Parlor
             </Link>
             <nav className="flex items-center gap-4 text-sm text-cocoa dark:text-latte">
-              <Link href="/" className="hover:text-terracotta dark:hover:text-amberglow">
+              <Link href="/" className="transition-colors hover:text-terracotta dark:hover:text-amberglow">
                 Home
               </Link>
               <ThemeToggle />

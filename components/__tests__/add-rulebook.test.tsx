@@ -147,7 +147,7 @@ describe("AddRulebook", () => {
     });
   });
 
-  it("shows Alright button after successful upload", async () => {
+  it("shows Done button after successful upload", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -174,9 +174,9 @@ describe("AddRulebook", () => {
     // Click the Upload button to trigger upload
     await user.click(submitBtn());
 
-    // After successful upload, the Alright button appears.
+    // After successful upload, the Done button appears.
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /alright/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /done/i })).toBeInTheDocument();
     });
   });
 
@@ -215,7 +215,7 @@ describe("AddRulebook", () => {
     window.removeEventListener("rulebook-replaced", handler);
   });
 
-  it("closes the modal when Alright is clicked", async () => {
+  it("closes the modal when Done is clicked", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -241,10 +241,10 @@ describe("AddRulebook", () => {
     await user.click(submitBtn());
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /alright/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /done/i })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: /alright/i }));
+    await user.click(screen.getByRole("button", { name: /done/i }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

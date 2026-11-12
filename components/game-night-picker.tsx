@@ -160,7 +160,10 @@ export default function GameNightPicker({ games }: { games: GameMeta[] }) {
         });
         if (res.ok) {
           const data = await res.json();
-          setLlmPicks(data.recommendations ?? []);
+          const recs: LlmPick[] = data.recommendations ?? [];
+          // Fall back to local scoring if the LLM has nothing to suggest.
+          if (recs.length > 0) setLlmPicks(recs);
+          else setPick(best);
         } else {
           // Fall back to local scoring.
           setPick(best);
@@ -205,9 +208,9 @@ export default function GameNightPicker({ games }: { games: GameMeta[] }) {
             role="dialog"
             aria-modal="true"
             aria-label="Pick a game"
-            className="w-full max-w-md rounded-2xl border border-latte/60 bg-parchment/90 p-6 shadow-xl dark:border-cocoa/40 dark:bg-nightcard/95"
+            className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl border border-latte/60 bg-parchment/90 p-6 shadow-xl dark:border-cocoa/40 dark:bg-nightcard/95"
           >
-            <h3 className="font-serif text-xl text-espresso dark:text-parchment">
+            <h3 className="font-serif text-2xl text-espresso dark:text-parchment">
               Pick a game
             </h3>
             <p className="mt-1 text-sm text-cocoa dark:text-latte">
@@ -243,7 +246,7 @@ export default function GameNightPicker({ games }: { games: GameMeta[] }) {
                   onChange={(e) => setPlayers(e.target.value)}
                   inputMode="numeric"
                   placeholder="3"
-                  className="w-20 rounded-lg border border-latte/70 bg-parchment/60 px-3 py-2 text-sm text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
+                  className="w-20 rounded-lg border border-latte/70 bg-parchment/50 px-3 py-2 text-sm text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
                 />
               </label>
               <label className="flex items-center gap-1.5 text-sm text-cocoa dark:text-latte">
@@ -253,24 +256,24 @@ export default function GameNightPicker({ games }: { games: GameMeta[] }) {
                   onChange={(e) => setMaxTime(e.target.value)}
                   inputMode="numeric"
                   placeholder="90"
-                  className="w-24 rounded-lg border border-latte/70 bg-parchment/60 px-3 py-2 text-sm text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
+                  className="w-24 rounded-lg border border-latte/70 bg-parchment/50 px-3 py-2 text-sm text-espresso focus:border-terracotta focus:outline-none dark:border-cocoa/50 dark:bg-night dark:text-parchment"
                 />
               </label>
             </div>
 
-            <div className="mt-4 flex items-center gap-2">
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                onClick={closeModal}
+                className="rounded-lg bg-latte/40 px-4 py-2 text-sm text-cocoa transition-colors hover:bg-terracotta/30 dark:bg-cocoa/30 dark:text-latte dark:hover:bg-terracotta/40"
+              >
+                Cancel
+              </button>
               <button
                 onClick={handlePick}
                 disabled={!hasInputs || loading}
                 className="rounded-lg bg-sage/70 px-4 py-2 text-sm text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
               >
                 {loading ? "Brewing…" : "🎲 Pick"}
-              </button>
-              <button
-                onClick={closeModal}
-                className="rounded-lg bg-latte/40 px-4 py-2 text-sm text-cocoa transition-colors hover:bg-terracotta/30 dark:bg-cocoa/30 dark:text-latte dark:hover:bg-terracotta/40"
-              >
-                Cancel
               </button>
             </div>
 

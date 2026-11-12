@@ -378,7 +378,7 @@ export default function BulkAdd({ variant = "shelf", onDone }: { variant?: "shel
             : "flex-1 rounded-lg bg-sage/70 px-4 py-2 text-center text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
         }
       >
-        📥 Bulk Add
+        📥 Bulk add
       </button>
 
       {open && (
@@ -395,9 +395,9 @@ export default function BulkAdd({ variant = "shelf", onDone }: { variant?: "shel
             aria-label="Bulk add games"
             className="fade-up flex max-h-[85vh] w-full max-w-lg flex-col rounded-2xl border border-latte/60 bg-parchment/90 p-6 shadow-xl dark:border-cocoa/40 dark:bg-nightcard/95"
           >
-            <h3 className="font-serif text-xl text-espresso dark:text-parchment">
+            <h2 className="font-serif text-2xl text-espresso dark:text-parchment">
               Bulk add to the shelf
-            </h3>
+            </h2>
             <p className="mt-1 text-sm text-cocoa dark:text-latte">
               Import your BGG collection or paste a list, then add the ones with rulebooks.
             </p>
@@ -417,7 +417,7 @@ export default function BulkAdd({ variant = "shelf", onDone }: { variant?: "shel
                         : "text-cocoa hover:bg-parchment/70 dark:text-latte dark:hover:bg-cocoa/20"
                     }`}
                   >
-                    CSV Upload
+                    CSV upload
                   </button>
                   <button
                     type="button"
@@ -430,7 +430,7 @@ export default function BulkAdd({ variant = "shelf", onDone }: { variant?: "shel
                         : "text-cocoa hover:bg-parchment/70 dark:text-latte dark:hover:bg-cocoa/20"
                     }`}
                   >
-                    Paste List
+                    Paste list
                   </button>
                 </div>
 
@@ -496,7 +496,7 @@ export default function BulkAdd({ variant = "shelf", onDone }: { variant?: "shel
                   onClick={() => { setOpen(false); onDone?.(); }}
                   className="mt-5 rounded-lg bg-sage/70 px-6 py-2 text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
                 >
-                  Alright
+                  Done
                 </button>
               </div>
             ) : (
@@ -610,7 +610,7 @@ export default function BulkAdd({ variant = "shelf", onDone }: { variant?: "shel
                 )}
 
                 {/* ─── Footer ─── */}
-                <div className="mt-4 flex items-center justify-between gap-2">
+                <div className="mt-4 flex items-center justify-end gap-2">
                   <button
                     type="button"
                     onClick={() => setOpen(false)}
@@ -622,9 +622,9 @@ export default function BulkAdd({ variant = "shelf", onDone }: { variant?: "shel
                     type="button"
                     onClick={handleAddSelected}
                     disabled={selected.size === 0}
-                    className="rounded-lg bg-terracotta px-4 py-2 text-sm text-cream transition-colors hover:bg-terracotta/90 disabled:opacity-50 dark:text-espresso"
+                    className="rounded-lg bg-sage/70 px-4 py-2 text-sm text-espresso transition-colors hover:bg-sage disabled:opacity-50 dark:text-parchment"
                   >
-                    Add Selected ({selected.size})
+                    Add selected ({selected.size})
                   </button>
                 </div>
               </>

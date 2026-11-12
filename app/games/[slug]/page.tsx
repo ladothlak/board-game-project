@@ -52,8 +52,8 @@ export default async function GamePage({
             className="object-cover"
           />
         ) : (
-          <div className="flex h-48 items-center justify-center bg-latte/30 text-cocoa dark:bg-cocoa/20 dark:text-latte">
-            No cover photo yet — drop one into content/games/{slug}/
+          <div className="flex h-full items-center justify-center bg-latte/30 p-6 text-center text-cocoa dark:bg-cocoa/20 dark:text-latte">
+            No cover photo yet — add one with “Edit game”.
           </div>
         )}
       </section>
@@ -78,7 +78,7 @@ export default async function GamePage({
           <DescriptionBlock slug={slug} initialDescription={game.description} />
         ) : (
           /* No rulebook yet — themed placeholder until it's shelved. */
-          <p className="mt-4 rounded-lg border border-dashed border-latte/40 p-4 text-sm italic text-cocoa/70 dark:border-cocoa/40 dark:text-latte/60">
+          <p className="mt-4 rounded-xl border border-dashed border-latte/40 p-4 text-sm italic text-cocoa/70 dark:border-cocoa/40 dark:text-latte/60">
             The rulebook hasn&apos;t arrived yet. Once it&apos;s shelved, the
             description, key concepts, and setup checklist will brew themselves.
           </p>
