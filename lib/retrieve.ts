@@ -53,16 +53,6 @@ export function tokenize(s: string): string[] {
   return s.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2);
 }
 
-/** Document frequency across a chunk set: term → number of chunks containing it. */
-export function buildDocFreq(chunks: Chunk[]): Map<string, number> {
-  const df = new Map<string, number>();
-  for (const c of chunks) {
-    const seen = new Set(tokenize(c.text));
-    for (const t of seen) df.set(t, (df.get(t) ?? 0) + 1);
-  }
-  return df;
-}
-
 /**
  * Per-slug document-frequency tables, rebuilt only when the index changes.
  * `retrieve()` used to recompute this on every call (and multiQueryRetrieve
@@ -85,6 +75,17 @@ export async function docFreqFor(slug: string): Promise<Map<string, number> | un
     dfCache = { mtime: cacheMtime, tables };
   }
   return dfCache.tables.get(slug);
+}
+
+/**
+ * Reset the module-level index and DF caches. Test-only hook: pipeline tests
+ * mock loadIndex() without advancing the real mtime, so without this the
+ * first test's DF table would be silently served to every later test.
+ */
+export function resetRetrieveCachesForTest(): void {
+  cache = null;
+  cacheMtime = -1;
+  dfCache = null;
 }
 
 /**

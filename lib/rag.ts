@@ -514,7 +514,7 @@ export async function buildRagContext(
   }
 
   // 6. Re-rank with LLM — but skip it when it isn't needed: that's a full
-  // LLM round trip (up to 20 s on the local model) saved for easy questions.
+  // LLM round trip (up to 30 s on the local model) saved for easy questions.
   // Skip when the question names an explicit page (already boosted above),
   // or when TF-IDF has a clear winner (top score ≥ 3 and ≥ 2× the runner-up)
   // AND that winner lexically contains multiple distinct query terms. A single
@@ -524,7 +524,6 @@ export async function buildRagContext(
   const runnerUpScore = candidates[1]?.score ?? 0;
   let skipRerank = explicitPages.length > 0;
   if (!skipRerank && topScore >= 3 && topScore >= 2 * runnerUpScore) {
-    const queryTerms = new Set(queries.flatMap((q) => tokenize(q)));
     const topText = candidates[0].text.toLowerCase();
     const distinctHits = [...queryTerms].filter((t) => topText.includes(t)).length;
     skipRerank = distinctHits >= 2;

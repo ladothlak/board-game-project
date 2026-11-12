@@ -355,7 +355,12 @@ export default function PdfViewer({ src, slug, expansionSrcs = [] }: { src: stri
   /** Render the pages around the viewport; evict the far ones. */
   function renderWindow() {
     const container = containerRef.current;
-    if (!container || !ready || offsetsRef.current.length === 0) return;
+    // No `ready` guard here: this is called from the Phase 1 geometry loop,
+    // whose closure captured a render where ready was still false. The
+    // offsets array is the authoritative "geometry landed" signal — it is
+    // populated by computeOffsets() before setReady(true) and reset on
+    // cleanup — so it guards equally well without the stale-closure risk.
+    if (!container || offsetsRef.current.length === 0) return;
     // Total page count from the offsets array (numPages + 1 entries), not the
     // state, so this is safe from stale closures in long-lived callbacks.
     const total = offsetsRef.current.length - 1;

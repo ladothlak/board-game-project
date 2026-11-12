@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { buildRagContext } from "../rag";
-import { loadIndex } from "../retrieve";
+import { loadIndex, resetRetrieveCachesForTest } from "../retrieve";
 import type { Chunk } from "../retrieve";
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────────
@@ -25,6 +25,10 @@ const mockFetch = vi.fn<(input: string | URL | Request, init?: RequestInit) => P
 beforeEach(() => {
   mockFetch.mockReset();
   vi.stubGlobal("fetch", mockFetch);
+  // The mocked loadIndex never advances the real mtime, so reset the
+  // module-level DF cache — otherwise the first test's table would be
+  // silently served to every later test.
+  resetRetrieveCachesForTest();
 });
 
 afterEach(() => {

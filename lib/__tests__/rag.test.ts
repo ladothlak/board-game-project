@@ -133,6 +133,26 @@ describe("followCrossRefs", () => {
     // Only page 3 is referenced; no phantom pages added.
     expect(result.map((c) => c.page)).toEqual([1, 3]);
   });
+
+  it("caps the number of extra pages at maxExtra", () => {
+    // A reference-heavy chunk (like a room sheet) points at many pages;
+    // following all of them would dilute the context budget with noise.
+    const refChunk: Chunk = {
+      id: "p1",
+      slug: "g",
+      title: "",
+      page: 1,
+      text: "See page 2. See page 3. See page 4. See page 5. See page 6. See page 7.",
+    };
+    const many: Chunk[] = [
+      refChunk,
+      ...[2, 3, 4, 5, 6, 7].map((p) => ({ id: `p${p}`, slug: "g", title: "", page: p, text: `Page ${p} content.` })),
+    ];
+    const result = followCrossRefs(many, [{ ...refChunk, score: 10 }]);
+    // Exactly maxExtra (4) extras are added, in selection order.
+    expect(result).toHaveLength(5);
+    expect(result.map((c) => c.page)).toEqual([1, 2, 3, 4, 5]);
+  });
 });
 
 // ─── adaptiveContext ─────────────────────────────────────────────────────────────
@@ -164,6 +184,36 @@ describe("adaptiveContext", () => {
     const [page1, page2] = out.split("\n\n");
     expect(page1.replace("--- Page 1 ---\n", "").length).toBe(1200);
     expect(page2.replace("--- Page 2 ---\n", "").length).toBe(1200);
+  });
+
+  it("keeps the most query-relevant sentences when cutting a long chunk", () => {
+    // An answer sitting deep in a long page must survive the cut: the
+    // relevant sentence is kept, the filler around it is dropped.
+    const filler = "x".repeat(300);
+    const relevant = "The contamination check decides who dies.";
+    const text = `${filler}. ${relevant} ${filler}`;
+    const selected = [{ ...CHUNKS[0], text, score: 1 }];
+    // Budget smaller than the chunk so a cut is forced.
+    const out = adaptiveContext(
+      selected,
+      400,
+      new Set(["contamination", "dies"]),
+      new Map([["contamination", 2], ["dies", 1]]),
+      10
+    );
+    const pagePart = out.replace("--- Page 1 ---\n", "");
+    expect(pagePart).toContain(relevant);
+    expect(pagePart.length).toBeLessThan(text.length);
+  });
+
+  it("falls back to a prefix slice when no sentence matches the query terms", () => {
+    // No punctuation, no query terms: every sentence scores 0, so the cut
+    // degrades to a plain prefix slice (never less text than a plain cut).
+    const text = "x".repeat(500) + " end";
+    const selected = [{ ...CHUNKS[0], text, score: 1 }];
+    const out = adaptiveContext(selected, 400, new Set(["contamination"]), undefined, 10);
+    const pagePart = out.replace("--- Page 1 ---\n", "");
+    expect(pagePart).toBe(text.slice(0, 400));
   });
 });
 
@@ -283,5 +333,21 @@ describe("rerank", () => {
     expect(result[0].id).toBe("c1"); // 2 + 5*3 = 17 beats 8 + 1*3 = 11
     expect(result[0].score).toBeCloseTo(17);
     expect(result[1].score).toBeCloseTo(11);
+  });
+
+  it("previews candidates with their most query-relevant sentences, not just the first 200 chars", async () => {
+    // A relevant passage deep in a long chunk must reach the LLM so it can be
+    // rated accurately; the filler around it must not.
+    const filler = "x".repeat(400);
+    const relevant = "Set up the board.";
+    const longChunk = { ...CHUNKS[0], text: `${filler}. ${relevant} ${"y".repeat(400)}`, score: 5 };
+    mockFetch.mockResolvedValue(llmResponse("[5]"));
+
+    await rerank("key", "question", [longChunk], new Set(["setup", "board"]), undefined, 1);
+
+    const body = JSON.parse(String(mockFetch.mock.calls[0][1]?.body)) as { messages: { content: string }[] };
+    const prompt = body.messages.map((m) => m.content).join("\n");
+    expect(prompt).toContain(relevant);
+    expect(prompt).not.toContain(filler.slice(0, 100));
   });
 });

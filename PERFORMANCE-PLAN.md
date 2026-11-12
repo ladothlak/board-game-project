@@ -137,16 +137,16 @@ failures as the shelf grows.
 **Where:** `lib/rag.ts` (`buildRagContext`) + `app/api/chat/route.ts`.
 
 **Why:** For a non-cached question the pipeline makes up to **two sequential
-LLM calls before generation** — `expandQuery` (up to 20 s) then `rerank` (up to
-20 s) — on a slow local reasoning model. All LLM calls are also serialized by
+LLM calls before generation** — `expandQuery` (up to 30 s) then `rerank` (up to
+30 s) — on a slow local reasoning model. All LLM calls are also serialized by
 the single-flight queue (`lib/llm-queue.ts`), so a second user's question
 waits for the first answer to finish streaming.
 
 **What to do:**
 
-1. **Overlap retrieval with expansion.** Run TF-IDF retrieval on the raw
-   query *in parallel* with `expandQuery`, then merge both result sets in
-   `multiQueryRetrieve`. The expansion latency is hidden behind retrieval.
+1. **Overlap expansion with index loading.** `expandQuery` runs *in parallel*
+   with `loadIndex()`, so the LLM call and the index read hide each other's
+   latency (the retrieval itself still runs on the expanded variants).
 2. **Skip rerank when it isn't needed.** If the top TF-IDF score is well above
    the runner-up (e.g. ratio > 2) or the query has an explicit page reference,
    skip the LLM rerank call entirely — that's a full LLM round trip saved for
