@@ -262,6 +262,173 @@ into a PDF cheaper.
 
 ---
 
+## Tier 4 — Decision-model RAG (fast classification + relevance scoring)
+
+### 4.1 Use the small `kev-0.8b` decision model for pipeline decisions
+
+**Where:** `lib/decision-model.ts` (new), `lib/rag.ts`, `app/api/chat/route.ts`,
+`app/api/chat/prewarm/route.ts`.
+
+**Why:** The RAG pipeline burns its slow 27B reasoning model on *decisions* —
+query classification (via a keyword heuristic) and candidate relevance scoring
+(the LLM re-rank, up to 30 s). A small dedicated classifier (`kev-0.8b`, served
+at `<UNSLOTH_BASE_URL>/systemone`) answers a batch of structured questions in
+~0.5 s: multiple choice (`choice`), yes/no probability (`noul`), and ordered
+rating (`score`). Spending ~0.5 s on decisions lets the slow model focus on
+generation.
+
+**What was done:**
+
+- `lib/decision-model.ts` — typed client for `/systemone`
+  (`askDecisionModel`, `askChoice`); returns `null` on any failure so callers
+  always fall back to the existing behavior. URL resolved from env at call time.
+- `lib/rag.ts` — opt-in `RagOptions.useDecisionModel` (default **off**, so the
+  current pipeline is byte-for-byte unchanged and A/B benchmarking is clean):
+  - `decisionClassify()` runs in parallel with `loadIndex()`, replacing the
+    keyword `classifyQuery` (choice) and gating `expandQuery` on a `noul`
+    "needs rephrasing" verdict instead of the length heuristic.
+  - `decisionRerank()` replaces the LLM re-rank with one batched `score` call
+    over all candidates, combined with TF-IDF using the same 3:1 weighting as
+    `rerank()`, so orderings stay comparable.
+- Both chat routes pass `{ useDecisionModel: USE_DECISION_MODEL === "1" }`
+  (env opt-in, default off).
+
+**Benchmark** (`lib/__tests__/rag-benchmark.test.ts`; live numbers from
+2026-11-12 against the real endpoints, 32-case labeled dataset grounded in all
+five rulebooks — Agricola, Catan, Container, Nemesis: Lockdown, Root):
+
+| Metric | Existing (keyword + LLM) | Enhanced (decision model) |
+| --- | --- | --- |
+| Classification accuracy (32 cases) | 37.5% | **50.0%** |
+| Retrieval top-1 hit rate | **9.4%** | 0.0% |
+| Retrieval MRR | **33.2%** | 25.4% |
+| Retrieval recall@3 | **42.2%** | 35.9% |
+| End-to-end latency (mean) | ~12.8 s | **~3.1 s** |
+| Re-rank, hard question ("turmoil", p. 13) | ~9.9 s, top-1 correct | **~2.6 s**, top-1 correct |
+| Raw batched score call (3 candidates) | — | ~0.3–0.5 s |
+
+Per-case divergence (top-3 hit): existing-only hits 3 · enhanced-only hits 1 ·
+**both miss 17 of 32**.
+
+**Honest read:**
+
+- **Latency is the clear win:** ~4× faster end-to-end (3.1 s vs 12.8 s), driven
+  by replacing the up-to-30 s LLM re-rank with a ~0.3–2.6 s batched score call
+  and hiding classification behind `loadIndex()`.
+- **Retrieval effectiveness is the clear loss:** on this dataset the LLM
+  pipeline wins 3-to-1 on divergent cases and leads on every aggregate metric
+  (MRR 33% vs 25%, recall@3 42% vs 36%). Two mechanisms: (a) the `kev-0.8b`
+  relevance scores cluster tightly (≈2.1–2.3 on the 0–4 scale), so they add
+  little discriminative signal over TF-IDF; (b) the `noul` "needs
+  rephrasing" verdict skips LLM expansion that would have helped on some
+  paraphrased questions.
+- **The bigger bottleneck is upstream of the re-rank:** both pipelines miss 17
+  of 32 questions — TF-IDF retrieval + context selection simply can't find
+  the answer page for paraphrased/hard questions, regardless of which
+  re-ranker runs. Improving base retrieval (better expansion, embedding
+  retrieval, or a stronger candidate pool) would help both modes far more
+  than swapping re-rankers.
+- Classification accuracy (50% vs 37.5%) is a real but modest gain; the
+  `kev-0.8b` model discriminates less than a reasoning model would.
+
+**Follow-ups (not done):** tune the expansion gate (trust the `noul` verdict
+only above a confidence threshold); consider skipping the decision-model score
+call when TF-IDF has a clear winner (it adds ~0.5 s without changing orderings);
+invest in base retrieval quality, which is where both pipelines currently lose.
+
+### 4.2 Prompt engineering for the clustered `score` problem
+
+The §4.1 benchmark showed the decision model's relevance scores cluster tightly
+(≈2.1–2.3 on the 0–4 scale), adding no discriminative signal over TF-IDF. This
+section records a systematic prompt-probe campaign against the live endpoint
+to fix that, and the design it produced.
+
+**Method.** For each grounded question (1 known-relevant chunk + 3 known-
+irrelevant chunks from the same rulebook) we batch all candidates in one
+`score` call and measure: *gap* (mean good−bad score), *top-1 hit rate*
+(fraction where the good chunk scores highest), and *spread* (std dev of all
+scores). Variants are compared on identical candidate sets; runs are repeated
+to check stability (the model is deterministic — scores identical to 2 decimals
+across runs).
+
+**Round 1 — framing variants (4 candidates, raw ~200-char previews):**
+
+| Variant | Top-1 | Gap | Note |
+| --- | --- | --- | --- |
+| V0 baseline (per-excerpt instructions) | 60% | 0.15 | current wording; scores cluster ≈2.2–2.6 |
+| V1 sharp level definitions (verbose rubric per question) | 40% | 0.00 | **worse** — a 0.8B model can't handle fine-grained criteria |
+| V2 comparative `state` (question + ALL excerpts visible) | **80%** | **0.37** | scores candidates *relative to each other* |
+| V3 coarse 3 levels | 60% | 0.08 | coarseness alone doesn't help |
+
+Key finding: the model discriminates only when it can see all candidates at
+once and compare them; judging each excerpt in isolation clusters everything
+mid-scale. The rubric stated **once** in `state` (not repeated per question)
+cuts tokens with no quality loss, and longer previews *hurt* (80% → 60% top-1
+going 200 → 300 chars — the relevant fact gets buried in noise for a 0.8B
+model). Winner: comparative framing + rubric-in-state + ~200-char previews
+(~1.3 k tokens, ~3 s/call).
+
+**Production-scale failure.** The pipeline passes **8** candidates to re-rank.
+At that scale the comparative call (a) runs 10–13 s — past the 8 s timeout, so
+`decisionRerank` returns `null` and silently falls back to the slow LLM
+re-rank, and (b) **inverts** scores: the good chunk ranks last (e.g. 1.54 vs
+max-bad 1.84). Rescue probes at 8 candidates all fail:
+
+| Strategy | Top-1 | Latency |
+| --- | --- | --- |
+| `score`, 200-char sentence previews, 8 cand. | 0% (good loses all 3) | 10–13 s |
+| `score`, 100-char sentence previews, 8 cand. | 0% | 6.6–8.2 s |
+| `choice` ("which excerpt answers?"), 8 options | 0%, confidence 0.05–0.18 (near-uniform) | ~1.2–1.6 s |
+
+**Preview-type isolation (top-4, same question sets):**
+
+| Preview | Top-1 | Gap |
+| --- | --- | --- |
+| Query-term sentence extraction (what production used) | **0%** | −0.21 |
+| Raw ~200-char prefix slices | **67%** (2/3) | +0.08 |
+
+This is the decisive insight: **`kev-0.8b` judges by surface keyword overlap,
+not semantic relevance.** Section headings carry the query terms ("Turmoil If
+you cannot take an action…"), so raw prefix slices let the good chunk win on
+lexical match; sentence extraction strips that heading context and the model
+loses every time. The one question that loses in *both* configs (turmoil, p. 13)
+has no strong lexical signal in its answer chunk — a capacity limit no prompt
+fixes.
+
+**Resulting design** (integrated in `decisionRerank`): comparative framing with
+rubric-in-state, **top-4 shortlist only** (where discrimination is proven and
+the call fits the timeout at ~3 s), **raw prefix previews**, remaining
+candidates untouched in TF-IDF order. Cost ~1.3 k tokens / ~3 s vs up to 30 s
+for the LLM re-rank it replaces.
+
+**Benchmark (top-4 comparative, live, 2026-11-12, 32 cases):**
+
+| Metric | Existing (keyword + LLM) | Enhanced (top-4 comparative) |
+| --- | --- | --- |
+| Retrieval top-1 hit rate | 3.1% | 0.0% |
+| Retrieval MRR | **31.3%** | 26.1% |
+| Retrieval recall@3 | **45.3%** | 35.9% |
+| End-to-end latency (mean) | ~13.4 s | **~3.7 s** |
+| Re-rank, hard question ("turmoil", p. 13) | ~18.8 s, top-1 correct | **~6.4 s, top-1 correct** (previously timed out → LLM fallback) |
+
+Per-case divergence (top-3 hit): existing-only hits 3 · enhanced-only hits 0 ·
+both miss 17 of 32.
+
+**Verdict:** prompt engineering fixed the *symptom* — scores no longer cluster
+(probe gap −0.21 → +0.08) and the hard question that lost in every probe is now
+correct at ~6 s instead of timing out — but it did not change the end-to-end
+outcome. Retrieval quality still trails the existing pipeline on every metric,
+because the binding constraint is upstream: TF-IDF base retrieval misses 17 of
+32 questions, and a 0.8B classifier's shallow keyword-matching signal cannot
+recover what retrieval never found. Where TF-IDF *does* surface the answer, the
+3:1 score weighting occasionally displaces it from the top-3 (existing-only
+hits 3, enhanced-only 0). The decision model's durable value remains
+classification (50% vs 37.5%) and latency (~3.7 s vs ~13.4 s); the opt-in flag
+stays **default-off**, and the investment case for accuracy is base retrieval
+(embeddings / larger candidate pool), not re-rank prompting.
+
+---
+
 ## Suggested order
 
 1. Measurement baseline (§0) — half a day.
