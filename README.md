@@ -93,7 +93,9 @@ Each game subpage (`/games/<slug>`) includes:
 
 ### PDF Viewer
 
-- **Discrete zoom levels** — 100% / 150% / 200% via instant CSS scaling (no re-rasterization).
+- **Discrete zoom levels** — 100% / 150% / 200% / 250% / 300%. Pages are
+  rasterized at display resolution, so switching zoom re-rasterizes only the
+  visible window (~a dozen pages) instead of the whole book.
 - **Current page tracking** — as you scroll, the viewer knows which page you're on.
 - **Bookmarks** — save labelled pages; jump to them from chips above the viewer.
 - **"Ask about p. N"** — sends a focused question to the chat bar for the current page.

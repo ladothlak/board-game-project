@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { buildRagContext } from "../rag";
-import { loadIndex } from "../retrieve";
+import { loadIndex, resetRetrieveCachesForTest } from "../retrieve";
 import type { Chunk } from "../retrieve";
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────────
@@ -25,6 +25,10 @@ const mockFetch = vi.fn<(input: string | URL | Request, init?: RequestInit) => P
 beforeEach(() => {
   mockFetch.mockReset();
   vi.stubGlobal("fetch", mockFetch);
+  // The mocked loadIndex never advances the real mtime, so reset the
+  // module-level DF cache — otherwise the first test's table would be
+  // silently served to every later test.
+  resetRetrieveCachesForTest();
 });
 
 afterEach(() => {
@@ -107,7 +111,10 @@ describe("buildRagContext", () => {
     // page reference gates it off.
     const result = await buildRagContext(SLUG, "Tell me about p. 42", KEY);
 
-    expect(mockFetch).toHaveBeenCalledTimes(1); // re-rank only
+    // No LLM calls at all: expansion is gated off by the explicit page
+    // reference, and re-ranking is skipped because the referenced page is
+    // already boosted to the top.
+    expect(mockFetch).not.toHaveBeenCalled();
     expect(expansionCalls()).toBe(0);
 
     // The referenced page is boosted ahead of everything else.
@@ -125,8 +132,9 @@ describe("buildRagContext", () => {
 
     const result = await buildRagContext(SLUG, "How does the Doom expansion work?", KEY, ["Doom"]);
 
-    // Two LLM calls: expansion + re-rank.
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // One LLM call: expansion runs, but re-ranking is skipped because the
+    // boosted expansion chunk (score 90) is a clear TF-IDF winner.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(expansionCalls()).toBe(1);
 
     // The expansion chunk (boosted to score 90) leads the context.
@@ -158,7 +166,9 @@ describe("buildRagContext", () => {
     const result = await buildRagContext(SLUG, "win the game", KEY);
 
     // Above the fallback threshold — no fallback note would be appended.
-    expect(result.confidence).toBe(1);
+    // (Re-ranking is skipped for this clear TF-IDF winner, so confidence
+    // reflects the raw score rather than the LLM-boosted one.)
+    expect(result.confidence).toBeGreaterThan(0.25);
 
     // The top chunk's full text is included (no truncation needed), led by
     // the victory page.
@@ -167,8 +177,8 @@ describe("buildRagContext", () => {
     expect(result.pages).toEqual([1, 3]);
   });
 
-  it("truncates later chunks to fit the adaptive context budget", async () => {
-    const longSetup = `Set up the board. ${"a".repeat(1980)}`; // ~2000 chars
+  it("caps chunks at their allocation and keeps relevant sentences when cutting", async () => {
+    const longSetup = `Set up the board. ${"a".repeat(2980)}`; // ~3000 chars
     const longCombat = `${"b".repeat(4900)} set up the board`; // ~5000 chars
     vi.mocked(loadIndex).mockResolvedValue([
       { id: "l1", slug: SLUG, title: "Setup", page: 1, text: longSetup },
@@ -181,15 +191,19 @@ describe("buildRagContext", () => {
     // Both pages stay represented...
     expect(result.excerpts).toContain("--- Page 1 ---");
     expect(result.excerpts).toContain("--- Page 2 ---");
-    // ...the first chunk keeps its full text...
-    expect(result.excerpts).toContain(longSetup);
-    // ...but the second is truncated to fit the remaining budget.
-    const page2Part = result.excerpts.split("--- Page 2 ---\n")[1];
+    // ...the top chunk is capped at its allocation (no more full-text pass)...
+    const page1Part = result.excerpts.split("\n\n")[0].replace("--- Page 1 ---\n", "");
+    expect(page1Part.length).toBeLessThan(longSetup.length);
+    // ...but the query-relevant sentence survives the cut...
+    expect(page1Part).toContain("Set up the board.");
+    // ...and the second chunk is truncated to fit its allocation (half the
+    // 4000-char budget, since the two chunks score equally).
+    const page2Part = result.excerpts.split("\n\n")[1].replace("--- Page 2 ---\n", "");
     expect(page2Part.length).toBeLessThan(longCombat.length);
-    expect(page2Part.length).toBeLessThanOrEqual(402);
+    expect(page2Part.length).toBeLessThanOrEqual(2000);
 
-    // The whole context stays within the ~2400-char budget plus headers.
-    expect(result.excerpts.length).toBeLessThan(2600);
+    // The whole context stays within the ~4000-char budget plus headers.
+    expect(result.excerpts.length).toBeLessThan(4200);
   });
 
   it("returns a graceful empty context when the slug has no indexed chunks", async () => {
@@ -212,8 +226,9 @@ describe("buildRagContext", () => {
 
     const result = await buildRagContext(SLUG, "How do I deal with enemy attacks?", KEY);
 
-    // Expansion + re-rank both ran.
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // Expansion ran; re-ranking was skipped because the merged TF-IDF
+    // winner is clear enough not to need the LLM tie-breaker.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(expansionCalls()).toBe(1);
 
     // Each variant matched a different page; both made it into the context.

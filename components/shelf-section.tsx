@@ -1,11 +1,29 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import type { GameMeta } from "@/lib/games";
 import GameGrid from "@/components/game-grid";
-import FindGameModal from "@/components/find-game-modal";
-import GameNightPicker from "@/components/game-night-picker";
-import AddGame from "@/components/add-game";
+
+// The modals (and AddGame's bulk-add machinery) are only needed after their
+// button is first clicked, so they're lazy-loaded out of the home page's
+// initial JS. Each mounts with `open` already true on first click.
+const FindGameModal = dynamic(() => import("@/components/find-game-modal"), { ssr: false });
+const GameNightPicker = dynamic(() => import("@/components/game-night-picker"), { ssr: false });
+const AddGame = dynamic(() => import("@/components/add-game"), { ssr: false });
+
+/** Backdrop shown while a lazy-loaded modal's chunk is loading. */
+function ModalLoadingBackdrop() {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm" aria-busy="true">
+      <span className="steam" aria-hidden>
+        <span />
+        <span />
+        <span />
+      </span>
+    </div>
+  );
+}
 
 
 /**
@@ -16,6 +34,11 @@ import AddGame from "@/components/add-game";
 export default function ShelfSection({ games: initialGames }: { games: GameMeta[] }) {
   const [games, setGames] = useState<GameMeta[]>(initialGames);
   const [findOpen, setFindOpen] = useState(false);
+  // Open state for the lazy-loaded modals. The trigger buttons live here in
+  // the parent (never unmounted), so no button flickers while a chunk loads;
+  // the modal itself mounts — and triggers its dynamic import — on open.
+  const [addOpen, setAddOpen] = useState(false);
+  const [nightOpen, setNightOpen] = useState(false);
   const [activeTags, setActiveTags] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
 
@@ -26,9 +49,12 @@ export default function ShelfSection({ games: initialGames }: { games: GameMeta[
     return () => window.removeEventListener("parlor:open-find", handler);
   }, []);
 
-  // Poll for description updates from the digest pipeline.
+  // Poll for description updates from the digest pipeline. Paused while the
+  // tab is hidden (and one immediate poll fires on return) so background tabs
+  // stop hammering the server.
   useEffect(() => {
     let cancelled = false;
+    let id: number | undefined;
     async function poll() {
       try {
         const res = await fetch("/api/games/meta");
@@ -55,8 +81,24 @@ export default function ShelfSection({ games: initialGames }: { games: GameMeta[
         // Network error — silently skip this poll.
       }
     }
-    const id = setInterval(poll, 10_000);
-    return () => { cancelled = true; clearInterval(id); };
+    function start() {
+      void poll();
+      if (id === undefined) id = window.setInterval(poll, 10_000);
+    }
+    function stop() {
+      if (id !== undefined) {
+        clearInterval(id);
+        id = undefined;
+      }
+    }
+    const onVisibility = () => (document.hidden ? stop() : start());
+    document.addEventListener("visibilitychange", onVisibility);
+    if (!document.hidden) start();
+    return () => {
+      cancelled = true;
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, []);
 
   const filtered = useMemo(() => {
@@ -104,10 +146,20 @@ export default function ShelfSection({ games: initialGames }: { games: GameMeta[
               >
                 🔍 Find a game
               </button>
-              <GameNightPicker games={games} />
+              <button
+                onClick={() => setNightOpen(true)}
+                className="flex-1 rounded-lg bg-sage/70 px-4 py-2 text-center text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
+              >
+                🎲 Pick a game
+              </button>
             </>
           )}
-          <AddGame />
+          <button
+            onClick={() => setAddOpen(true)}
+            className="flex-1 rounded-lg bg-sage/70 px-4 py-2 text-center text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
+          >
+            + Add a game
+          </button>
         </div>
       </section>
 
@@ -128,20 +180,36 @@ export default function ShelfSection({ games: initialGames }: { games: GameMeta[
         </p>
       )}
 
-      <FindGameModal
-        open={findOpen}
-        onClose={() => setFindOpen(false)}
-        games={games}
-        activeTags={activeTags}
-        query={query}
-        shownCount={filtered.length}
-        onToggleTag={toggleTag}
-        onQuery={setQuery}
-        onClear={() => {
-          setActiveTags(new Set());
-          setQuery("");
-        }}
-      />
+      {findOpen && (
+        <Suspense fallback={<ModalLoadingBackdrop />}>
+          <FindGameModal
+            open={findOpen}
+            onClose={() => setFindOpen(false)}
+            games={games}
+            activeTags={activeTags}
+            query={query}
+            shownCount={filtered.length}
+            onToggleTag={toggleTag}
+            onQuery={setQuery}
+            onClear={() => {
+              setActiveTags(new Set());
+              setQuery("");
+            }}
+          />
+        </Suspense>
+      )}
+
+      {addOpen && (
+        <Suspense fallback={<ModalLoadingBackdrop />}>
+          <AddGame open={addOpen} onClose={() => setAddOpen(false)} />
+        </Suspense>
+      )}
+
+      {nightOpen && (
+        <Suspense fallback={<ModalLoadingBackdrop />}>
+          <GameNightPicker games={games} open={nightOpen} onClose={() => setNightOpen(false)} />
+        </Suspense>
+      )}
 
       <section className="mt-6">
         {games.length === 0 ? (

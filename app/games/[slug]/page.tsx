@@ -1,6 +1,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { notFound } from "next/navigation";
+import { unstable_cache } from "next/cache";
 import { getGame, listGames } from "@/lib/games";
 import Faq from "@/components/faq";
 import CoverTint from "@/components/cover-tint";
@@ -14,7 +15,13 @@ import EditGame from "@/components/edit-game";
 import BelowFold from "@/components/below-fold";
 import Expansions from "@/components/expansions";
 
-export const dynamic = "force-dynamic";
+// The shelf changes at runtime (games get added/edited), so the reads are
+// tagged: write routes call revalidateTag("games") via invalidateGamesCache(),
+// and pages serve from Next's data cache until then.
+// (unstable_cache's generic collapses the return type to Promise<any>, so
+// cast back to the original signatures.)
+const cachedGetGame = unstable_cache(getGame, undefined, { tags: ["games"] }) as typeof getGame;
+const cachedListGames = unstable_cache(listGames, undefined, { tags: ["games"] }) as typeof listGames;
 
 export default async function GamePage({
   params,
@@ -22,7 +29,7 @@ export default async function GamePage({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
-  const game = await getGame(slug);
+  const game = await cachedGetGame(slug);
   if (!game) notFound();
 
   // Assets are served on demand from content/games/<slug>/ (not via the
@@ -123,7 +130,7 @@ export default async function GamePage({
       <Expansions slug={slug} expansions={game.expansions ?? []} />
 
       {/* Below-fold sections (lazy-loaded client component). */}
-      <BelowFold slug={slug} title={game.title} game={game} games={await listGames()} />
+      <BelowFold slug={slug} title={game.title} game={game} games={await cachedListGames()} />
       </div>
     </CoverTint>
   );
