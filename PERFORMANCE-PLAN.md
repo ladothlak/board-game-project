@@ -293,48 +293,66 @@ generation.
 - Both chat routes pass `{ useDecisionModel: USE_DECISION_MODEL === "1" }`
   (env opt-in, default off).
 
-**Benchmark** (`lib/__tests__/rag-benchmark.test.ts`; live numbers from
-2026-11-12 against the real endpoints, 32-case labeled dataset grounded in all
-five rulebooks — Agricola, Catan, Container, Nemesis: Lockdown, Root):
+**Benchmark** (`lib/__tests__/rag-benchmark.test.ts`; live numbers from the
+2026-11-12 re-baseline against the real endpoints, 32-case labeled dataset
+grounded in all five rulebooks — Agricola, Catan, Container, Nemesis:
+Lockdown, Root). The retrieval metrics below measure what the LLM actually
+sees — in-context/in-excerpts membership and MRR/recall@3 over `rankedPages`
+(relevance order) — not page-number order:
 
 | Metric | Existing (keyword + LLM) | Enhanced (decision model) |
 | --- | --- | --- |
 | Classification accuracy (32 cases) | 37.5% | **50.0%** |
-| Retrieval top-1 hit rate | **9.4%** | 0.0% |
-| Retrieval MRR | **33.2%** | 25.4% |
-| Retrieval recall@3 | **42.2%** | 35.9% |
-| End-to-end latency (mean) | ~12.8 s | **~3.1 s** |
-| Re-rank, hard question ("turmoil", p. 13) | ~9.9 s, top-1 correct | **~2.6 s**, top-1 correct |
-| Raw batched score call (3 candidates) | — | ~0.3–0.5 s |
+| Retrieval in-context hit rate | **96.9%** | 90.6% |
+| Retrieval in-excerpts hit rate | **96.9%** | 90.6% |
+| Retrieval MRR (over `rankedPages`) | **72.8%** | 58.2% |
+| Retrieval recall@3 (over `rankedPages`) | **87.5%** | 76.6% |
+| End-to-end latency (mean) | ~36.5 s | **~8.2 s** |
+| Re-rank, hard question ("turmoil", p. 13) | ~30.0 s, top-1 correct | **~6.2 s**, top-1 correct |
+| Raw batched score call (3 candidates) | — | ~1.5 s |
 
-Per-case divergence (top-3 hit): existing-only hits 3 · enhanced-only hits 1 ·
-**both miss 17 of 32**.
+Per-case divergence (in-context hit): existing-only hits 2 · enhanced-only
+hits 0 · **both miss 1 of 32** (Catan "How does trading work?", expected
+pp. 11+14).
+
+**Metric correction (issue #50):** the first baseline's retrieval rows (top-1
+9.4%/0%, MRR 33.2%/25.4%, recall@3 42.2%/35.9%, "both miss 17 of 32") were a
+metric artifact — they scored `pages` sorted by *page number* as if it were a
+relevance ranking. A live 17-case trace showed the answer page's text was in
+the injected `excerpts` in every one of those "missed" cases: the document
+reached the LLM, the metric just couldn't see it. The corrected numbers above
+show retrieval effectiveness is far stronger than first reported (96.9%/90.6%
+in-context) and that only 1 of 32 cases genuinely misses in both modes.
 
 **Honest read:**
 
-- **Latency is the clear win:** ~4× faster end-to-end (3.1 s vs 12.8 s), driven
-  by replacing the up-to-30 s LLM re-rank with a ~0.3–2.6 s batched score call
-  and hiding classification behind `loadIndex()`.
-- **Retrieval effectiveness is the clear loss:** on this dataset the LLM
-  pipeline wins 3-to-1 on divergent cases and leads on every aggregate metric
-  (MRR 33% vs 25%, recall@3 42% vs 36%). Two mechanisms: (a) the `kev-0.8b`
-  relevance scores cluster tightly (≈2.1–2.3 on the 0–4 scale), so they add
-  little discriminative signal over TF-IDF; (b) the `noul` "needs
-  rephrasing" verdict skips LLM expansion that would have helped on some
-  paraphrased questions.
-- **The bigger bottleneck is upstream of the re-rank:** both pipelines miss 17
-  of 32 questions — TF-IDF retrieval + context selection simply can't find
-  the answer page for paraphrased/hard questions, regardless of which
-  re-ranker runs. Improving base retrieval (better expansion, embedding
-  retrieval, or a stronger candidate pool) would help both modes far more
-  than swapping re-rankers.
+- **Latency is the clear win:** ~4.4× faster end-to-end (8.2 s vs 36.5 s),
+  driven by replacing the up-to-30 s LLM re-rank with a ~1.5–6.2 s batched
+  score call and hiding classification behind `loadIndex()`. (The existing
+  pipeline's latency in this run — ~36.5 s vs ~12.8 s in the first baseline —
+  reflects server load during the long sequential live run; a single LLM
+  re-rank measured in the same run took ~30 s.)
+- **Retrieval effectiveness is not the clear loss it first appeared to be:**
+  with corrected metrics both pipelines put an answer page in context for 9+
+  of every 10 questions, and in-excerpts hit rate equals in-context hit rate
+  in both modes (the context budget never dropped an expected page). The LLM
+  pipeline still leads on ranking quality (MRR 72.8% vs 58.2%, recall@3
+  87.5% vs 76.6%) and wins the divergent cases 2-to-0 — consistent with the
+  `kev-0.8b` score clustering that adds little discriminative signal over
+  TF-IDF, and with the `noul` "needs rephrasing" verdict skipping LLM
+  expansion that would have helped on some paraphrased questions.
+- **The one genuine miss is upstream of the re-rank:** Catan "How does trading
+  work?" (expected pp. 11+14) misses in both modes — TF-IDF retrieval +
+  context selection can't find those pages for that phrasing, regardless of
+  which re-ranker runs. Improving base retrieval (better expansion, embedding
+  retrieval, or a stronger candidate pool) would help both modes.
 - Classification accuracy (50% vs 37.5%) is a real but modest gain; the
   `kev-0.8b` model discriminates less than a reasoning model would.
 
 **Follow-ups (not done):** tune the expansion gate (trust the `noul` verdict
 only above a confidence threshold); consider skipping the decision-model score
 call when TF-IDF has a clear winner (it adds ~0.5 s without changing orderings);
-invest in base retrieval quality, which is where both pipelines currently lose.
+invest in base retrieval quality, which is where the one remaining miss lives.
 
 ### 4.2 Prompt engineering for the clustered `score` problem
 
