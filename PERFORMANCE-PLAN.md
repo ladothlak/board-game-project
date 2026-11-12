@@ -334,8 +334,8 @@ baseline above:
 | --- | --- | --- |
 | Retrieval in-context hit rate | 93.8% | **96.9%** |
 | Retrieval in-excerpts hit rate | 93.8% | **96.9%** |
-| Retrieval MRR (over `rankedPages`) | 70.9% | **72.2%** |
-| Retrieval recall@3 (over `rankedPages`) | 81.3% | **85.9%** |
+| Retrieval MRR (over `rankedPages`) | 70.9% | **77.6%** |
+| Retrieval recall@3 (over `rankedPages`) | 81.3% | **87.5%** |
 
 BM25 wins every aggregate metric and fixes both known-miss cases — Catan
 "How does trading work?" (pp. 11+14 now in context) and Agricola "Minor
