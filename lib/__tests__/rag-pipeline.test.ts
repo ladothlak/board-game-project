@@ -173,8 +173,8 @@ describe("buildRagContext", () => {
     expect(result.pages).toEqual([1, 3]);
   });
 
-  it("truncates later chunks to fit the adaptive context budget", async () => {
-    const longSetup = `Set up the board. ${"a".repeat(1980)}`; // ~2000 chars
+  it("caps chunks at their allocation and keeps relevant sentences when cutting", async () => {
+    const longSetup = `Set up the board. ${"a".repeat(2980)}`; // ~3000 chars
     const longCombat = `${"b".repeat(4900)} set up the board`; // ~5000 chars
     vi.mocked(loadIndex).mockResolvedValue([
       { id: "l1", slug: SLUG, title: "Setup", page: 1, text: longSetup },
@@ -187,15 +187,19 @@ describe("buildRagContext", () => {
     // Both pages stay represented...
     expect(result.excerpts).toContain("--- Page 1 ---");
     expect(result.excerpts).toContain("--- Page 2 ---");
-    // ...the first chunk keeps its full text...
-    expect(result.excerpts).toContain(longSetup);
-    // ...but the second is truncated to fit the remaining budget.
-    const page2Part = result.excerpts.split("--- Page 2 ---\n")[1];
+    // ...the top chunk is capped at its allocation (no more full-text pass)...
+    const page1Part = result.excerpts.split("\n\n")[0].replace("--- Page 1 ---\n", "");
+    expect(page1Part.length).toBeLessThan(longSetup.length);
+    // ...but the query-relevant sentence survives the cut...
+    expect(page1Part).toContain("Set up the board.");
+    // ...and the second chunk is truncated to fit its allocation (half the
+    // 4000-char budget, since the two chunks score equally).
+    const page2Part = result.excerpts.split("\n\n")[1].replace("--- Page 2 ---\n", "");
     expect(page2Part.length).toBeLessThan(longCombat.length);
-    expect(page2Part.length).toBeLessThanOrEqual(402);
+    expect(page2Part.length).toBeLessThanOrEqual(2000);
 
-    // The whole context stays within the ~2400-char budget plus headers.
-    expect(result.excerpts.length).toBeLessThan(2600);
+    // The whole context stays within the ~4000-char budget plus headers.
+    expect(result.excerpts.length).toBeLessThan(4200);
   });
 
   it("returns a graceful empty context when the slug has no indexed chunks", async () => {

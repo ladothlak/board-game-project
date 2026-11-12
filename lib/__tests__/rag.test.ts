@@ -148,7 +148,7 @@ describe("adaptiveContext", () => {
     expect(out).toContain("Set up the board by placing the tokens.");
   });
 
-  it("truncates later chunks to fit the remaining budget", () => {
+  it("caps every chunk at its proportional allocation", () => {
     const longA = "x".repeat(2300);
     const longB = "y".repeat(3000);
     const selected = [
@@ -159,9 +159,11 @@ describe("adaptiveContext", () => {
     // Both pages are represented...
     expect(out).toContain("--- Page 1 ---");
     expect(out).toContain("--- Page 2 ---");
-    // ...but the second chunk is truncated to at most 100 chars.
-    const page2Part = out.split("--- Page 2 ---\n")[1];
-    expect(page2Part.length).toBeLessThanOrEqual(100);
+    // ...and each chunk is capped at its allocation (half the budget), so the
+    // top chunk can no longer consume the whole budget with its full text.
+    const [page1, page2] = out.split("\n\n");
+    expect(page1.replace("--- Page 1 ---\n", "").length).toBe(1200);
+    expect(page2.replace("--- Page 2 ---\n", "").length).toBe(1200);
   });
 });
 

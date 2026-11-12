@@ -104,12 +104,14 @@ export async function expandQuery(
           : queryType === "turn-structure"
             ? "Focus on phase/round/order wording."
             : "Use natural rulebook terminology.";
+    // The local model is a reasoning model: it burns several hundred tokens on
+    // thinking before answering, so the cap must cover reasoning + answer.
     const raw = await callLlm(
       apiKey,
       "You rewrite a board game question into 2-3 short search phrases (2-5 words each) that would match rulebook text. Return ONLY a JSON array of strings.",
       `Question: "${question}"\n${typeHint}\nReturn a JSON array of 2-3 search phrases.`,
-      200,
-      20_000
+      1000,
+      30_000
     );
     // Parse the JSON array.
     const start = raw.indexOf("[");
@@ -159,25 +161,40 @@ export function multiQueryRetrieve(
 /**
  * Pass top candidates to the LLM for a relevance score (1-5). Returns chunks
  * sorted by LLM score. Falls back to TF-IDF order on failure.
+ *
+ * Each candidate is previewed with its most query-relevant sentences (not
+ * just the first 200 chars), so a relevant passage that sits deep in a long
+ * page is visible to the LLM and can be rated accurately.
  */
 export async function rerank(
   apiKey: string,
   question: string,
-  candidates: ScoredChunk[]
+  candidates: ScoredChunk[],
+  queryTerms?: Set<string>,
+  df?: Map<string, number>,
+  n = 0
 ): Promise<ScoredChunk[]> {
   if (candidates.length === 0) return [];
 
   const numbered = candidates
-    .map((c, i) => `[${i}] (p. ${c.page}) ${c.text.slice(0, 200)}`)
+    .map((c, i) => {
+      const preview =
+        queryTerms && queryTerms.size > 0
+          ? extractRelevantSentences(c.text, queryTerms, df, 400, n)
+          : c.text.slice(0, 200);
+      return `[${i}] (p. ${c.page}) ${preview}`;
+    })
     .join("\n");
 
   try {
+    // The local model is a reasoning model: it burns several hundred tokens on
+    // thinking before answering, so the cap must cover reasoning + answer.
     const raw = await callLlm(
       apiKey,
       "Rate each numbered excerpt's relevance to the question on a scale of 1-5. Return ONLY a JSON array of integers (one per excerpt, in order).",
       `Question: "${question}"\n\nExcerpts:\n${numbered}`,
-      150,
-      20_000
+      1000,
+      30_000
     );
     const start = raw.indexOf("[");
     const end = raw.lastIndexOf("]");
@@ -200,19 +217,24 @@ export async function rerank(
 
 /**
  * Scan retrieved chunks for page references ("see page N", "p. N", "page N")
- * and pull those pages' text into the result set.
+ * and pull those pages' text into the result set. Capped at `maxExtra` pages:
+ * a single reference-heavy page (e.g. a room sheet) can point at a dozen
+ * others, and following all of them dilutes the context budget with noise.
  */
 export function followCrossRefs(
   chunks: Chunk[],
-  selected: ScoredChunk[]
+  selected: ScoredChunk[],
+  maxExtra = 4
 ): ScoredChunk[] {
   const selectedPages = new Set(selected.map((c) => c.page));
   const extra: ScoredChunk[] = [];
 
   for (const c of selected) {
+    if (extra.length >= maxExtra) break;
     // Find references to other pages in this chunk's text.
     const refs = [...c.text.matchAll(/(?:see|as described in|refer to|on)?\s*page\s+(\d+)/gi)];
     for (const m of refs) {
+      if (extra.length >= maxExtra) break;
       const p = Number(m[1]);
       if (p > 0 && !selectedPages.has(p)) {
         const target = chunks.find((ch) => ch.page === p);
@@ -230,13 +252,61 @@ export function followCrossRefs(
 // ─── 6. Adaptive Context Budget ────────────────────────────────────────────
 
 /**
+ * Split text into sentences and keep the ones most relevant to the query
+ * terms, in original order, fitting within `cap` chars. A sentence's relevance
+ * is the sum of log((N+1)/(df+1)) over the distinct query terms it contains —
+ * the same IDF weighting retrieve() uses, so rarer (more distinctive) terms
+ * carry more signal than common ones. Falls back to a prefix slice when no
+ * sentence scores, so this never returns less text than a plain cut would.
+ */
+function extractRelevantSentences(
+  text: string,
+  terms: Set<string>,
+  df: Map<string, number> | undefined,
+  cap: number,
+  n = 0
+): string {
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const scored = sentences.map((s, i) => {
+    const lower = s.toLowerCase();
+    let score = 0;
+    for (const t of terms) {
+      if (lower.includes(t)) score += Math.log((n + 1) / ((df?.get(t) ?? 0) + 1));
+    }
+    return { i, s, score };
+  });
+  const picked = scored
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score || a.i - b.i)
+    .reduce<{ i: number; s: string }[]>(
+      (acc, x) =>
+        acc.reduce((l, y) => l + y.s.length, 0) + (acc.length > 0 ? 1 : 0) + x.s.length <= cap
+          ? [...acc, x]
+          : acc,
+      []
+    );
+  if (picked.length === 0) return text.slice(0, cap);
+  return picked.sort((a, b) => a.i - b.i).map((x) => x.s).join(" ");
+}
+
+/**
  * Allocate a token budget across selected chunks proportionally to their
  * relevance scores. High-relevance chunks get more text; low-relevance get
- * truncated. Total budget is ~2400 chars (roughly 600 tokens).
+ * truncated. Total budget is ~4000 chars (roughly 1000 tokens) — big enough
+ * that a multi-sentence answer in the top chunk survives its allocation.
+ *
+ * Every chunk is capped at its allocation — the top chunk included — so one
+ * long page can't consume the whole budget. When a chunk must be cut, the most
+ * query-relevant sentences are kept (see extractRelevantSentences), so an
+ * answer that sits deep in a long page survives instead of being sliced off
+ * from the top.
  */
 export function adaptiveContext(
   selected: ScoredChunk[],
-  budget = 2400
+  budget = 4000,
+  queryTerms?: Set<string>,
+  df?: Map<string, number>,
+  n = 0
 ): string {
   if (selected.length === 0) return "";
 
@@ -248,7 +318,15 @@ export function adaptiveContext(
     // Proportional allocation, minimum 200 chars so every chunk is represented.
     const alloc = Math.max(200, Math.round((c.score / totalScore) * budget));
     const remaining = budget - used;
-    const text = alloc <= remaining ? c.text : c.text.slice(0, Math.max(100, remaining));
+    const cap = Math.min(alloc, Math.max(100, remaining));
+    let text: string;
+    if (c.text.length <= cap) {
+      text = c.text;
+    } else if (queryTerms && queryTerms.size > 0) {
+      text = extractRelevantSentences(c.text, queryTerms, df, cap, n);
+    } else {
+      text = c.text.slice(0, cap);
+    }
     parts.push(`--- Page ${c.page} ---\n${text}`);
     used += text.length;
     if (used >= budget) break;
@@ -394,6 +472,10 @@ export async function buildRagContext(
 
   const queries = await expandPromise;
 
+  // Query terms (tokenized variants) — reused by the re-rank preview and the
+  // adaptive context budget so both judge relevance the same way.
+  const queryTerms = new Set(queries.flatMap((q) => tokenize(q)));
+
   // 4. Multi-query retrieval (top 8 for re-ranking).
   let candidates = multiQueryRetrieve(chunks, queries, 8, df);
 
@@ -447,13 +529,16 @@ export async function buildRagContext(
     const distinctHits = [...queryTerms].filter((t) => topText.includes(t)).length;
     skipRerank = distinctHits >= 2;
   }
-  candidates = skipRerank ? candidates : await rerank(apiKey, question, candidates);
+  candidates = skipRerank
+    ? candidates
+    : await rerank(apiKey, question, candidates, queryTerms, df, chunks.length);
 
   // 7. Follow cross-references.
   candidates = followCrossRefs(chunks, candidates.slice(0, 6));
 
-  // 8. Adaptive context budget.
-  const excerpts = adaptiveContext(candidates);
+  // 8. Adaptive context budget — with the query terms and DF table so long
+  // chunks are cut on their most relevant sentences, not from the top.
+  const excerpts = adaptiveContext(candidates, 4000, queryTerms, df, chunks.length);
 
   // 9. Confidence.
   const confidence = estimateConfidence(candidates);
