@@ -303,17 +303,17 @@ sees — in-context/in-excerpts membership and MRR/recall@3 over `rankedPages`
 | Metric | Existing (keyword + LLM) | Enhanced (decision model) |
 | --- | --- | --- |
 | Classification accuracy (32 cases) | 37.5% | **50.0%** |
-| Retrieval in-context hit rate | **96.9%** | 90.6% |
-| Retrieval in-excerpts hit rate | **96.9%** | 90.6% |
-| Retrieval MRR (over `rankedPages`) | **72.8%** | 58.2% |
-| Retrieval recall@3 (over `rankedPages`) | **87.5%** | 76.6% |
-| End-to-end latency (mean) | ~36.5 s | **~8.2 s** |
+| Retrieval in-context hit rate | **93.8%** | 90.6% |
+| Retrieval in-excerpts hit rate | **93.8%** | 90.6% |
+| Retrieval MRR (over `rankedPages`) | **70.9%** | 58.2% |
+| Retrieval recall@3 (over `rankedPages`) | **81.3%** | 76.6% |
+| End-to-end latency (mean) | ~37.7 s | **~8.8 s** |
 | Re-rank, hard question ("turmoil", p. 13) | ~30.0 s, top-1 correct | **~6.2 s**, top-1 correct |
 | Raw batched score call (3 candidates) | — | ~1.5 s |
 
-Per-case divergence (in-context hit): existing-only hits 2 · enhanced-only
-hits 0 · **both miss 1 of 32** (Catan "How does trading work?", expected
-pp. 11+14).
+Per-case divergence (in-context hit): existing-only hits 1 · enhanced-only
+hits 0 · **both miss 2 of 32** (Agricola "Minor Improvement cards", expected
+p. 3; Catan "How does trading work?", expected pp. 11+14).
 
 **Metric correction (issue #50):** the first baseline's retrieval rows (top-1
 9.4%/0%, MRR 33.2%/25.4%, recall@3 42.2%/35.9%, "both miss 17 of 32") were a
@@ -321,31 +321,32 @@ metric artifact — they scored `pages` sorted by *page number* as if it were a
 relevance ranking. A live 17-case trace showed the answer page's text was in
 the injected `excerpts` in every one of those "missed" cases: the document
 reached the LLM, the metric just couldn't see it. The corrected numbers above
-show retrieval effectiveness is far stronger than first reported (96.9%/90.6%
-in-context) and that only 1 of 32 cases genuinely misses in both modes.
+show retrieval effectiveness is far stronger than first reported (93.8%/90.6%
+in-context) and that only 2 of 32 cases genuinely miss in both modes.
 
 **Honest read:**
 
-- **Latency is the clear win:** ~4.4× faster end-to-end (8.2 s vs 36.5 s),
+- **Latency is the clear win:** ~4.3× faster end-to-end (8.8 s vs 37.7 s),
   driven by replacing the up-to-30 s LLM re-rank with a ~1.5–6.2 s batched
   score call and hiding classification behind `loadIndex()`. (The existing
-  pipeline's latency in this run — ~36.5 s vs ~12.8 s in the first baseline —
+  pipeline's latency in this run — ~37.7 s vs ~12.8 s in the first baseline —
   reflects server load during the long sequential live run; a single LLM
   re-rank measured in the same run took ~30 s.)
 - **Retrieval effectiveness is not the clear loss it first appeared to be:**
   with corrected metrics both pipelines put an answer page in context for 9+
   of every 10 questions, and in-excerpts hit rate equals in-context hit rate
   in both modes (the context budget never dropped an expected page). The LLM
-  pipeline still leads on ranking quality (MRR 72.8% vs 58.2%, recall@3
-  87.5% vs 76.6%) and wins the divergent cases 2-to-0 — consistent with the
+  pipeline still leads on ranking quality (MRR 70.9% vs 58.2%, recall@3
+  81.3% vs 76.6%) and wins the divergent cases 1-to-0 — consistent with the
   `kev-0.8b` score clustering that adds little discriminative signal over
   TF-IDF, and with the `noul` "needs rephrasing" verdict skipping LLM
   expansion that would have helped on some paraphrased questions.
-- **The one genuine miss is upstream of the re-rank:** Catan "How does trading
-  work?" (expected pp. 11+14) misses in both modes — TF-IDF retrieval +
-  context selection can't find those pages for that phrasing, regardless of
-  which re-ranker runs. Improving base retrieval (better expansion, embedding
-  retrieval, or a stronger candidate pool) would help both modes.
+- **The genuine misses are upstream of the re-rank:** Catan "How does trading
+  work?" (expected pp. 11+14) and Agricola "Minor Improvement cards"
+  (expected p. 3) miss in both modes — TF-IDF retrieval + context selection
+  can't find those pages for those phrasings, regardless of which re-ranker
+  runs. Improving base retrieval (better expansion, embedding retrieval, or
+  a stronger candidate pool) would help both modes.
 - Classification accuracy (50% vs 37.5%) is a real but modest gain; the
   `kev-0.8b` model discriminates less than a reasoning model would.
 
