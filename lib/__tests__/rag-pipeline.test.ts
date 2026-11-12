@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { buildRagContext, decisionClassify, decisionRerank } from "../rag";
+import { buildRagContext, decisionClassify, decisionRerank, expandQuery, expandQueryDeterministic, isEcho } from "../rag";
 import { loadIndex, resetRetrieveCachesForTest } from "../retrieve";
 import type { Chunk } from "../retrieve";
 
@@ -155,8 +155,14 @@ describe("buildRagContext", () => {
     mockFetch.mockRejectedValue(new Error("provider down"));
 
     // "How do I win?" only weakly matches the victory chunk, and with the
-    // LLM unavailable the raw (low) TF-IDF score carries through.
-    const result = await buildRagContext(SLUG, "How do I win?", KEY);
+    // LLM unavailable the raw (low) score carries through. Pinned to the
+    // legacy "tfidf" scorer: under the default BM25 weighting this exact
+    // fixture scores 2.537 (confidence 0.254), just above the threshold, so
+    // it no longer exercises the low-confidence path. The fallback logic
+    // itself is scorer-agnostic (estimateConfidence + the chat route).
+    const result = await buildRagContext(SLUG, "How do I win?", KEY, undefined, {
+      scoring: "tfidf",
+    });
 
     // Below the 0.25 threshold that makes app/api/chat/route.ts append the
     // low-confidence fallback note to the prompt.
@@ -496,5 +502,110 @@ describe("buildRagContext with the decision model enabled", () => {
     expect(decisionCalls()).toBeGreaterThan(0);
     // ...and the context was produced.
     expect(result.excerpts.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── expandQueryDeterministic / isEcho (pure, CI-deterministic) ─────────────
+
+describe("expandQueryDeterministic", () => {
+  it("produces distinct n-gram phrases for a representative question", () => {
+    const result = expandQueryDeterministic("How do I set up the board?");
+    // Should produce 2-4 phrases, not just the original question.
+    expect(result.length).toBeGreaterThanOrEqual(2);
+    expect(result.length).toBeLessThanOrEqual(4);
+    // All phrases should be distinct.
+    const unique = new Set(result);
+    expect(unique.size).toBe(result.length);
+    // Should contain 2-word and/or 3-word n-grams from the question.
+    expect(result).toContain("set up");
+    expect(result).toContain("up the");
+  });
+
+  it("applies the synonym map for questions containing known keys", () => {
+    const result = expandQueryDeterministic("How do I play the solo version?");
+    // The synonym map should add "solo version" and "solo play".
+    expect(result).toContain("solo version");
+    expect(result).toContain("solo play");
+  });
+
+  it("returns [question] for a very short question with no real words", () => {
+    const result = expandQueryDeterministic("hi");
+    expect(result).toEqual(["hi"]);
+  });
+
+  it("produces n-grams that contain at least one real word", () => {
+    const result = expandQueryDeterministic("i am in the room");
+    // "i am" has no real word (both length <= 2), so it should not appear.
+    expect(result).not.toContain("i am");
+    // "am in" has no real word, so it should not appear.
+    expect(result).not.toContain("am in");
+    // "in the" has "the" (length 3 > 2), so it should appear.
+    expect(result).toContain("in the");
+  });
+
+  it("deduplicates phrases", () => {
+    // A question where n-grams and synonyms overlap.
+    const result = expandQueryDeterministic("setup the board setup");
+    // "set up" from synonym map and "setup the" / "the board" / "board setup"
+    // from n-grams should all be present but deduplicated.
+    expect(new Set(result).size).toBe(result.length);
+  });
+});
+
+describe("isEcho", () => {
+  it("returns true for a verbatim echo of the question", () => {
+    expect(isEcho(["How do I win?"], "How do I win?")).toBe(true);
+  });
+
+  it("returns true when all phrases are substrings of the question", () => {
+    // Both phrases are contained within the question text.
+    expect(isEcho(["how do i", "win"], "How do I win the game?")).toBe(true);
+  });
+
+  it("returns false for genuine rephrased variants", () => {
+    expect(isEcho(["victory points", "end of game"], "How do I win?")).toBe(false);
+  });
+
+  it("returns false when at least one phrase is a genuine variant", () => {
+    // One echo, one genuine variant → not an echo overall.
+    expect(isEcho(["how do i win", "victory points"], "How do I win?")).toBe(false);
+  });
+
+  it("returns true for a near-verbatim echo with minor additions", () => {
+    // The phrase contains the question as a substring.
+    expect(isEcho(["how do i win the game"], "How do I win?")).toBe(true);
+  });
+
+  it("returns false for an empty phrases array", () => {
+    expect(isEcho([], "How do I win?")).toBe(false);
+  });
+});
+
+describe("expandQuery fallback to deterministic expansion", () => {
+  it("falls back to deterministic expansion when the LLM throws", async () => {
+    mockFetch.mockRejectedValue(new Error("provider down"));
+    const result = await expandQuery(KEY, "How do I set up the board for the game?", "setup");
+    // Not just [question] — a deterministic n-gram expansion is produced.
+    expect(result).not.toEqual(["How do I set up the board for the game?"]);
+    expect(result.length).toBeGreaterThanOrEqual(2);
+    expect(result.length).toBeLessThanOrEqual(4);
+  });
+
+  it("falls back to deterministic expansion when the LLM returns an echo", async () => {
+    // The LLM echoes the question verbatim.
+    mockFetch.mockResolvedValue(
+      llmResponse(JSON.stringify(["How do I set up the board for the game?"]))
+    );
+    const result = await expandQuery(KEY, "How do I set up the board for the game?", "setup");
+    expect(result).not.toEqual(["How do I set up the board for the game?"]);
+    expect(result.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("returns LLM phrases when they are genuine variants (no fallback)", async () => {
+    mockFetch.mockResolvedValue(
+      llmResponse(JSON.stringify(["placing tokens", "board setup instructions"]))
+    );
+    const result = await expandQuery(KEY, "How do I set up the board?", "setup");
+    expect(result).toEqual(["placing tokens", "board setup instructions"]);
   });
 });

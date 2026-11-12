@@ -261,9 +261,76 @@ export async function decisionRerank(
 // ─── 2. Query Expansion ────────────────────────────────────────────────────
 
 /**
+ * Small, generic synonym map: common question words → rulebook terms.
+ * Kept deliberately small and game-agnostic (issue #52).
+ */
+const QUERY_SYNONYMS: Record<string, string[]> = {
+  solo: ["solo version", "solo play"],
+  plow: ["plow field"],
+  trade: ["trading", "offer"],
+  setup: ["set up"],
+};
+
+/**
+ * Detect whether a set of LLM-generated phrases is just an echo of the
+ * original question (no genuine rephrasing). A phrase counts as an echo if,
+ * lowercased and punctuation-stripped, it is a substring of (or equal to)
+ * the normalized question, or vice versa. Returns true when EVERY phrase
+ * is an echo.
+ */
+export function isEcho(phrases: string[], question: string): boolean {
+  const ql = question.toLowerCase().replace(/[^\w\s]/g, "").trim();
+  if (phrases.length === 0) return false;
+  return phrases.every((p) => {
+    const pl = p.toLowerCase().replace(/[^\w\s]/g, "").trim();
+    if (pl.length === 0) return true; // empty phrase is trivially an echo
+    return pl === ql || ql.includes(pl) || pl.includes(ql);
+  });
+}
+
+/**
+ * Deterministic query expansion (no LLM, no network). Produces 2–4 search
+ * phrases from the question using n-grams and a small synonym map. Pure and
+ * CI-deterministic — unit-testable without any mock (issue #52).
+ */
+export function expandQueryDeterministic(question: string): string[] {
+  const lower = question.toLowerCase().trim();
+  const words = lower.split(/\s+/).filter(Boolean);
+
+  // No usable words → nothing to expand.
+  if (words.length === 0) return [question];
+
+  const phrases = new Set<string>();
+
+  // Synonym expansion first: for each known key present in the question,
+  // append its mapped rulebook terms. These are higher-signal than n-grams,
+  // so they take priority in the final slice.
+  for (const [key, values] of Object.entries(QUERY_SYNONYMS)) {
+    if (lower.includes(key)) {
+      for (const v of values) phrases.add(v);
+    }
+  }
+
+  // 2-word and 3-word sliding-window n-grams, keeping only those that
+  // contain at least one "real" word (length > 2).
+  for (const n of [2, 3]) {
+    if (words.length < n) continue;
+    for (let i = 0; i + n <= words.length; i++) {
+      const gram = words.slice(i, i + n).join(" ");
+      if (gram.split(" ").some((w) => w.length > 2)) {
+        phrases.add(gram);
+      }
+    }
+  }
+
+  const result = [...phrases].slice(0, 4);
+  return result.length > 0 ? result : [question];
+}
+
+/**
  * Ask the LLM to rewrite the question into 2–3 short search variants that
- * use different wording but the same meaning. Falls back to [question] on
- * any failure.
+ * use different wording but the same meaning. Falls back to a deterministic
+ * expansion (n-grams + synonym map) on any failure or echo (issue #52).
  */
 export async function expandQuery(
   apiKey: string,
@@ -284,20 +351,24 @@ export async function expandQuery(
     const raw = await callLlm(
       apiKey,
       "You rewrite a board game question into 2-3 short search phrases (2-5 words each) that would match rulebook text. Return ONLY a JSON array of strings.",
-      `Question: "${question}"\n${typeHint}\nReturn a JSON array of 2-3 search phrases.`,
+      `Question: "${question}"\n${typeHint}\nDo NOT repeat the original question verbatim. Use rulebook terminology for this game.\nReturn a JSON array of 2-3 search phrases.`,
       1000,
       30_000
     );
     // Parse the JSON array.
     const start = raw.indexOf("[");
     const end = raw.lastIndexOf("]");
-    if (start === -1 || end === -1) return [question];
+    if (start === -1 || end === -1) return expandQueryDeterministic(question);
     const arr = JSON.parse(raw.slice(start, end + 1));
-    if (!Array.isArray(arr)) return [question];
+    if (!Array.isArray(arr)) return expandQueryDeterministic(question);
     const phrases = arr.map((s) => String(s).trim()).filter(Boolean);
-    return phrases.length > 0 ? phrases : [question];
+    if (phrases.length === 0) return expandQueryDeterministic(question);
+    // Echo detection: if the LLM just echoed the question, fall back to
+    // deterministic expansion.
+    if (isEcho(phrases, question)) return expandQueryDeterministic(question);
+    return phrases;
   } catch {
-    return [question];
+    return expandQueryDeterministic(question);
   }
 }
 

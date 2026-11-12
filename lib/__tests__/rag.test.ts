@@ -290,14 +290,28 @@ describe("detectExplicitPages", () => {
 // ─── expandQuery (LLM-backed, fallback paths) ────────────────────────────────────
 
 describe("expandQuery", () => {
-  it("returns the original question when the LLM call fails", async () => {
+  it("falls back to deterministic expansion when the LLM call fails", async () => {
     mockFetch.mockRejectedValue(new Error("provider down"));
-    await expect(expandQuery("key", "How do I win?", "general")).resolves.toEqual(["How do I win?"]);
+    const result = await expandQuery("key", "How do I win?", "general");
+    // Not just [question] — a deterministic n-gram expansion is produced.
+    expect(result).not.toEqual(["How do I win?"]);
+    expect(result.length).toBeGreaterThanOrEqual(2);
+    expect(result.length).toBeLessThanOrEqual(4);
   });
 
-  it("returns the original question when the LLM output has no JSON array", async () => {
+  it("falls back to deterministic expansion when the LLM output has no JSON array", async () => {
     mockFetch.mockResolvedValue(llmResponse("sorry, I cannot help"));
-    await expect(expandQuery("key", "How do I win?", "general")).resolves.toEqual(["How do I win?"]);
+    const result = await expandQuery("key", "How do I win?", "general");
+    expect(result).not.toEqual(["How do I win?"]);
+    expect(result.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("falls back to deterministic expansion when the LLM returns an echo", async () => {
+    // The LLM echoes the question verbatim.
+    mockFetch.mockResolvedValue(llmResponse('["How do I win?"]'));
+    const result = await expandQuery("key", "How do I win?", "general");
+    expect(result).not.toEqual(["How do I win?"]);
+    expect(result.length).toBeGreaterThanOrEqual(2);
   });
 
   it("parses a valid JSON array of phrases from the LLM output", async () => {
