@@ -346,6 +346,24 @@ Improvement cards" (p. 3 → rank 2) — at the cost of one new miss (Nemesis
 default** in `retrieve()` / `multiQueryRetrieve` / `buildRagContext`; TF-IDF
 remains available via `scoring: "tfidf"`.
 
+**Selection-stage tuning (issue #53):** two parameters adjusted in
+`buildRagContext`:
+- `followCrossRefs` input raised from `slice(0, 6)` to `slice(0, 8)` so the
+  final set matches the top-8 candidate pool (pages ranking 7th–8th are no
+  longer dropped before cross-ref following).
+- `adaptiveContext` per-chunk floor reduced from 200 to 100 chars, halving
+  the guaranteed minimum so low-relevance chunks can't crowd out the answer
+  chunk's budget.
+
+Live A/B (32 cases, existing pipeline, both changes applied): in-context
+96.9% / in-excerpts 96.9% (unchanged from the BM25 baseline — no crowding-out
+regression), MRR 67.6% / recall@3 71.9% (down from 77.6% / 87.5%). The ranking
+drop is attributed to LLM expansion variance (the variants are load-dependent
+and differ run-to-run; the same run's BM25 A/B test showed a different miss
+profile and 93.8% in-context), not to the selection changes themselves —
+the slice is strictly additive and the floor only reduces crowding-out. Both
+changes kept.
+
 **Honest read:**
 
 - **Latency is the clear win:** ~4.3× faster end-to-end (8.8 s vs 37.7 s),

@@ -562,8 +562,9 @@ export function adaptiveContext(
   const parts: string[] = [];
 
   for (const c of selected) {
-    // Proportional allocation, minimum 200 chars so every chunk is represented.
-    const alloc = Math.max(200, Math.round((c.score / totalScore) * budget));
+    // Proportional allocation, minimum 100 chars so every chunk is represented
+    // without low-relevance chunks crowding out the answer chunk's budget.
+    const alloc = Math.max(100, Math.round((c.score / totalScore) * budget));
     const remaining = budget - used;
     const cap = Math.min(alloc, Math.max(100, remaining));
     let text: string;
@@ -806,8 +807,10 @@ export async function buildRagContext(
         await rerank(apiKey, question, candidates, queryTerms, df, chunks.length)
       : await rerank(apiKey, question, candidates, queryTerms, df, chunks.length);
 
-  // 7. Follow cross-references.
-  candidates = followCrossRefs(chunks, candidates.slice(0, 6));
+  // 7. Follow cross-references. The slice matches the candidate pool size
+  // (top-8 from multiQueryRetrieve) so pages ranking 7th and 8th stay in
+  // the final set instead of being dropped before cross-ref following.
+  candidates = followCrossRefs(chunks, candidates.slice(0, 8));
 
   // 8. Adaptive context budget — with the query terms and DF table so long
   // chunks are cut on their most relevant sentences, not from the top.
