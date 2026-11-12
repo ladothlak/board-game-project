@@ -1,5 +1,5 @@
 import { getGame } from "./games";
-import { loadIndex, retrieve, pageMap, docFreqFor, tokenize, Chunk } from "./retrieve";
+import { loadIndex, retrieve, pageMap, docFreqFor, tokenize, Chunk, type ScoringMode } from "./retrieve";
 import { askDecisionModel, type QuestionSpec } from "./decision-model";
 
 // Unsloth runs locally (Unsloth Studio / `unsloth run`) and exposes an
@@ -55,6 +55,13 @@ export interface RagOptions {
    * pipeline exactly (which is what the A/B benchmark compares against).
    */
   useDecisionModel?: boolean;
+  /**
+   * Lexical scoring mode for the base retrieval stage ("tfidf" or "bm25").
+   * Defaults to "bm25" (promoted by the A/B benchmark, issue #51 — see
+   * PERFORMANCE-PLAN.md §Tier 4); "tfidf" opts into the historical
+   * log-saturated weighting. See `ScoringMode` in lib/retrieve.ts.
+   */
+  scoring?: ScoringMode;
 }
 
 // ─── LLM Helper ───────────────────────────────────────────────────────────
@@ -304,12 +311,13 @@ export function multiQueryRetrieve(
   chunks: Chunk[],
   queries: string[],
   k = 6,
-  df?: Map<string, number>
+  df?: Map<string, number>,
+  scoring: ScoringMode = "bm25"
 ): ScoredChunk[] {
   const merged = new Map<string, ScoredChunk>();
 
   for (const q of queries) {
-    const results = retrieve(chunks, q, k, df);
+    const results = retrieve(chunks, q, k, df, scoring);
     for (const r of results) {
       const existing = merged.get(r.id);
       if (existing) {
@@ -617,6 +625,10 @@ export async function buildRagContext(
   options?: RagOptions
 ): Promise<RagContext> {
   const useDecision = options?.useDecisionModel === true;
+  // Lexical scoring mode for the base retrieval stage. Defaults to "bm25"
+  // (promoted by the A/B benchmark, issue #51); "tfidf" opts into the
+  // historical log-saturated weighting (see ScoringMode in lib/retrieve.ts).
+  const scoring: ScoringMode = options?.scoring ?? "bm25";
 
   // 1. Classify. When the decision model is enabled, classify in parallel
   // with loadIndex() so its ~0.5 s latency hides behind the index read; the
@@ -661,8 +673,9 @@ export async function buildRagContext(
   // adaptive context budget so both judge relevance the same way.
   const queryTerms = new Set(queries.flatMap((q) => tokenize(q)));
 
-  // 4. Multi-query retrieval (top 8 for re-ranking).
-  let candidates = multiQueryRetrieve(chunks, queries, 8, df);
+  // 4. Multi-query retrieval (top 8 for re-ranking), in the configured
+  // lexical scoring mode (tfidf by default; bm25 when opted in).
+  let candidates = multiQueryRetrieve(chunks, queries, 8, df, scoring);
 
   // 5. Boost explicitly-referenced pages to the top of the candidate list.
   if (explicitPages.length > 0) {

@@ -324,6 +324,28 @@ reached the LLM, the metric just couldn't see it. The corrected numbers above
 show retrieval effectiveness is far stronger than first reported (93.8%/90.6%
 in-context) and that only 2 of 32 cases genuinely miss in both modes.
 
+**BM25 A/B (issue #51):** `retrieve()` gained a `scoring` option
+(`"tfidf"` | `"bm25"`, standard BM25 with k1=1.2, b=0.75; same idf and phrase
+bonuses in both modes). A live A/B run of the existing pipeline
+(`useDecisionModel: false`) on all 32 cases, `scoring: "bm25"` vs the TF-IDF
+baseline above:
+
+| Metric | TF-IDF (previous default) | **BM25** |
+| --- | --- | --- |
+| Retrieval in-context hit rate | 93.8% | **96.9%** |
+| Retrieval in-excerpts hit rate | 93.8% | **96.9%** |
+| Retrieval MRR (over `rankedPages`) | 70.9% | **72.2%** |
+| Retrieval recall@3 (over `rankedPages`) | 81.3% | **85.9%** |
+
+BM25 wins every aggregate metric and fixes both known-miss cases — Catan
+"How does trading work?" (pp. 11+14 now in context) and Agricola "Minor
+Improvement cards" (p. 3 → rank 2) — at the cost of one new miss (Nemesis
+"What happens when an Intruder appears…", p. 20 out of top-3). Net +1 case
+(31/32 vs 30/32), matching the deterministic 21-case diagnostic
+(`lib/__tests__/_diag-bm25.test.ts`: 19/21 top-3 vs 18/21). **BM25 is now the
+default** in `retrieve()` / `multiQueryRetrieve` / `buildRagContext`; TF-IDF
+remains available via `scoring: "tfidf"`.
+
 **Honest read:**
 
 - **Latency is the clear win:** ~4.3× faster end-to-end (8.8 s vs 37.7 s),
@@ -341,12 +363,14 @@ in-context) and that only 2 of 32 cases genuinely miss in both modes.
   `kev-0.8b` score clustering that adds little discriminative signal over
   TF-IDF, and with the `noul` "needs rephrasing" verdict skipping LLM
   expansion that would have helped on some paraphrased questions.
-- **The genuine misses are upstream of the re-rank:** Catan "How does trading
-  work?" (expected pp. 11+14) and Agricola "Minor Improvement cards"
-  (expected p. 3) miss in both modes — TF-IDF retrieval + context selection
-  can't find those pages for those phrasings, regardless of which re-ranker
-  runs. Improving base retrieval (better expansion, embedding retrieval, or
-  a stronger candidate pool) would help both modes.
+- **The genuine misses are upstream of the re-rank:** under TF-IDF, Catan
+  "How does trading work?" (expected pp. 11+14) and Agricola "Minor
+  Improvement cards" (expected p. 3) missed in both modes — base retrieval
+  couldn't find those pages for those phrasings, regardless of which re-ranker
+  runs. The BM25 default (issue #51) fixes both; the one remaining miss is
+  Nemesis "What happens when an Intruder appears…" (expected p. 20). Further
+  gains (better expansion, embedding retrieval, or a stronger candidate pool)
+  would help both modes.
 - Classification accuracy (50% vs 37.5%) is a real but modest gain; the
   `kev-0.8b` model discriminates less than a reasoning model would.
 

@@ -137,18 +137,44 @@ function ngrams(s: string, n: number): string[] {
 }
 
 /**
- * Fuzzy retrieval over the rulebook chunks. Combines two signals:
+ * Lexical scoring mode for `retrieve()`:
  *
- *  - TF-IDF: distinctive query terms (rare across pages) weigh more than
- *    common ones, so a page that really talks about the topic outranks a page
- *    that merely shares a couple of generic words.
+ *  - "bm25" (default): standard BM25 — `idf(t) * (f * (k1 + 1)) / (f + k1 + b * (1 - dl/avgdl))`
+ *    with f = term frequency in the chunk, dl = chunk length in tokens,
+ *    avgdl = mean chunk length in tokens across `chunks`, k1 = 1.2, b = 0.75.
+ *    The TF saturation (the denominator) stops a page that repeats a common
+ *    query term many times from outranking one that mentions it once in the
+ *    right context. Promoted to default by the A/B benchmark (issue #51;
+ *    PERFORMANCE-PLAN.md §Tier 4).
+ *  - "tfidf": `idf(t) * log(1 + tf)` per query term. The historical production
+ *    scorer, kept byte-for-byte as an opt-in.
+ *    Both modes share the same idf function and the same phrase bonuses, so
+ *    only the per-term weighting differs.
+ */
+export type ScoringMode = "tfidf" | "bm25";
+
+/**
+ * Fuzzy retrieval over the rulebook chunks. Combines three signals:
+ *
+ *  - TF-IDF (or BM25, see `ScoringMode`): distinctive query terms (rare
+ *    across pages) weigh more than common ones, so a page that really talks
+ *    about the topic outranks a page that merely shares a couple of generic
+ *    words.
  *  - Phrase matching: an exact substring hit on the whole query (or one of
  *    its 3-grams / 2-grams) is strong evidence and gets a big bonus, so a
  *    page that literally contains "round phases" jumps to the top.
+ *  - Title match: a chunk whose title contains the whole query gets a small
+ *    bonus.
  *
  * Returns the top k chunks for the query, with a score.
  */
-export function retrieve(chunks: Chunk[], query: string, k = 4, df?: Map<string, number>) {
+export function retrieve(
+  chunks: Chunk[],
+  query: string,
+  k = 4,
+  df?: Map<string, number>,
+  scoring: ScoringMode = "bm25"
+) {
   const qTokens = tokenize(query);
   if (qTokens.length === 0) return [];
 
@@ -156,6 +182,16 @@ export function retrieve(chunks: Chunk[], query: string, k = 4, df?: Map<string,
   // Reuse a precomputed table when one is provided (see docFreqFor).
   const N = chunks.length;
   const idf = (t: string) => Math.log((N + 1) / ((df?.get(t) ?? 0) + 1)) + 1;
+
+  // BM25 document lengths (in tokens) and their mean, only needed in bm25 mode.
+  const K1 = 1.2;
+  const B = 0.75;
+  let avgdl = 0;
+  const dl: number[] = [];
+  if (scoring === "bm25") {
+    for (const c of chunks) dl.push(tokenize(c.text).length);
+    avgdl = dl.reduce((a, l) => a + l, 0) / Math.max(1, dl.length);
+  }
 
   const qLower = query.trim().toLowerCase();
   // Phrase signals, strongest first. A gram only counts if it carries at
@@ -171,16 +207,24 @@ export function retrieve(chunks: Chunk[], query: string, k = 4, df?: Map<string,
   ];
 
   const scored = chunks
-    .map((chunk) => {
+    .map((chunk, i) => {
       const text = chunk.text.toLowerCase();
       let score = 0;
 
-      // TF-IDF over the query terms.
+      // Term weighting over the query terms: TF-IDF or BM25.
       const tfCounts = new Map<string, number>();
       for (const t of tokenize(text)) tfCounts.set(t, (tfCounts.get(t) ?? 0) + 1);
-      for (const t of qTokens) {
-        const tf = tfCounts.get(t) ?? 0;
-        if (tf > 0) score += idf(t) * Math.log(1 + tf);
+      if (scoring === "bm25") {
+        // Standard BM25: saturating TF so repeated terms can't dominate.
+        for (const t of qTokens) {
+          const f = tfCounts.get(t) ?? 0;
+          if (f > 0) score += idf(t) * ((f * (K1 + 1)) / (f + K1 + B * (1 - dl[i] / avgdl)));
+        }
+      } else {
+        for (const t of qTokens) {
+          const tf = tfCounts.get(t) ?? 0;
+          if (tf > 0) score += idf(t) * Math.log(1 + tf);
+        }
       }
 
       // Phrase bonuses.

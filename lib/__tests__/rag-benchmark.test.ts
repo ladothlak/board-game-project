@@ -284,6 +284,70 @@ describe("RAG decision-model benchmark", () => {
     expect(rows.length).toBe(DATASET.length);
   });
 
+  it("benchmarks BM25 lexical scoring on the full dataset (live only)", { skip: !LIVE, timeout: 1_500_000 }, async () => {
+    // A/B for issue #51: run ONLY the existing pipeline (`useDecisionModel:
+    // false`) with the new `scoring: "bm25"` option on every labelled case and
+    // report the same aggregate metrics as the full-dataset test above, so the
+    // numbers can be compared directly against the documented TF-IDF baseline
+    // (PERFORMANCE-PLAN.md §Tier 4: in-context 93.8% / in-excerpts 93.8% /
+    // MRR 70.9% / recall@3 81.3%). Per-case top-3 is printed so the known-miss
+    // cases (Catan trading p. 14, "fight an Intruder", Nemesis setup) and the
+    // known regressions (Agricola solo, Catan goal) are visible directly.
+    interface Row {
+      c: Case;
+      ms: number;
+      pages: number[];
+      ranked: number[];
+      excerpts: string;
+    }
+    const rows: Row[] = [];
+
+    for (const c of DATASET) {
+      const r = await timed(() =>
+        buildRagContext(c.slug, c.question, KEY, undefined, {
+          useDecisionModel: false,
+          scoring: "bm25",
+        })
+      );
+      rows.push({
+        c,
+        ms: r.ms,
+        pages: r.value.pages,
+        ranked: r.value.rankedPages,
+        excerpts: r.value.excerpts,
+      });
+    }
+
+    const avg = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+    const fmtPages = (pages: number[]) => (pages.length > 0 ? pages.slice(0, 3).join(",") : "—");
+    const inContext = (pages: number[], expected: number[]) =>
+      expected.some((p) => pages.includes(p)) ? "✓" : "✗";
+    const inExcerpts = (excerpts: string, expected: number[]) =>
+      expected.some((p) => excerpts.includes(`--- Page ${p} ---`)) ? "✓" : "✗";
+
+    console.log("\n──────── RAG benchmark: BM25 lexical scoring (LIVE) ────────");
+    console.log(`cases: ${rows.length}`);
+    console.log("idx  slug               question                                        exp      top-3 (rel.)   ctx exc");
+    rows.forEach((r, i) => {
+      console.log(
+        `${String(i + 1).padStart(3)}  ${r.c.slug.padEnd(17)} ${r.c.question.slice(0, 52).padEnd(52)} [${r.c.expectedPages.join(",")}]   ${fmtPages(r.ranked).padEnd(16)}${inContext(r.pages, r.c.expectedPages)} ${inExcerpts(r.excerpts, r.c.expectedPages)}`
+      );
+    });
+
+    const ctxHits = rows.map((r) => (inContext(r.pages, r.c.expectedPages) === "✓" ? 1 : 0));
+    const excHits = rows.map((r) => (inExcerpts(r.excerpts, r.c.expectedPages) === "✓" ? 1 : 0));
+    const mrr = rows.map((r) => reciprocalRank(r.ranked, r.c.expectedPages));
+    const recall = rows.map((r) => recallAtK(r.ranked, r.c.expectedPages));
+
+    console.log(`BM25 (existing pipeline, scoring: "bm25") — in-context ${pct(ctxHits)} | in-excerpts ${pct(excHits)} | MRR (ranked) ${pct(mrr)} | recall@3 (ranked) ${pct(recall)} | latency ~${avg(rows.map((r) => r.ms)).toFixed(0)} ms`);
+    console.log(`TF-IDF baseline to compare against (§Tier 4) — in-context 93.8% | in-excerpts 93.8% | MRR (ranked) 70.9% | recall@3 (ranked) 81.3%`);
+
+    // Harness sanity: metrics are well-defined proportions and every case ran.
+    expect(mrr.every((x) => x >= 0 && x <= 1)).toBe(true);
+    expect(recall.every((x) => x >= 0 && x <= 1)).toBe(true);
+    expect(rows.length).toBe(DATASET.length);
+  });
+
   it("measures raw decision-model call latency for scoring (live only)", { skip: !LIVE, timeout: 60_000 }, async () => {
     // A representative batched relevance-scoring call over a few candidates.
     const questions = {
