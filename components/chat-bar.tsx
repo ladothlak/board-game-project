@@ -1,8 +1,10 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import React, { lazy, Suspense, useEffect, useRef, useState } from "react";
+
+// The react-markdown/remark stack is large (~330 KB); load it only once an
+// assistant message exists, not on every game page load.
+const ChatMarkdown = lazy(() => import("@/components/chat-markdown"));
 
 interface Citation {
   page: number;
@@ -71,10 +73,11 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
   }, []);
 
   // Speculative RAG: pre-warm the server-side context while the user types.
-  // Fires a debounced request once the input has > 20 chars and been stable
-  // for 800ms. By the time they hit "Ask," the RAG context is already built.
+  // Fires a debounced request once the input has ≥ 15 chars (matching the
+  // server's prewarm threshold) and been stable for 800ms. By the time they
+  // hit "Ask," the RAG context is already built.
   useEffect(() => {
-    if (input.trim().length < 20 || loading) return;
+    if (input.trim().length < 15 || loading) return;
     const t = setTimeout(() => {
       fetch("/api/chat/prewarm", {
         method: "POST",
@@ -318,14 +321,19 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
                 {m.role === "user" ? "You" : "☕"}
               </span>
               <div className="min-w-0 flex-1">
-                <div className="chat-md">
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{ a: renderLink }}
+                {m.role === "assistant" ? (
+                  <Suspense
+                    fallback={
+                      <div className="chat-md whitespace-pre-wrap">
+                        {linkifyPageRefs(m.content)}
+                      </div>
+                    }
                   >
-                    {m.role === "assistant" ? linkifyPageRefs(m.content) : m.content}
-                  </ReactMarkdown>
-                </div>
+                    <ChatMarkdown content={linkifyPageRefs(m.content)} renderLink={renderLink} />
+                  </Suspense>
+                ) : (
+                  <div className="chat-md whitespace-pre-wrap">{m.content}</div>
+                )}
                 {(m.citations ?? []).length > 0 && (
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
                     {m.citations!.map((c, j) => (

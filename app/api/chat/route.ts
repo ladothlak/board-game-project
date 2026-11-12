@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { getGame } from "@/lib/games";
-import { loadIndex, retrieve } from "@/lib/retrieve";
+import { loadIndex, retrieve, docFreqFor } from "@/lib/retrieve";
 import { buildRagContext } from "@/lib/rag";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { validateQuestion } from "@/lib/guard";
@@ -118,7 +118,7 @@ export async function POST(req: Request) {
     if (other) {
       compareTitle = other.title;
       const otherChunks = (await loadIndex()).filter((c) => c.slug === compareSlug);
-      const otherTop = retrieve(otherChunks, question, 3);
+      const otherTop = retrieve(otherChunks, question, 3, await docFreqFor(compareSlug));
       compareContext = otherTop
         .map((c) => `--- ${compareTitle}, page ${c.page} ---\n${c.text}`)
         .join("\n\n");

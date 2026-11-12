@@ -53,6 +53,40 @@ export function tokenize(s: string): string[] {
   return s.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2);
 }
 
+/** Document frequency across a chunk set: term → number of chunks containing it. */
+export function buildDocFreq(chunks: Chunk[]): Map<string, number> {
+  const df = new Map<string, number>();
+  for (const c of chunks) {
+    const seen = new Set(tokenize(c.text));
+    for (const t of seen) df.set(t, (df.get(t) ?? 0) + 1);
+  }
+  return df;
+}
+
+/**
+ * Per-slug document-frequency tables, rebuilt only when the index changes.
+ * `retrieve()` used to recompute this on every call (and multiQueryRetrieve
+ * calls it 2–3× per question), so we compute it once per index load and reuse.
+ */
+let dfCache: { mtime: number; tables: Map<string, Map<string, number>> } | null = null;
+
+export async function docFreqFor(slug: string): Promise<Map<string, number> | undefined> {
+  const chunks = await loadIndex();
+  if (!dfCache || dfCache.mtime !== cacheMtime) {
+    const tables = new Map<string, Map<string, number>>();
+    for (const c of chunks) {
+      let t = tables.get(c.slug);
+      if (!t) {
+        t = new Map();
+        tables.set(c.slug, t);
+      }
+      for (const term of new Set(tokenize(c.text))) t.set(term, (t.get(term) ?? 0) + 1);
+    }
+    dfCache = { mtime: cacheMtime, tables };
+  }
+  return dfCache.tables.get(slug);
+}
+
 /**
  * Strip running navigation headers/sidebar text that PDF extraction picks up
  * from the rulebook's margin. These appear as a sequence of "SECTION Page N"
@@ -113,18 +147,14 @@ function ngrams(s: string, n: number): string[] {
  *
  * Returns the top k chunks for the query, with a score.
  */
-export function retrieve(chunks: Chunk[], query: string, k = 4) {
+export function retrieve(chunks: Chunk[], query: string, k = 4, df?: Map<string, number>) {
   const qTokens = tokenize(query);
   if (qTokens.length === 0) return [];
 
   // Document frequency → inverse document frequency across all chunks.
+  // Reuse a precomputed table when one is provided (see docFreqFor).
   const N = chunks.length;
-  const df = new Map<string, number>();
-  for (const c of chunks) {
-    const seen = new Set(tokenize(c.text));
-    for (const t of seen) df.set(t, (df.get(t) ?? 0) + 1);
-  }
-  const idf = (t: string) => Math.log((N + 1) / ((df.get(t) ?? 0) + 1)) + 1;
+  const idf = (t: string) => Math.log((N + 1) / ((df?.get(t) ?? 0) + 1)) + 1;
 
   const qLower = query.trim().toLowerCase();
   // Phrase signals, strongest first. A gram only counts if it carries at

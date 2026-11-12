@@ -11,8 +11,11 @@ interface Health {
 export default function HealthStrip() {
   const [health, setHealth] = useState<Health | null>(null);
 
+  // Paused while the tab is hidden (and one immediate poll fires on return)
+  // so background tabs stop hammering the health probe.
   useEffect(() => {
     let cancelled = false;
+    let id: number | undefined;
     async function poll() {
       try {
         const res = await fetch("/api/health");
@@ -24,11 +27,23 @@ export default function HealthStrip() {
         /* ignore transient failures */
       }
     }
-    void poll();
-    const id = setInterval(poll, 30_000);
+    function start() {
+      void poll();
+      if (id === undefined) id = window.setInterval(poll, 30_000);
+    }
+    function stop() {
+      if (id !== undefined) {
+        clearInterval(id);
+        id = undefined;
+      }
+    }
+    const onVisibility = () => (document.hidden ? stop() : start());
+    document.addEventListener("visibilitychange", onVisibility);
+    if (!document.hidden) start();
     return () => {
       cancelled = true;
-      clearInterval(id);
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 

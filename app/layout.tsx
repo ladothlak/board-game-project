@@ -19,13 +19,16 @@ export const metadata: Metadata = {
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  // Preconnect to the LLM server's origin, derived from the environment so a
+  // moved server doesn't silently break the hint.
+  const llmOrigin = new URL(process.env.UNSLOTH_BASE_URL ?? "http://localhost:8888/v1").origin;
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
         <link rel="manifest" href="/manifest.json" />
         <link rel="icon" href="/icon-192.png" />
         <meta name="theme-color" content="#f7f1e6" />
-        <link rel="preconnect" href="http://localhost:8888" />
+        <link rel="preconnect" href={llmOrigin} />
         <script
           dangerouslySetInnerHTML={{
             __html: `try { if (localStorage.getItem("parlor-theme") === "dark") { document.documentElement.classList.add("dark"); document.querySelector('meta[name="theme-color"]')?.setAttribute("content", "#171210"); } } catch (e) {}`,

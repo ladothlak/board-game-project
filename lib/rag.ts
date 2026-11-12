@@ -1,5 +1,5 @@
 import { getGame } from "./games";
-import { loadIndex, retrieve, pageMap, Chunk } from "./retrieve";
+import { loadIndex, retrieve, pageMap, docFreqFor, tokenize, Chunk } from "./retrieve";
 
 // Unsloth runs locally (Unsloth Studio / `unsloth run`) and exposes an
 // OpenAI-compatible API, typically on http://localhost:8888.
@@ -133,12 +133,13 @@ export async function expandQuery(
 export function multiQueryRetrieve(
   chunks: Chunk[],
   queries: string[],
-  k = 6
+  k = 6,
+  df?: Map<string, number>
 ): ScoredChunk[] {
   const merged = new Map<string, ScoredChunk>();
 
   for (const q of queries) {
-    const results = retrieve(chunks, q, k);
+    const results = retrieve(chunks, q, k, df);
     for (const r of results) {
       const existing = merged.get(r.id);
       if (existing) {
@@ -368,11 +369,6 @@ export async function buildRagContext(
   apiKey: string,
   expansionNames?: string[]
 ): Promise<RagContext> {
-  const chunks = (await loadIndex()).filter((c) => c.slug === slug);
-  if (chunks.length === 0) {
-    return { excerpts: "", toc: "", confidence: 0, pages: [] };
-  }
-
   // 1. Classify.
   const queryType = classifyQuery(question);
 
@@ -380,14 +376,26 @@ export async function buildRagContext(
   const explicitPages = detectExplicitPages(question);
 
   // 3. Expand query — skip the LLM call for short or page-specific queries
-  // where TF-IDF retrieval already works well on its own.
+  // where TF-IDF retrieval already works well on its own. The expansion LLM
+  // call doesn't need the index, so it runs in parallel with loadIndex().
   const needsExpansion = question.length > 20 && explicitPages.length === 0;
-  const queries = needsExpansion
-    ? await expandQuery(apiKey, question, queryType)
-    : [question];
+  const expandPromise = needsExpansion
+    ? expandQuery(apiKey, question, queryType)
+    : Promise.resolve([question]);
+
+  const chunks = (await loadIndex()).filter((c) => c.slug === slug);
+  if (chunks.length === 0) {
+    return { excerpts: "", toc: "", confidence: 0, pages: [] };
+  }
+
+  // Precomputed per-slug DF table — avoids re-tokenizing every chunk on each
+  // of the 2–3 retrieve() calls below.
+  const df = await docFreqFor(slug);
+
+  const queries = await expandPromise;
 
   // 4. Multi-query retrieval (top 8 for re-ranking).
-  let candidates = multiQueryRetrieve(chunks, queries, 8);
+  let candidates = multiQueryRetrieve(chunks, queries, 8, df);
 
   // 5. Boost explicitly-referenced pages to the top of the candidate list.
   if (explicitPages.length > 0) {
@@ -423,8 +431,23 @@ export async function buildRagContext(
     }
   }
 
-  // 6. Re-rank with LLM.
-  candidates = await rerank(apiKey, question, candidates);
+  // 6. Re-rank with LLM — but skip it when it isn't needed: that's a full
+  // LLM round trip (up to 20 s on the local model) saved for easy questions.
+  // Skip when the question names an explicit page (already boosted above),
+  // or when TF-IDF has a clear winner (top score ≥ 3 and ≥ 2× the runner-up)
+  // AND that winner lexically contains multiple distinct query terms. A single
+  // common word ("turn", "setup") can inflate one chunk's TF-IDF score while it
+  // is actually irrelevant — in that case the LLM quality gate must run.
+  const topScore = candidates[0]?.score ?? 0;
+  const runnerUpScore = candidates[1]?.score ?? 0;
+  let skipRerank = explicitPages.length > 0;
+  if (!skipRerank && topScore >= 3 && topScore >= 2 * runnerUpScore) {
+    const queryTerms = new Set(queries.flatMap((q) => tokenize(q)));
+    const topText = candidates[0].text.toLowerCase();
+    const distinctHits = [...queryTerms].filter((t) => topText.includes(t)).length;
+    skipRerank = distinctHits >= 2;
+  }
+  candidates = skipRerank ? candidates : await rerank(apiKey, question, candidates);
 
   // 7. Follow cross-references.
   candidates = followCrossRefs(chunks, candidates.slice(0, 6));

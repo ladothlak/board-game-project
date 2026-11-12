@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
+import { revalidateTag } from "next/cache";
 
 export interface Suggestion {
   field: "players" | "playtimeMinutes" | "ageRating";
@@ -59,6 +60,13 @@ const CACHE_TTL = 30_000; // 30 seconds
 export function invalidateGamesCache(): void {
   _cache = null;
   _cacheTime = 0;
+  // Also invalidate Next's data cache so cached pages re-render on the next
+  // request. No-op outside a request context (e.g. build time, queue worker).
+  try {
+    revalidateTag("games");
+  } catch {
+    /* not in a request scope */
+  }
 }
 
 async function readAllGames(): Promise<GameMeta[]> {

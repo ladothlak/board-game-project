@@ -47,8 +47,11 @@ function daysSince(iso: string | undefined): number {
   return (Date.now() - new Date(iso).getTime()) / 86_400_000;
 }
 
-export default function GameNightPicker({ games }: { games: GameMeta[] }) {
-  const [open, setOpen] = useState(false);
+/**
+ * Controlled dialog: the parent owns `open` so the component can be
+ * lazy-loaded and only mounted after its button is first clicked.
+ */
+export default function GameNightPicker({ games, open, onClose }: { games: GameMeta[]; open: boolean; onClose: () => void }) {
   const [players, setPlayers] = useState("");
   const [maxTime, setMaxTime] = useState("");
   const [moods, setMoods] = useState<MoodId[]>([]);
@@ -56,7 +59,7 @@ export default function GameNightPicker({ games }: { games: GameMeta[] }) {
   const [llmPicks, setLlmPicks] = useState<LlmPick[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [lastPlayed, setLastPlayed] = useState<Record<string, string>>({});
-  const { panelRef } = useDialog(open, () => setOpen(false));
+  const { panelRef } = useDialog(open, onClose);
 
   useEffect(() => {
     let cancelled = false;
@@ -179,7 +182,7 @@ export default function GameNightPicker({ games }: { games: GameMeta[] }) {
   }
 
   function closeModal() {
-    setOpen(false);
+    onClose();
     setPick(null);
     setLlmPicks(null);
     setPlayers("");
@@ -187,15 +190,10 @@ export default function GameNightPicker({ games }: { games: GameMeta[] }) {
     setMoods([]);
   }
 
+  // The trigger button lives in the parent (shelf-section) so it never
+  // unmounts while this lazy-loaded chunk loads.
   return (
     <>
-      <button
-        onClick={() => setOpen(true)}
-        className="flex-1 rounded-lg bg-sage/70 px-4 py-2 text-center text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
-      >
-        🎲 Pick a game
-      </button>
-
       {open && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm [transform:translateZ(0)]"

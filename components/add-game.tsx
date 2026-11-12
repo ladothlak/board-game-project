@@ -25,8 +25,11 @@ function slugify(title: string): string {
   return title.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
-export default function AddGame() {
-  const [open, setOpen] = useState(false);
+/**
+ * Controlled dialog: the parent owns `open` so the component can be
+ * lazy-loaded and only mounted after its button is first clicked.
+ */
+export default function AddGame({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
@@ -45,7 +48,7 @@ export default function AddGame() {
   const pdfRef = useRef<HTMLInputElement>(null);
   const coverRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
-  const { panelRef } = useDialog<HTMLFormElement>(open, () => setOpen(false));
+  const { panelRef } = useDialog<HTMLFormElement>(open, onClose);
 
   // Clear all modal state when the dialog closes (success, cancel, escape, backdrop).
   useEffect(() => {
@@ -268,7 +271,7 @@ export default function AddGame() {
         const d = await res.json().catch(() => ({}));
         throw new Error(d.error ?? `Server responded ${res.status}`);
       }
-      setOpen(false);
+      onClose();
       setLookupResult(null);
       setFetchMsg(null);
       setAttachedPdf(null);
@@ -280,19 +283,14 @@ export default function AddGame() {
     }
   }
 
+  // The trigger button lives in the parent (shelf-section) so it never
+  // unmounts while this lazy-loaded chunk loads.
   return (
     <>
-      <button
-        onClick={() => setOpen(true)}
-        className="flex-1 rounded-lg bg-sage/70 px-4 py-2 text-center text-sm text-espresso transition-colors hover:bg-sage dark:text-parchment"
-      >
-        + Add a game
-      </button>
-
       {open && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm [transform:translateZ(0)]"
-          onClick={() => !saving && setOpen(false)}
+          onClick={() => !saving && onClose()}
         >
           <form
             ref={panelRef}
@@ -633,11 +631,11 @@ export default function AddGame() {
             )}
 
             <div className="mt-5 flex items-center justify-between gap-2">
-              <BulkAdd variant="inline" onDone={() => setOpen(false)} />
+              <BulkAdd variant="inline" onDone={onClose} />
               <div className="flex gap-2">
                 <button
                   type="button"
-                  onClick={() => setOpen(false)}
+                  onClick={onClose}
                   disabled={saving}
                   className="rounded-lg bg-latte/40 px-4 py-2 text-sm text-cocoa transition-colors hover:bg-terracotta/30 dark:bg-cocoa/30 dark:text-latte dark:hover:bg-terracotta/40"
                 >

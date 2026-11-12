@@ -107,7 +107,10 @@ describe("buildRagContext", () => {
     // page reference gates it off.
     const result = await buildRagContext(SLUG, "Tell me about p. 42", KEY);
 
-    expect(mockFetch).toHaveBeenCalledTimes(1); // re-rank only
+    // No LLM calls at all: expansion is gated off by the explicit page
+    // reference, and re-ranking is skipped because the referenced page is
+    // already boosted to the top.
+    expect(mockFetch).not.toHaveBeenCalled();
     expect(expansionCalls()).toBe(0);
 
     // The referenced page is boosted ahead of everything else.
@@ -125,8 +128,9 @@ describe("buildRagContext", () => {
 
     const result = await buildRagContext(SLUG, "How does the Doom expansion work?", KEY, ["Doom"]);
 
-    // Two LLM calls: expansion + re-rank.
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // One LLM call: expansion runs, but re-ranking is skipped because the
+    // boosted expansion chunk (score 90) is a clear TF-IDF winner.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(expansionCalls()).toBe(1);
 
     // The expansion chunk (boosted to score 90) leads the context.
@@ -158,7 +162,9 @@ describe("buildRagContext", () => {
     const result = await buildRagContext(SLUG, "win the game", KEY);
 
     // Above the fallback threshold — no fallback note would be appended.
-    expect(result.confidence).toBe(1);
+    // (Re-ranking is skipped for this clear TF-IDF winner, so confidence
+    // reflects the raw score rather than the LLM-boosted one.)
+    expect(result.confidence).toBeGreaterThan(0.25);
 
     // The top chunk's full text is included (no truncation needed), led by
     // the victory page.
@@ -212,8 +218,9 @@ describe("buildRagContext", () => {
 
     const result = await buildRagContext(SLUG, "How do I deal with enemy attacks?", KEY);
 
-    // Expansion + re-rank both ran.
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // Expansion ran; re-ranking was skipped because the merged TF-IDF
+    // winner is clear enough not to need the LLM tie-breaker.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(expansionCalls()).toBe(1);
 
     // Each variant matched a different page; both made it into the context.
