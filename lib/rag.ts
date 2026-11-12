@@ -674,7 +674,7 @@ export async function buildRagContext(
   const queryTerms = new Set(queries.flatMap((q) => tokenize(q)));
 
   // 4. Multi-query retrieval (top 8 for re-ranking), in the configured
-  // lexical scoring mode (tfidf by default; bm25 when opted in).
+  // lexical scoring mode (bm25 by default; tfidf when opted in).
   let candidates = multiQueryRetrieve(chunks, queries, 8, df, scoring);
 
   // 5. Boost explicitly-referenced pages to the top of the candidate list.

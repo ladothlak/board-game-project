@@ -139,7 +139,7 @@ function ngrams(s: string, n: number): string[] {
 /**
  * Lexical scoring mode for `retrieve()`:
  *
- *  - "bm25" (default): standard BM25 — `idf(t) * (f * (k1 + 1)) / (f + k1 + b * (1 - dl/avgdl))`
+ *  - "bm25" (default): standard BM25 — `idf(t) * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl/avgdl))`
  *    with f = term frequency in the chunk, dl = chunk length in tokens,
  *    avgdl = mean chunk length in tokens across `chunks`, k1 = 1.2, b = 0.75.
  *    The TF saturation (the denominator) stops a page that repeats a common
@@ -218,7 +218,7 @@ export function retrieve(
         // Standard BM25: saturating TF so repeated terms can't dominate.
         for (const t of qTokens) {
           const f = tfCounts.get(t) ?? 0;
-          if (f > 0) score += idf(t) * ((f * (K1 + 1)) / (f + K1 + B * (1 - dl[i] / avgdl)));
+          if (f > 0) score += idf(t) * ((f * (K1 + 1)) / (f + K1 * (1 - B + B * (dl[i] / avgdl))));
         }
       } else {
         for (const t of qTokens) {

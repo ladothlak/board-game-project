@@ -79,7 +79,7 @@ function bm25(chunks: Chunk[], query: string, df?: Map<string, number>, k1 = 1.2
       for (const t of qTokens) {
         const f = tfCounts.get(t) ?? 0;
         if (f > 0) {
-          score += idf(t) * ((f * (k1 + 1)) / (f + k1 + b * (1 - lens[i] / avgL + lens[i])));
+          score += idf(t) * ((f * (k1 + 1)) / (f + k1 * (1 - b + b * (lens[i] / avgL))));
         }
       }
       for (const { gram, weight } of phrases) {
@@ -107,7 +107,7 @@ describe("BM25 vs TF-IDF diagnostic (throwaway, deterministic)", () => {
       for (const c of cases) {
         const chunks = index.filter((x) => x.slug === c.slug);
         const df = await docFreqFor(c.slug);
-        const prod = retrieve(chunks, c.question, 8, df).map((r) => r.page);
+        const prod = retrieve(chunks, c.question, 8, df, "tfidf").map((r) => r.page);
         const b17 = bm25(chunks, c.question, df).slice(0, 17).map((r) => r.page);
         const b17p = bm25(chunks, c.question, df, 1.2, 0.75, true).slice(0, 17).map((r) => r.page);
 

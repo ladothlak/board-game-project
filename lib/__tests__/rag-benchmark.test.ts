@@ -172,7 +172,7 @@ describe("RAG decision-model benchmark", () => {
 
     const chunks = (await loadIndex()).filter((c) => c.slug === slug);
     const df = await docFreqFor(slug);
-    const candidates = retrieve(chunks, question, 8, df); // real TF-IDF scores
+    const candidates = retrieve(chunks, question, 8, df); // real BM25 scores (current default)
     const terms = new Set(tokenize(question));
     if (candidates.length === 0) throw new Error("no candidates retrieved for benchmark");
 

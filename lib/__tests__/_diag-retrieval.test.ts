@@ -54,8 +54,9 @@ describe("retrieval diagnostic (throwaway)", () => {
       const chunks = index.filter((x) => x.slug === c.slug);
       const df = await docFreqFor(c.slug);
 
-      // Stage A: raw TF-IDF on the question alone.
-      const raw = retrieve(chunks, c.question, 8, df);
+      // Stage A: raw TF-IDF on the question alone (pinned to "tfidf" — this
+      // diagnostic traces the historical pre-BM25 pipeline stages).
+      const raw = retrieve(chunks, c.question, 8, df, "tfidf");
       const rawRank = rankOf(raw.map((r) => r.page), c.expectedPages);
 
       // Stage B: LLM expansion + multi-query merge (the real candidate pool).
