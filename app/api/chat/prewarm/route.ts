@@ -75,7 +75,11 @@ export async function POST(req: Request) {
   }
 
   try {
-    const rag = await buildRagContext(slug, question.trim(), apiKey);
+    // Opt-in: use the fast decision model for classification + relevance
+    // scoring (see PERFORMANCE-PLAN.md, "Decision-model RAG"). Off by default.
+    const rag = await buildRagContext(slug, question.trim(), apiKey, undefined, {
+      useDecisionModel: process.env.USE_DECISION_MODEL === "1",
+    });
     const key = prewarmKey(slug, question.trim());
 
     // Evict oldest if over cap.

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { buildRagContext } from "../rag";
+import { buildRagContext, decisionClassify, decisionRerank } from "../rag";
 import { loadIndex, resetRetrieveCachesForTest } from "../retrieve";
 import type { Chunk } from "../retrieve";
 
@@ -37,6 +37,14 @@ afterEach(() => {
 
 function llmResponse(content: string): Response {
   return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+/** Raw JSON response (the decision model returns a flat `{ answers }` body). */
+function rawJson(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
@@ -271,5 +279,222 @@ describe("buildRagContext", () => {
 
     // Section headers come before the flat map.
     expect(result.toc.indexOf("Setup: p. 1")).toBeLessThan(result.toc.indexOf("p. 1: "));
+  });
+});
+
+// ─── decisionClassify / decisionRerank (direct unit tests) ──────────────────
+
+describe("decisionClassify", () => {
+  it("returns the query type and expansion verdict from a choice + noul answer", async () => {
+    mockFetch.mockResolvedValue(
+      rawJson({
+        answers: {
+          queryType: { type: "choice", choice: "setup", confidence: 0.6 },
+          needsExpansion: { type: "noul", noul: 0.9 },
+        },
+      })
+    );
+
+    const result = await decisionClassify("How do I set up the board?");
+    expect(result).toEqual({ queryType: "setup", needsExpansion: true });
+  });
+
+  it("defaults an unknown choice to 'general'", async () => {
+    mockFetch.mockResolvedValue(
+      rawJson({
+        answers: {
+          queryType: { type: "choice", choice: "nonsense" },
+          needsExpansion: { type: "noul", noul: 0.1 },
+        },
+      })
+    );
+
+    const result = await decisionClassify("hello?");
+    expect(result).toEqual({ queryType: "general", needsExpansion: false });
+  });
+
+  it("returns null when the model is unavailable", async () => {
+    mockFetch.mockRejectedValue(new Error("down"));
+    await expect(decisionClassify("How do I win?")).resolves.toBeNull();
+  });
+});
+
+describe("decisionRerank", () => {
+  const candidates = [
+    { id: "c1", slug: "g", title: "", page: 1, text: "Set up the board.", score: 2 },
+    { id: "c2", slug: "g", title: "", page: 2, text: "You win when all enemies are destroyed.", score: 8 },
+  ];
+
+  it("reorders candidates by decision-model score combined with TF-IDF", async () => {
+    // The model rates c1 (index 0) highly (4) and c2 (index 1) low (1).
+    mockFetch.mockResolvedValue(
+      rawJson({
+        answers: { c0: { type: "score", score: 4 }, c1: { type: "score", score: 1 } },
+      })
+    );
+
+    const result = await decisionRerank("set up the board", candidates);
+    // c1: 2 + 4*3 = 14 beats c2: 8 + 1*3 = 11.
+    expect(result![0].id).toBe("c1");
+    expect(result![0].score).toBeCloseTo(14);
+    expect(result![1].score).toBeCloseTo(11);
+  });
+
+  it("returns null when the model is unavailable (so callers fall back to LLM)", async () => {
+    mockFetch.mockRejectedValue(new Error("down"));
+    await expect(decisionRerank("q", candidates)).resolves.toBeNull();
+  });
+
+  it("returns an empty array for no candidates without calling the model", async () => {
+    const result = await decisionRerank("q", []);
+    expect(result).toEqual([]);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+// ─── buildRagContext with the decision model enabled ────────────────────────
+
+/**
+ * Fetch stub that serves BOTH endpoints: the decision model (URL contains
+ * "/systemone") and the main LLM (URL contains "/chat/completions"). The
+ * decision-model answers are configurable; the LLM is routed on prompt content
+ * exactly as in stubLlm.
+ */
+function stubBoth(opts: {
+  queryType?: string;
+  needsExpansion?: boolean;
+  relevance?: number[];
+  expansion?: string[];
+} = {}) {
+  mockFetch.mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.includes("/systemone")) {
+      const body = JSON.parse(String(init?.body)) as { questions: Record<string, { type: string }> };
+      const answers: Record<string, unknown> = {};
+      for (const [name, q] of Object.entries(body.questions)) {
+        if (q.type === "choice") {
+          answers[name] = { type: "choice", choice: opts.queryType ?? "general", confidence: 0.7 };
+        } else if (q.type === "noul") {
+          answers[name] = { type: "noul", noul: opts.needsExpansion ? 0.9 : 0.1 };
+        } else if (q.type === "score") {
+          const idx = Object.keys(body.questions).indexOf(name);
+          answers[name] = { type: "score", score: opts.relevance?.[idx] ?? 2, confidence: 0.5 };
+        }
+      }
+      return rawJson({ answers });
+    }
+    // Main LLM endpoint (expansion / re-rank).
+    const prompt = (JSON.parse(String(init?.body)).messages as { content: string }[])
+      .map((m) => m.content)
+      .join("\n");
+    if (prompt.includes("search phrases")) {
+      return llmResponse(JSON.stringify(opts.expansion ?? ["variant one", "variant two"]));
+    }
+    if (prompt.includes("Rate each numbered excerpt")) {
+      return llmResponse(JSON.stringify("[5, 5]"));
+    }
+    return llmResponse("[]");
+  });
+}
+
+function decisionCalls(): number {
+  return mockFetch.mock.calls.filter((c) => String(c[0]).includes("/systemone")).length;
+}
+
+function llmExpandCalls(): number {
+  return mockFetch.mock.calls.filter(
+    (c) => String(c[0]).includes("/chat/completions") && String(c[1]?.body).includes("search phrases")
+  ).length;
+}
+
+describe("buildRagContext with the decision model enabled", () => {
+  beforeEach(() => {
+    vi.mocked(loadIndex).mockResolvedValue(CHUNKS);
+  });
+
+  it("feeds the decision model's query type into the expansion hint", async () => {
+    // Long query (triggers expansion) + decision model says "setup".
+    stubBoth({
+      queryType: "setup",
+      needsExpansion: true,
+      expansion: ["set up the board", "placing tokens"],
+    });
+
+    const result = await buildRagContext(SLUG, "How do I set up the board for the game?", KEY, undefined, {
+      useDecisionModel: true,
+    });
+
+    // Expansion ran and its prompt carried the setup-specific hint.
+    expect(llmExpandCalls()).toBe(1);
+    const expandBody = mockFetch.mock.calls.find(
+      (c) => String(c[0]).includes("/chat/completions") && String(c[1]?.body).includes("search phrases")
+    )![1]!;
+    expect(String(expandBody?.body)).toContain("physical setup");
+
+    // The pipeline still produced a usable context.
+    expect(result.excerpts.length).toBeGreaterThan(0);
+  });
+
+  it("skips expansion when the decision model says no rephrasing is needed", async () => {
+    // Long query would normally expand, but the model says it's a clear lookup.
+    stubBoth({ queryType: "specific-rule", needsExpansion: false });
+
+    const result = await buildRagContext(SLUG, "How do I set up the board for the game?", KEY, undefined, {
+      useDecisionModel: true,
+    });
+
+    // No expansion LLM call was made — the model's verdict gated it off.
+    expect(llmExpandCalls()).toBe(0);
+    expect(result.excerpts.length).toBeGreaterThan(0);
+  });
+
+  it("uses the decision model's score call for re-ranking instead of the LLM", async () => {
+    // A query where TF-IDF has no clear winner, so a quality gate is needed.
+    vi.mocked(loadIndex).mockResolvedValue([
+      { id: "r1", slug: SLUG, title: "", page: 1, text: "The board has many tokens and markers." },
+      { id: "r2", slug: SLUG, title: "", page: 2, text: "Tokens and markers are placed on the board." },
+    ]);
+    // The model strongly prefers candidate 0 over candidate 1.
+    stubBoth({ relevance: [4, 0] });
+
+    await buildRagContext(SLUG, "where do the tokens go", KEY, undefined, { useDecisionModel: true });
+
+    // A decision-model score call was made for re-ranking...
+    const scoreCalls = mockFetch.mock.calls.filter(
+      (c) => String(c[0]).includes("/systemone") && String(c[1]?.body).includes("score")
+    );
+    expect(scoreCalls.length).toBeGreaterThanOrEqual(1);
+    // ...and the slow LLM re-rank was NOT made.
+    const llmRerankCalls = mockFetch.mock.calls.filter(
+      (c) => String(c[0]).includes("/chat/completions") && String(c[1]?.body).includes("Rate each numbered excerpt")
+    );
+    expect(llmRerankCalls.length).toBe(0);
+  });
+
+  it("falls back to keyword classification + LLM re-rank when the model is down", async () => {
+    // Decision model unavailable; main LLM works normally. Route by URL so the
+    // /systemone call rejects while /chat/completions serves as usual.
+    mockFetch.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes("/systemone")) return Promise.reject(new Error("down"));
+      const prompt = (JSON.parse(String(init?.body)).messages as { content: string }[])
+        .map((m) => m.content)
+        .join("\n");
+      if (prompt.includes("search phrases")) return llmResponse(JSON.stringify(["set up the board", "placing tokens"]));
+      if (prompt.includes("Rate each numbered excerpt")) return llmResponse(JSON.stringify("[5, 5]"));
+      return llmResponse("[]");
+    });
+
+    // A long query: expansion runs (keyword type) and the LLM re-rank is used.
+    const result = await buildRagContext(SLUG, "How do I set up the board for the game?", KEY, undefined, {
+      useDecisionModel: true,
+    });
+
+    // Expansion still ran (fallback to keyword classification)...
+    expect(llmExpandCalls()).toBe(1);
+    // ...and no decision-model call succeeded (all rejected).
+    expect(decisionCalls()).toBeGreaterThan(0);
+    // ...and the context was produced.
+    expect(result.excerpts.length).toBeGreaterThan(0);
   });
 });

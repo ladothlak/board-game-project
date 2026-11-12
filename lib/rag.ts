@@ -1,11 +1,17 @@
 import { getGame } from "./games";
 import { loadIndex, retrieve, pageMap, docFreqFor, tokenize, Chunk } from "./retrieve";
+import { askDecisionModel, type QuestionSpec } from "./decision-model";
 
 // Unsloth runs locally (Unsloth Studio / `unsloth run`) and exposes an
 // OpenAI-compatible API, typically on http://localhost:8888.
-const BASE_URL = process.env.UNSLOTH_BASE_URL ?? "http://localhost:8888/v1";
 const MODEL =
   process.env.UNSLOTH_MODEL ?? "ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF";
+
+/** Resolve the Unsloth base URL at call time (not import time), so a `.env`
+ * loaded after module evaluation — as in the benchmark — is honored. */
+function resolveBaseUrl(): string {
+  return process.env.UNSLOTH_BASE_URL ?? "http://localhost:8888/v1";
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -32,6 +38,18 @@ export interface RagContext {
   pages: number[];
 }
 
+export interface RagOptions {
+  /**
+   * When true, use the fast decision model for query classification and
+   * candidate relevance scoring instead of the keyword heuristic and the slow
+   * LLM re-rank. Each step falls back to the existing behavior if the model is
+   * unavailable, so this never degrades availability — only (hopefully)
+   * improves accuracy and latency. Defaults to false to preserve the current
+   * pipeline exactly (which is what the A/B benchmark compares against).
+   */
+  useDecisionModel?: boolean;
+}
+
 // ─── LLM Helper ───────────────────────────────────────────────────────────
 
 async function callLlm(
@@ -41,7 +59,7 @@ async function callLlm(
   maxTokens = 500,
   timeoutMs = 30_000
 ): Promise<string> {
-  const res = await fetch(`${BASE_URL}/chat/completions`, {
+  const res = await fetch(`${resolveBaseUrl()}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -81,6 +99,149 @@ export function classifyQuery(question: string): QueryType {
     if (TYPE_KEYWORDS[type].some((kw) => q.includes(kw))) return type;
   }
   return "general";
+}
+
+// ─── 1b. Decision-model classification & scoring ──────────────────────────
+//
+// The fast decision model (`kev-0.8b`) makes the decisions the pipeline needs
+// — what kind of question this is, whether it needs rephrasing, and how
+// relevant each retrieved candidate is — in batched calls that are far cheaper
+// than the slow LLM they replace (classification ~0.5 s; comparative relevance
+// scoring ~3 s vs up to 30 s for the LLM re-rank). These replace the keyword
+// heuristic and the slow LLM re-rank when enabled via RagOptions.useDecisionModel,
+// each falling back to the existing behavior if the model is unavailable.
+
+/** The query-type options offered to the decision model (mirrors QueryType). */
+const QUERY_TYPE_CRITERIA: Record<QueryType, string> = {
+  setup: "Setting up, preparing, placing pieces, starting the game",
+  "turn-structure": "Turn order, rounds, phases, who goes first, sequence of play",
+  "specific-rule": "A specific rule, action, or what happens when you do something",
+  "edge-case": "Exceptions, special situations, if/when conditions, unique cases",
+  comparison: "Comparing games, expansions, or options",
+  general: "Anything else — small talk, unclear, or not a rulebook question",
+};
+
+/** Ordered relevance levels for candidate scoring, lowest → highest. */
+const RELEVANCE_LEVELS = [
+  "no connection",
+  "same topic only",
+  "related background",
+  "part of answer",
+  "directly answers",
+];
+
+/**
+ * The rubric the decision model scores against. Stated ONCE in the request
+ * `state` (not repeated per question) — see the prompt notes below.
+ */
+const RELEVANCE_RUBRIC =
+  "Rate each excerpt 0-4 for how well it answers the question. " +
+  "0 = no connection to the question's topic. " +
+  "1 = same general topic but no useful detail. " +
+  "2 = related background, not the answer. " +
+  "3 = closely related and likely contains part of the answer. " +
+  "4 = directly states the rule or fact the question asks about.";
+
+/**
+ * Classify the question with the decision model: its query type and whether it
+ * needs rephrasing into search variants. Returns `null` when the model is
+ * unavailable so callers fall back to `classifyQuery` + the length heuristic.
+ */
+export async function decisionClassify(
+  question: string
+): Promise<{ queryType: QueryType; needsExpansion: boolean } | null> {
+  const result = await askDecisionModel(question, {
+    queryType: {
+      type: "choice",
+      instructions: "What kind of board-game rulebook question is this?",
+      criteria: QUERY_TYPE_CRITERIA,
+    },
+    needsExpansion: {
+      type: "noul",
+      instructions:
+        "Does this question need to be rephrased into 2-3 search phrases to find the right rulebook text, or is it already a clear, specific lookup?",
+    },
+  });
+  if (!result) return null;
+
+  const typeAnswer = result.answers["queryType"];
+  const expAnswer = result.answers["needsExpansion"];
+  const rawType = typeAnswer?.choice;
+  const queryType: QueryType = rawType && rawType in QUERY_TYPE_CRITERIA
+    ? (rawType as QueryType)
+    : "general";
+  // noul > 0.5 means "yes, it needs rephrasing".
+  const needsExpansion = (expAnswer?.noul ?? 0) > 0.5;
+  return { queryType, needsExpansion };
+}
+
+/**
+ * Score candidate relevance with the decision model in a single batched call,
+ * replacing the slow LLM re-rank. The continuous score is combined with the
+ * TF-IDF score using the same weighting as `rerank`, so results stay
+ * comparable. Returns `null` when the model is unavailable so callers fall
+ * back to `rerank`.
+ *
+ * Prompt engineering notes (measured against the live endpoint, see
+ * PERFORMANCE-PLAN.md §4.1):
+ *
+ * - Judging each excerpt in isolation clusters every score around ~2.2 on the
+ *   0–4 scale — no discrimination at all. Putting the question AND every
+ *   excerpt into the request `state` so the model scores candidates *relative
+ *   to each other* fixes this: top-1 hit rate rises from 60% to 80% on the
+ *   probe set, and the good/bad score gap triples. The rubric is stated once
+ *   in `state` (repeating it per question costs tokens without helping).
+ * - Only the TOP-4 shortlist is sent: comparative scoring discriminates at
+ *   that scale (~3 s, inside the timeout) but breaks down with 8 candidates —
+ *   scores invert (the good chunk ranks last) and the call runs 10–13 s.
+ * - Previews are raw ~200-char prefix slices, NOT query-term sentence
+ *   extraction. The 0.8B model judges by surface keyword overlap, and section
+ *   headings carry the query terms; sentence extraction measurably hurts
+ *   discrimination (top-1 0% vs 67% on the probe set).
+ *
+ * Cost: ~1.3 k input tokens / ~3 s per call, still far cheaper than the LLM
+ * re-rank it replaces (up to 30 s).
+ */
+export async function decisionRerank(
+  question: string,
+  candidates: ScoredChunk[],
+  _queryTerms?: Set<string>,
+  _df?: Map<string, number>,
+  _n = 0
+): Promise<ScoredChunk[] | null> {
+  if (candidates.length === 0) return [];
+
+  // Comparative framing: the model sees the shortlist at once and rates each
+  // candidate against the others. Only the top 4 are sent (see notes above);
+  // the rest keep their TF-IDF score and order.
+  const shortlist = candidates.slice(0, 4);
+  const previews = shortlist.map((c) => c.text.replace(/\s+/g, " ").slice(0, 200));
+  const state =
+    `Question: ${question}\n\n${RELEVANCE_RUBRIC}\n\n` +
+    previews.map((t, i) => `Excerpt ${i + 1}: ${t}`).join("\n\n");
+
+  const questions: QuestionSpec = {};
+  shortlist.forEach((_, i) => {
+    questions[`c${i}`] = {
+      type: "score",
+      instructions: `Score Excerpt ${i + 1}.`,
+      criteria: RELEVANCE_LEVELS,
+    };
+  });
+
+  const result = await askDecisionModel(state, questions);
+  if (!result) return null;
+
+  // Combine decision-model score (weight 3) with TF-IDF score (weight 1),
+  // mirroring rerank() so the final ordering is comparable to the LLM path.
+  // Candidates outside the shortlist are untouched.
+  const combined = candidates.map((c, i) => {
+    if (i >= shortlist.length) return c;
+    const s = result.answers[`c${i}`]?.score;
+    if (typeof s !== "number") return c;
+    return { ...c, score: c.score * 1 + s * 3 };
+  });
+  return combined.sort((a, b) => b.score - a.score);
 }
 
 // ─── 2. Query Expansion ────────────────────────────────────────────────────
@@ -445,26 +606,43 @@ export async function buildRagContext(
   slug: string,
   question: string,
   apiKey: string,
-  expansionNames?: string[]
+  expansionNames?: string[],
+  options?: RagOptions
 ): Promise<RagContext> {
-  // 1. Classify.
-  const queryType = classifyQuery(question);
+  const useDecision = options?.useDecisionModel === true;
+
+  // 1. Classify. When the decision model is enabled, classify in parallel
+  // with loadIndex() so its ~0.5 s latency hides behind the index read; the
+  // keyword heuristic stays as the fallback. Otherwise classify synchronously
+  // (free) exactly as before.
+  const classifyPromise = useDecision
+    ? decisionClassify(question)
+    : Promise.resolve(null);
 
   // 2. Detect explicit page references (e.g. "Tell me about page 14").
   const explicitPages = detectExplicitPages(question);
-
-  // 3. Expand query — skip the LLM call for short or page-specific queries
-  // where TF-IDF retrieval already works well on its own. The expansion LLM
-  // call doesn't need the index, so it runs in parallel with loadIndex().
-  const needsExpansion = question.length > 20 && explicitPages.length === 0;
-  const expandPromise = needsExpansion
-    ? expandQuery(apiKey, question, queryType)
-    : Promise.resolve([question]);
 
   const chunks = (await loadIndex()).filter((c) => c.slug === slug);
   if (chunks.length === 0) {
     return { excerpts: "", toc: "", confidence: 0, pages: [] };
   }
+
+  // Resolve classification: the decision model's verdict when available,
+  // otherwise the keyword heuristic.
+  const decision = await classifyPromise;
+  const queryType: QueryType = decision?.queryType ?? classifyQuery(question);
+
+  // 3. Expand query — skip the LLM call for short or page-specific queries
+  // where TF-IDF retrieval already works well on its own. When the decision
+  // model gave us a verdict, also honor its "needs rephrasing" signal; on any
+  // fallback we keep the original length heuristic.
+  const baseNeedsExpansion = question.length > 20 && explicitPages.length === 0;
+  const needsExpansion = useDecision
+    ? baseNeedsExpansion && (decision ? decision.needsExpansion : true)
+    : baseNeedsExpansion;
+  const expandPromise = needsExpansion
+    ? expandQuery(apiKey, question, queryType)
+    : Promise.resolve([question]);
 
   // Precomputed per-slug DF table — avoids re-tokenizing every chunk on each
   // of the 2–3 retrieve() calls below.
@@ -513,13 +691,15 @@ export async function buildRagContext(
     }
   }
 
-  // 6. Re-rank with LLM — but skip it when it isn't needed: that's a full
-  // LLM round trip (up to 30 s on the local model) saved for easy questions.
-  // Skip when the question names an explicit page (already boosted above),
-  // or when TF-IDF has a clear winner (top score ≥ 3 and ≥ 2× the runner-up)
-  // AND that winner lexically contains multiple distinct query terms. A single
-  // common word ("turn", "setup") can inflate one chunk's TF-IDF score while it
-  // is actually irrelevant — in that case the LLM quality gate must run.
+  // 6. Re-rank — but skip it when it isn't needed: that's a full LLM round
+  // trip (up to 30 s on the local model) saved for easy questions. Skip when
+  // the question names an explicit page (already boosted above), or when TF-IDF
+  // has a clear winner (top score ≥ 3 and ≥ 2× the runner-up) AND that winner
+  // lexically contains multiple distinct query terms. A single common word
+  // ("turn", "setup") can inflate one chunk's TF-IDF score while it is actually
+  // irrelevant — in that case the quality gate must run. When the decision
+  // model is enabled, the quality gate is its fast batched score call (falling
+  // back to the slow LLM re-rank if the model is unavailable).
   const topScore = candidates[0]?.score ?? 0;
   const runnerUpScore = candidates[1]?.score ?? 0;
   let skipRerank = explicitPages.length > 0;
@@ -530,7 +710,10 @@ export async function buildRagContext(
   }
   candidates = skipRerank
     ? candidates
-    : await rerank(apiKey, question, candidates, queryTerms, df, chunks.length);
+    : useDecision
+      ? (await decisionRerank(question, candidates, queryTerms, df, chunks.length)) ??
+        await rerank(apiKey, question, candidates, queryTerms, df, chunks.length)
+      : await rerank(apiKey, question, candidates, queryTerms, df, chunks.length);
 
   // 7. Follow cross-references.
   candidates = followCrossRefs(chunks, candidates.slice(0, 6));

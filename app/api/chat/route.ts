@@ -98,7 +98,11 @@ export async function POST(req: Request) {
     ragConfidence = prewarmed.confidence;
   } else {
     const expNames = (game.expansions ?? []).filter((e) => e.inChatContext).map((e) => e.name);
-    const rag = await buildRagContext(slug, question.trim(), apiKey, expNames);
+    // Opt-in: use the fast decision model for classification + relevance
+    // scoring (see PERFORMANCE-PLAN.md, "Decision-model RAG"). Off by default.
+    const rag = await buildRagContext(slug, question.trim(), apiKey, expNames, {
+      useDecisionModel: process.env.USE_DECISION_MODEL === "1",
+    });
     context = rag.excerpts;
     toc = rag.toc;
     ragConfidence = rag.confidence;
