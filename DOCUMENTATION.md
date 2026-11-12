@@ -311,8 +311,7 @@ system prompt. History is in-memory only (per page visit).
 - `next/image` for covers.
 - SW stale-while-revalidate for same-origin GET.
 - RAG skips LLM expansion for short queries; speculative prewarm.
-- PDF pages rasterized once at 2× in batches of 5; zoom is pure CSS.
-- No PDF virtualization (intentional: fast paging; upfront rasterization OK).
+- PDF viewer is virtualized: only the visible window is rasterized (DPR-aware, capped at 2×), with streaming geometry and a priority render pump; zoom levels run 100%–300%.
 
 ### 6.11 PWA
 - `manifest.json` (standalone, theme `#8b5e3c`).
@@ -477,10 +476,7 @@ low-priority nits.
 
 - **Unnecessarily exported symbols** (used only within their own file):
   `RULEBOOK_DESCRIPTORS`, `LANG_CODES`, `LANG_3_TO_2`, `GENERIC_DESCRIPTORS`
-  (`lib/fetch-rulebook-utils.ts`) and `tokenize` (`lib/retrieve.ts`). Not dead,
-  just could be non-exported.
-- **No PDF virtualization by design** — large rulebooks rasterize every page at
-  2× up front. Acceptable for this use case but memory-heavy for very large PDFs.
+  (`lib/fetch-rulebook-utils.ts`). Not dead, just could be non-exported.
 - **`getClientIp()` is a constant** (`"direct"`), so rate limits are global, not
   per-client. Fine for localhost-only; revisit behind a reverse proxy.
 - **Chat history is in-memory only**; navigating away loses the conversation.
@@ -496,10 +492,9 @@ low-priority nits.
 ## 13. Suggested next steps
 
 1. Optionally un-export the internal-only helpers listed in §12.2.
-2. Consider PDF virtualization or a page window if very large rulebooks are added.
-3. Revisit per-client rate limiting if the app is ever put behind a reverse proxy
+2. Revisit per-client rate limiting if the app is ever put behind a reverse proxy
    (currently all clients share one `"direct"` bucket).
-4. Intellisearch coverage is limited by data availability, not code — the four
+3. Intellisearch coverage is limited by data availability, not code — the four
    known misses need a hosted PDF before they can be fetched.
-5. If on-demand complexity rescoring is desired, reintroduce a dedicated route
+4. If on-demand complexity rescoring is desired, reintroduce a dedicated route
    (the previous one was removed as dead code).
