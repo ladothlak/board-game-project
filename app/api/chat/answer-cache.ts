@@ -6,12 +6,15 @@ import { indexMtime } from "@/lib/retrieve";
  * plus its citations. Entries expire after 24 hours and are capped at 100
  * (answers are small — a few hundred KB total). Each entry is stamped with
  * the search index mtime it was built against, so a re-digested rulebook
- * invalidates it: when `loadIndex()` picks up a new file, `indexMtime()`
- * changes and stale entries are dropped on read.
+ * invalidates it: `indexMtime()` only advances when `loadIndex()` runs, so
+ * the caller must refresh the index before reading (the chat route does this
+ * immediately before `getAnswer`); entries whose stamped mtime no longer
+ * matches are dropped on read.
  */
 const answerCache = new Map<string, { answer: string; citations: { page: number }[]; ts: number; mtime: number }>();
 const ANSWER_TTL = 24 * 60 * 60 * 1000;
 const ANSWER_MAX = 100;
+const ANSWER_SWEEP_MS = 30_000;
 
 // Periodic TTL sweep, like the prewarm cache. `.unref()` so it never keeps a
 // short-lived process (e.g. `next start` during tests) alive.
@@ -20,7 +23,7 @@ setInterval(() => {
   for (const [key, entry] of answerCache) {
     if (now - entry.ts > ANSWER_TTL) answerCache.delete(key);
   }
-}, 30_000).unref();
+}, ANSWER_SWEEP_MS).unref();
 
 function answerKey(slug: string, question: string): string {
   return `${slug}::${question.toLowerCase().replace(/\s+/g, " ").trim()}`;

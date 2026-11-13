@@ -89,6 +89,15 @@ export async function POST(req: Request) {
   // no RAG, no generation, zero model cost. Checked only after auth, rate
   // limiting, and the prompt-injection guard, so blocked requests are never
   // served from cache.
+  //
+  // Refresh the index mtime before consulting the cache: `indexMtime()` only
+  // advances when `loadIndex()` runs, and a cache hit returns before any other
+  // loadIndex() call in this request — without this, a re-digest would leave
+  // stale answers served until some unrelated request happened to reload the
+  // index. Cheap: one fs.stat when the file is unchanged. (We refresh here
+  // rather than statting the index inside the cache module, so the cache stays
+  // decoupled from the index file's location.)
+  await loadIndex();
   const cached = getAnswer(slug, question.trim());
   if (cached) {
     const encoder = new TextEncoder();
