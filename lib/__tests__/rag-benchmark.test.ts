@@ -270,10 +270,14 @@ describe("RAG decision-model benchmark", () => {
       console.log("decision-model: not contacted in CI — set RUN_LIVE_BENCH=1 for real numbers");
     }
 
-    // Harness sanity: keyword accuracy is well-defined and within [0, 1].
+    // Accuracy gate (issue #66): the keyword heuristic must score ≥ 85% on
+    // the labelled set — the P0.4 acceptance target (was 79/118 = 66.9%
+    // before the precedence + word-boundary fix). Per-case regressions live
+    // in rag-classification.test.ts; this enforces the aggregate floor, and
+    // the console report above grades both classification paths (keyword in
+    // CI, decision-model when RUN_LIVE_BENCH=1).
     const kwAcc = keywordHits.reduce((a, b) => a + b, 0) / keywordHits.length;
-    expect(kwAcc).toBeGreaterThanOrEqual(0);
-    expect(kwAcc).toBeLessThanOrEqual(1);
+    expect(kwAcc).toBeGreaterThanOrEqual(0.85);
   }, LIVE ? 120_000 : 30_000);
 
   it("compares LLM re-rank vs decision-model scoring on a hard question (live only)", { skip: !LIVE, timeout: 300_000 }, async () => {

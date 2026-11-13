@@ -183,24 +183,36 @@ async function callLlm(
 
 // ─── 1. Query-Type Classification ─────────────────────────────────────────
 
-const TYPE_KEYWORDS: Record<QueryType, string[]> = {
-  setup: ["set up", "setup", "prepare", "begin", "start", "place", "deal", "assemble", "arrange"],
-  "turn-structure": ["turn", "round", "phase", "order", "sequence", "step", "who goes first"],
-  victory: ["victory", "how do i win", "win condition", "end of the game", "how does the game end", "who wins"],
-  "specific-rule": ["how do i", "what happens", "can i", "must i", "do i", "rule"],
-  "edge-case": ["if", "when", "exception", "instead", "otherwise", "special", "unique", "only"],
-  comparison: ["compare", "difference", "versus", "vs", "which is"],
+/**
+ * Keyword patterns per query type (issue #66). Every pattern is anchored with
+ * `\b` word boundaries so a keyword can only match as a whole word: "if" no
+ * longer matches inside "difference", "turn" inside "return", or "vs" inside
+ * "devs". Multi-word phrases are matched verbatim ("set up", "how do i").
+ */
+const TYPE_KEYWORDS: Record<QueryType, RegExp[]> = {
+  setup: [/\bset up\b/, /\bsetup\b/, /\bprepare\b/, /\bbegin\b/, /\bstart\b/, /\bdeal\b/, /\bassemble\b/, /\barrange\b/],
+  "turn-structure": [/\bturn\b/, /\bround\b/, /\bphases?\b/, /\border\b/, /\bsequence\b/, /\bstep\b/, /\bwho goes first\b/, /\bactions\b/],
+  victory: [/\bvictory\b/, /\bwins?\b/, /\bend of the game\b/, /\bgame ends?\b/, /\bgoal of the game\b/, /\bgoal in the game\b/, /\bscoring\b/],
+  "specific-rule": [/\bhow do\b/, /\bhow does\b/, /\bwhat happens\b/, /\bcan i\b/, /\bmust i\b/, /\bdo i\b/, /\brule\b/, /\bwhat is\b/, /\bwhat are\b/, /\bhow many\b/],
+  "edge-case": [/\bwhen\b/, /\bexception\b/, /\binstead\b/, /\botherwise\b/, /\bunique\b/, /\bonly\b/, /\bsolo\b/, /\berrata\b/],
+  comparison: [/\bcompare\b/, /\bdifference\b/, /\bversus\b/, /\bvs\b/, /\bwhich is\b/],
   general: [],
 };
 
-/** Classify the question type using keyword heuristics (no LLM call needed). */
+/**
+ * Classify the question type using keyword heuristics (no LLM call needed).
+ *
+ * Precedence (issue #66): `victory` is checked BEFORE `edge-case`, so a
+ * victory question like "When does the game end?" — which contains BOTH an
+ * edge-case keyword ("when") and a victory signal ("game ends") — resolves to
+ * the more specific type. Full order, most-specific first: setup → victory →
+ * turn-structure → comparison → edge-case → specific-rule; `general` is the
+ * fallback when nothing matches.
+ */
 export function classifyQuery(question: string): QueryType {
   const q = question.toLowerCase();
-  // "victory" is checked before "specific-rule": a victory question like
-  // "How do I win?" contains BOTH a specific-rule keyword ("how do i") and a
-  // victory keyword ("how do i win"), so the more specific type must win.
-  for (const type of ["setup", "turn-structure", "edge-case", "comparison", "victory", "specific-rule"] as QueryType[]) {
-    if (TYPE_KEYWORDS[type].some((kw) => q.includes(kw))) return type;
+  for (const type of ["setup", "victory", "turn-structure", "comparison", "edge-case", "specific-rule"] as QueryType[]) {
+    if (TYPE_KEYWORDS[type].some((re) => re.test(q))) return type;
   }
   return "general";
 }
