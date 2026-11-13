@@ -303,7 +303,11 @@ describe("RAG decision-model benchmark", () => {
     const baseOnly = rows.filter((r) => inContext(r.basePages, r.c.expectedPages) === "✓" && inContext(r.enhPages, r.c.expectedPages) === "✗" && inContext(r.hybridPages, r.c.expectedPages) === "✗").length;
     const enhOnly = rows.filter((r) => inContext(r.basePages, r.c.expectedPages) === "✗" && inContext(r.enhPages, r.c.expectedPages) === "✓" && inContext(r.hybridPages, r.c.expectedPages) === "✗").length;
     const hybridOnly = rows.filter((r) => inContext(r.basePages, r.c.expectedPages) === "✗" && inContext(r.enhPages, r.c.expectedPages) === "✗" && inContext(r.hybridPages, r.c.expectedPages) === "✓").length;
-    console.log(`divergence (in-context): existing-only hits ${baseOnly} | enhanced-only hits ${enhOnly} | hybrid-only hits ${hybridOnly}`);
+    // Cases where ALL three arms miss in-context — the ceiling of the labelled
+    // dataset (questions even the full LLM pipeline can't answer), which the
+    // per-arm "only" counts cannot express.
+    const allMiss = rows.filter((r) => inContext(r.basePages, r.c.expectedPages) === "✗" && inContext(r.enhPages, r.c.expectedPages) === "✗" && inContext(r.hybridPages, r.c.expectedPages) === "✗").length;
+    console.log(`divergence (in-context): existing-only hits ${baseOnly} | enhanced-only hits ${enhOnly} | hybrid-only hits ${hybridOnly} | all miss ${allMiss}`);
 
     // Harness sanity: metrics are well-defined proportions.
     expect(baseMrr.every((x) => x >= 0 && x <= 1)).toBe(true);
