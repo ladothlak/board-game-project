@@ -334,6 +334,96 @@ describe("buildRagContext", () => {
   });
 });
 
+// ─── buildRagContext — retrieve-first (issue #58) ─────────────────────────────
+//
+// Expansion fires in the background and is only awaited when base retrieval on
+// the original question is too weak to trust. These tests pin the three
+// behaviors: gate-pass questions skip the await (expandMs 0), weak questions
+// await + merge (expandMs > 0), and a failing background expansion is swallowed
+// without an unhandled rejection.
+
+describe("buildRagContext — retrieve-first (issue #58)", () => {
+  beforeEach(() => {
+    vi.mocked(loadIndex).mockResolvedValue(CHUNKS);
+  });
+
+  it("does not await the background expansion when base retrieval passes the quality gate", async () => {
+    // The expansion LLM call hangs forever: if buildRagContext awaited it,
+    // this test would time out. It must return on the base result alone.
+    mockFetch.mockImplementation(() => new Promise<Response>(() => {}));
+
+    const result = await buildRagContext(SLUG, "How do I set up the board for the game?", KEY);
+
+    // Expansion was fired in the background (one fetch call) but never
+    // awaited — we didn't pay for it, so expandMs is exactly 0.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(expansionCalls()).toBe(1);
+    expect(result.timings.expandMs).toBe(0);
+
+    // The base retrieval result (the setup chunk) carried through to the
+    // context, and the clear winner skipped the re-rank.
+    expect(result.excerpts.startsWith("--- Page 1 ---")).toBe(true);
+    expect(result.confidence).toBeGreaterThan(0.25);
+  });
+
+  it("awaits the background expansion and merges its variants when base retrieval is weak", async () => {
+    // Chunks that only match rephrased variants, not the original question:
+    // "with" is the sole base-term hit (a weak score), while "attack" and
+    // "combat rules" are reachable only through expansion.
+    vi.mocked(loadIndex).mockResolvedValue([
+      { id: "w1", slug: SLUG, title: "", page: 1, text: "The weather track shifts with the seasons." },
+      { id: "a2", slug: SLUG, title: "", page: 2, text: "Each turn you may attack with your forces." },
+      { id: "b4", slug: SLUG, title: "", page: 4, text: "Combat rules: resolve the battle each round." },
+    ]);
+    // The expansion resolves after a real delay so expandMs is measurably > 0.
+    mockFetch.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) =>
+          setTimeout(() => resolve(llmResponse(JSON.stringify(["enemy attack", "combat rules"]))), 25)
+        )
+    );
+
+    const result = await buildRagContext(SLUG, "How do I deal with enemy attacks?", KEY);
+
+    // Expansion was awaited (weak base result) and its variants were merged:
+    // page 4 is unreachable from the original question alone.
+    expect(expansionCalls()).toBe(1);
+    expect(result.timings.expandMs).toBeGreaterThan(0);
+    expect(result.excerpts).toContain("--- Page 4 ---");
+    expect(result.excerpts).toContain("--- Page 2 ---");
+
+    // The merged winner is clear, so the re-rank was still skipped — exactly
+    // one LLM call (the expansion) in total.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("swallows a failing background expansion without an unhandled rejection", async () => {
+    // The provider is down: the fired expansion fails. With base retrieval
+    // passing the gate, buildRagContext must return normally and no
+    // rejection may escape as an unhandled promise rejection. (expandQuery
+    // catches its own errors today; this pins the observable contract the
+    // fire-and-forget .catch() guard enforces.)
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    mockFetch.mockRejectedValue(new Error("provider down"));
+
+    try {
+      const result = await buildRagContext(SLUG, "How do I set up the board for the game?", KEY);
+
+      // The function returned normally on the base result...
+      expect(result.excerpts.startsWith("--- Page 1 ---")).toBe(true);
+      expect(result.timings.expandMs).toBe(0);
+      // ...and no rejection escaped.
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+});
+
 // ─── decisionClassify / decisionRerank (direct unit tests) ──────────────────
 
 describe("decisionClassify", () => {

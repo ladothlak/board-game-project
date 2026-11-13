@@ -29,9 +29,11 @@ interface ScoredChunk extends Chunk {
 
 /** Per-stage wall-clock durations (ms) for one `buildRagContext` run. */
 export interface RagTimings {
-  /** Query expansion — the LLM call when it fired, ~0 when gated off. */
+  /** Query expansion — the LLM round trip when it was awaited (weak base
+   * retrieval), 0 when skipped because base retrieval passed the gate. */
   expandMs: number;
-  /** Multi-query retrieval plus the page / expansion boosts. */
+  /** Multi-query retrieval plus the page / expansion boosts. Spans the base
+   * retrieval and, when the base result was weak, the expanded re-retrieval. */
   retrieveMs: number;
   /** Re-rank stage — the LLM / decision-model call when it fired, ~0 when skipped. */
   rerankMs: number;
@@ -419,6 +421,73 @@ export function multiQueryRetrieve(
   return [...merged.values()].sort((a, b) => b.score - a.score);
 }
 
+/**
+ * Boost explicitly-referenced pages and mentioned-expansion chunks to the top
+ * of the candidate list with very high scores so they always survive in the
+ * final set, regardless of lexical retrieval order. Applied after every
+ * multiQueryRetrieve() call (issue #58) so a re-retrieval on expanded queries
+ * keeps exactly the same boosts as the base retrieval.
+ */
+function boostCandidates(
+  candidates: ScoredChunk[],
+  chunks: Chunk[],
+  explicitPages: number[],
+  expansionNames: string[] | undefined,
+  question: string
+): ScoredChunk[] {
+  let boosted = candidates;
+  // Boost explicitly-referenced pages to the top of the candidate list.
+  if (explicitPages.length > 0) {
+    for (const p of explicitPages) {
+      const pageChunk = chunks.find((c) => c.page === p);
+      if (pageChunk) {
+        // Give it a very high score so it's always in the top results.
+        const pageBoost: ScoredChunk = { ...pageChunk, score: 100 };
+        // Remove any existing entry for this page, then prepend.
+        boosted = boosted.filter((c) => c.page !== p);
+        boosted.unshift(pageBoost);
+      }
+    }
+  }
+  // Boost expansion chunks when the query mentions an expansion name.
+  if (expansionNames && expansionNames.length > 0) {
+    const qLower = question.toLowerCase();
+    const mentionedExps = expansionNames.filter((name) =>
+      qLower.includes(name.toLowerCase())
+    );
+    if (mentionedExps.length > 0) {
+      // Find all chunks that belong to a mentioned expansion.
+      const expChunks = chunks.filter(
+        (c) => c.isExpansion === true && mentionedExps.some((name) => c.id.includes(name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")))
+      );
+      // Boost them to the top with a high score.
+      for (const ec of expChunks) {
+        const expBoost: ScoredChunk = { ...ec, score: 90 };
+        boosted = boosted.filter((c) => c.page !== ec.page);
+        boosted.unshift(expBoost);
+      }
+    }
+  }
+  return boosted;
+}
+
+/**
+ * The retrieval quality gate shared by the re-rank skip and the retrieve-first
+ * decision (issue #58): the top candidate is a clear winner (score ≥ 3 and ≥ 2×
+ * the runner-up) AND it lexically contains at least two distinct query terms.
+ * A single common word ("turn", "setup") can inflate one chunk's score while
+ * it is actually irrelevant — in that case the gate must not fire. Explicit-
+ * page questions are handled by callers (their referenced page is already
+ * boosted and never needs re-ranking).
+ */
+function passesQualityGate(candidates: ScoredChunk[], queryTerms: Set<string>): boolean {
+  const topScore = candidates[0]?.score ?? 0;
+  const runnerUpScore = candidates[1]?.score ?? 0;
+  if (topScore < 3 || topScore < 2 * runnerUpScore) return false;
+  const topText = candidates[0].text.toLowerCase();
+  return [...queryTerms].filter((t) => topText.includes(t)).length >= 2;
+}
+
 // ─── 4. Re-ranking with LLM ────────────────────────────────────────────────
 
 /**
@@ -694,14 +763,15 @@ export function detectExplicitPages(question: string): number[] {
  * The full enhanced RAG pipeline:
  * 1. Classify query type
  * 2. Detect explicit page references
- * 3. Expand query into variants
- * 4. Multi-query retrieval
+ * 3. Expand query in the background (retrieve-first, issue #58)
+ * 4. Base multi-query retrieval on the original question
  * 5. Boost explicitly-referenced pages
- * 6. Re-rank with LLM
- * 7. Follow cross-references
- * 8. Adaptive context budget
- * 9. Confidence estimate
- * 10. Hierarchical TOC
+ * 6. Await the expansion and re-retrieve only when the base result is weak
+ * 7. Re-rank with LLM
+ * 8. Follow cross-references
+ * 9. Adaptive context budget
+ * 10. Confidence estimate
+ * 11. Hierarchical TOC
  *
  * Returns a RagContext ready to inject into the chat prompt.
  */
@@ -744,16 +814,20 @@ export async function buildRagContext(
   const decision = await classifyPromise;
   const queryType: QueryType = decision?.queryType ?? classifyQuery(question);
 
-  // 3. Expand query — skip the LLM call for short or page-specific queries
-  // where TF-IDF retrieval already works well on its own. When the decision
-  // model gave us a verdict, also honor its "needs rephrasing" signal; on any
-  // fallback we keep the original length heuristic.
+  // 3. Expand query — fired concurrently in the background (retrieve-first,
+  // issue #58). The LLM round trip (up to 30 s) no longer blocks retrieval:
+  // base retrieval runs on the original question first, and the expansion is
+  // only awaited when that base result is too weak to trust. Skip the call
+  // entirely for short or page-specific queries where retrieval already works
+  // well on its own; when the decision model gave us a verdict, also honor its
+  // "needs rephrasing" signal; on any fallback we keep the original length
+  // heuristic.
   const baseNeedsExpansion = question.length > 20 && explicitPages.length === 0;
   const needsExpansion = useDecision
     ? baseNeedsExpansion && (decision ? decision.needsExpansion : true)
     : baseNeedsExpansion;
   // Precomputed per-slug DF table — avoids re-tokenizing every chunk on each
-  // of the 2–3 retrieve() calls below. Loaded BEFORE the expansion timer
+  // of the retrieve() calls below. Loaded BEFORE the expansion timer
   // starts so expandMs covers only the expansion await, not the (cold-cache)
   // DF-table build (issue #55).
   const df = await docFreqFor(slug);
@@ -762,72 +836,59 @@ export async function buildRagContext(
   const expandPromise = needsExpansion
     ? expandQuery(apiKey, question, queryType)
     : Promise.resolve([question]);
+  // Swallow any rejection: when the base result passes the quality gate we
+  // never await this promise, so without a handler a failure would surface as
+  // an unhandled promise rejection. (expandQuery catches its own errors today;
+  // this keeps that guarantee explicit for the fire-and-forget path.)
+  expandPromise.catch(() => {});
 
-  const queries = await expandPromise;
-  timings.expandMs = Date.now() - expandStart;
+  // Query terms for the original question — used by the retrieve-first gate
+  // below and, when expansion is skipped, by the re-rank preview and the
+  // adaptive context budget so all stages judge relevance the same way.
+  const baseTerms = new Set(tokenize(question));
 
-  // Query terms (tokenized variants) — reused by the re-rank preview and the
-  // adaptive context budget so both judge relevance the same way.
-  const queryTerms = new Set(queries.flatMap((q) => tokenize(q)));
-
-  // 4. Multi-query retrieval (top 8 for re-ranking), in the configured
-  // lexical scoring mode (bm25 by default; tfidf when opted in).
+  // 4. Base retrieval on the original question first (no expansion), in the
+  // configured lexical scoring mode (bm25 by default; tfidf when opted in).
   const retrieveStart = Date.now();
-  let candidates = multiQueryRetrieve(chunks, queries, 8, df, scoring);
+  let candidates = multiQueryRetrieve(chunks, [question], 8, df, scoring);
 
-  // 5. Boost explicitly-referenced pages to the top of the candidate list.
-  if (explicitPages.length > 0) {
-    for (const p of explicitPages) {
-      const pageChunk = chunks.find((c) => c.page === p);
-      if (pageChunk) {
-        // Give it a very high score so it's always in the top results.
-        const boosted: ScoredChunk = { ...pageChunk, score: 100 };
-        // Remove any existing entry for this page, then prepend.
-        candidates = candidates.filter((c) => c.page !== p);
-        candidates.unshift(boosted);
-      }
-    }
-  }
+  // 5. Boost explicitly-referenced pages and mentioned-expansion chunks.
+  candidates = boostCandidates(candidates, chunks, explicitPages, expansionNames, question);
 
-  // 5b. Boost expansion chunks when the query mentions an expansion name.
-  if (expansionNames && expansionNames.length > 0) {
-    const qLower = question.toLowerCase();
-    const mentionedExps = expansionNames.filter((name) =>
-      qLower.includes(name.toLowerCase())
-    );
-    if (mentionedExps.length > 0) {
-      // Find all chunks that belong to a mentioned expansion.
-      const expChunks = chunks.filter(
-        (c) => c.isExpansion === true && mentionedExps.some((name) => c.id.includes(name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")))
-      );
-      // Boost them to the top with a high score.
-      for (const ec of expChunks) {
-        const boosted: ScoredChunk = { ...ec, score: 90 };
-        candidates = candidates.filter((c) => c.page !== ec.page);
-        candidates.unshift(boosted);
-      }
-    }
+  // Retrieve-first gate (issue #58): the same quality test that skips the
+  // re-rank below. When the original question alone already has a clear
+  // winner, proceed without awaiting the background expansion — easy
+  // questions stop paying for it.
+  const basePassesGate = explicitPages.length > 0 || passesQualityGate(candidates, baseTerms);
+
+  // 4b. Only when the base result is weak: await the background expansion and
+  // re-retrieve with the expanded queries, exactly as the pre-#58 pipeline did.
+  let queries: string[];
+  if (!basePassesGate && needsExpansion) {
+    queries = await expandPromise;
+    timings.expandMs = Date.now() - expandStart;
+    candidates = multiQueryRetrieve(chunks, queries, 8, df, scoring);
+    candidates = boostCandidates(candidates, chunks, explicitPages, expansionNames, question);
+  } else {
+    // Expansion was gated off, or finished into the void because the base
+    // result passed the gate: retrieval ran on the original question alone.
+    queries = [question];
   }
   timings.retrieveMs = Date.now() - retrieveStart;
 
+  // Query terms (tokenized variants) — the expanded phrases when expansion was
+  // awaited, the original question when it wasn't. Reused by the re-rank
+  // preview and the adaptive context budget so both judge relevance the same way.
+  const queryTerms = new Set(queries.flatMap((q) => tokenize(q)));
+
   // 6. Re-rank — but skip it when it isn't needed: that's a full LLM round
   // trip (up to 30 s on the local model) saved for easy questions. Skip when
-  // the question names an explicit page (already boosted above), or when TF-IDF
-  // has a clear winner (top score ≥ 3 and ≥ 2× the runner-up) AND that winner
-  // lexically contains multiple distinct query terms. A single common word
-  // ("turn", "setup") can inflate one chunk's TF-IDF score while it is actually
-  // irrelevant — in that case the quality gate must run. When the decision
-  // model is enabled, the quality gate is its fast batched score call (falling
-  // back to the slow LLM re-rank if the model is unavailable).
+  // the question names an explicit page (already boosted above), or when the
+  // quality gate fires (see passesQualityGate). When the decision model is
+  // enabled, the quality gate is its fast batched score call (falling back to
+  // the slow LLM re-rank if the model is unavailable).
   const rerankStart = Date.now();
-  const topScore = candidates[0]?.score ?? 0;
-  const runnerUpScore = candidates[1]?.score ?? 0;
-  let skipRerank = explicitPages.length > 0;
-  if (!skipRerank && topScore >= 3 && topScore >= 2 * runnerUpScore) {
-    const topText = candidates[0].text.toLowerCase();
-    const distinctHits = [...queryTerms].filter((t) => topText.includes(t)).length;
-    skipRerank = distinctHits >= 2;
-  }
+  const skipRerank = explicitPages.length > 0 || passesQualityGate(candidates, queryTerms);
   candidates = skipRerank
     ? candidates
     : useDecision
