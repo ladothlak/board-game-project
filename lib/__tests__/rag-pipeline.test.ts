@@ -194,7 +194,7 @@ describe("buildRagContext", () => {
     expect(result.pages).toEqual([1, 3]);
   });
 
-  it("caps chunks at their allocation and keeps relevant sentences when cutting", async () => {
+  it("keeps relevant sentences when cutting and fills truncated pages with spare budget", async () => {
     const longSetup = `Place tokens on the board. ${"a".repeat(7973)}`; // ~8000 chars
     const longCombat = `${"b".repeat(7900)} set up the board`; // ~8000 chars
     vi.mocked(loadIndex).mockResolvedValue([
@@ -214,11 +214,13 @@ describe("buildRagContext", () => {
     const page1Part = parts.find((p) => p.startsWith("--- Page 1 ---"))!.replace("--- Page 1 ---\n", "");
     const page2Part = parts.find((p) => p.startsWith("--- Page 2 ---"))!.replace("--- Page 2 ---\n", "");
 
-    // ...each chunk is capped at its allocation (no full-text pass)...
-    expect(page1Part.length).toBeLessThan(longSetup.length);
-    expect(page2Part.length).toBeLessThan(longCombat.length);
-    // ...and the query-relevant sentence survives the cut...
-    expect(page1Part).toContain("Place tokens on the board.");
+    // ...page 1 is cut to its most query-relevant sentence window — the one
+    // sentence that matches the query survives the rest of the filler...
+    expect(page1Part).toBe("Place tokens on the board.");
+    // ...and pass 2 hands page 1's unused budget to page 2, whose single
+    // matching sentence fits the spare cap, so it is delivered in full — a
+    // truncated page is never left short while budget remains (issue #64)...
+    expect(page2Part).toBe(longCombat);
 
     // The whole context stays within the ~8000-char budget plus headers.
     expect(result.excerpts.length).toBeLessThan(8200);

@@ -215,6 +215,106 @@ describe("adaptiveContext", () => {
     const pagePart = out.replace("--- Page 1 ---\n", "");
     expect(pagePart).toBe(text.slice(0, 400));
   });
+
+  // ─── issue #64: neighbour windows + two-pass budget allocation ─────────────
+
+  it("keeps ±1 neighbour windows around kept sentences so adjacent context survives", () => {
+    // The answer sentence matches the query; its non-matching neighbours must
+    // survive the cut instead of being dropped as isolated keyword fragments.
+    const before = "Fill the well with water.";
+    const relevant = "The contamination check decides who dies.";
+    const after = "Then everyone draws a card.";
+    const text = `${before} ${relevant} ${after}`;
+    const selected = [{ ...CHUNKS[0], text, score: 1 }];
+    const out = adaptiveContext(
+      selected,
+      400,
+      new Set(["contamination", "dies"]),
+      new Map([["contamination", 2], ["dies", 1]]),
+      10
+    );
+    // All three sentences fit the cap: the answer plus both neighbours.
+    expect(out.replace("--- Page 1 ---\n", "")).toBe(text);
+  });
+
+  it("keeps the bare sentence when its neighbour window doesn't fit the cap", () => {
+    // The ±1 window (644 chars) is far bigger than the cap, but the answer
+    // sentence alone (41 chars) fits — long filler must not starve the answer.
+    const relevant = "The contamination check decides who dies.";
+    const text = `${"x".repeat(300)}. ${relevant} ${"y".repeat(300)}`;
+    const selected = [{ ...CHUNKS[0], text, score: 1 }];
+    const out = adaptiveContext(
+      selected,
+      150,
+      new Set(["contamination", "dies"]),
+      new Map([["contamination", 2], ["dies", 1]]),
+      10
+    );
+    expect(out.replace("--- Page 1 ---\n", "")).toBe(relevant);
+  });
+
+  it("redistributes unused budget from sparse pages to truncated pages (pass 2)", () => {
+    // Page 1 is long and query-relevant; page 2 is a short sparse page whose
+    // first-pass allocation goes mostly unused. The second pass must hand the
+    // spare budget to page 1 so it delivers far more than its first-pass share.
+    const relevant = "The contamination check decides who dies.";
+    const longText = `${"x".repeat(300)}. ${relevant} ${"y".repeat(300)}`; // 645 chars
+    const selected = [
+      { ...CHUNKS[0], text: longText, score: 1 },
+      { ...CHUNKS[1], text: "Short sparse page.", score: 1 },
+    ];
+    const out = adaptiveContext(
+      selected,
+      800,
+      new Set(["contamination", "dies"]),
+      new Map([["contamination", 2], ["dies", 1]]),
+      10
+    );
+    const [p1, p2] = out.split("\n\n");
+    // Page 1 grew from its 41-char first-pass window to the full ±1 window
+    // (644 chars) using page 2's unused budget — and the total stayed ≤ 800.
+    expect(p1.replace("--- Page 1 ---\n", "").length).toBe(644);
+    expect(p2.replace("--- Page 2 ---\n", "")).toBe("Short sparse page.");
+    const delivered = p1.length + p2.length; // headers included
+    expect(delivered - 36).toBeLessThanOrEqual(800); // 36 = two headers + join
+  });
+
+  it("guarantees every included page at least its minimum window", () => {
+    // Four long chunks against a tight budget: each must still deliver at
+    // least the 100-char floor (one contiguous sentence window) — no page is
+    // represented by zero chars.
+    const selected = Array.from({ length: 4 }, (_, i) => ({
+      ...CHUNKS[0],
+      page: i + 1,
+      text: "x".repeat(500),
+      score: 1,
+    }));
+    const out = adaptiveContext(selected, 800);
+    const parts = out.split("\n\n");
+    expect(parts).toHaveLength(4);
+    for (const part of parts) {
+      expect(part.replace(/^--- Page \d+ ---\n/, "").length).toBeGreaterThanOrEqual(100);
+    }
+  });
+
+  it("drops trailing chunks whose minimum window no longer fits the budget", () => {
+    // Nine long chunks against a 600-char budget: only six 100-char floors fit,
+    // so the three lowest-relevance chunks never make it into the string —
+    // buildRagContext keeps their pages out of `pages`/`rankedPages` too.
+    const selected = Array.from({ length: 9 }, (_, i) => ({
+      ...CHUNKS[0],
+      page: i + 1,
+      text: "x".repeat(500),
+      score: 1,
+    }));
+    const out = adaptiveContext(selected, 600);
+    for (const p of [1, 2, 3, 4, 5, 6]) {
+      expect(out).toContain(`--- Page ${p} ---`);
+    }
+    for (const p of [7, 8, 9]) {
+      expect(out).not.toContain(`--- Page ${p} ---`);
+    }
+  });
 });
 
 // ─── estimateConfidence ──────────────────────────────────────────────────────────

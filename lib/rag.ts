@@ -642,8 +642,15 @@ export function followCrossRefs(
  * terms, in original order, fitting within `cap` chars. A sentence's relevance
  * is the sum of log((N+1)/(df+1)) over the distinct query terms it contains —
  * the same IDF weighting retrieve() uses, so rarer (more distinctive) terms
- * carry more signal than common ones. Falls back to a prefix slice when no
- * sentence scores, so this never returns less text than a plain cut would.
+ * carry more signal than common ones.
+ *
+ * Every kept sentence drags its immediate neighbours (±1) with it: an answer
+ * rarely stands alone, and the sentence before or after it usually carries
+ * the context that makes it readable — so a page is never reduced to
+ * isolated keyword fragments (issue #64). When a neighbour window doesn't fit
+ * the cap, the bare sentence is kept instead, so long filler paragraphs can
+ * never starve the answer. When no sentence scores at all, this degrades to a
+ * plain prefix slice — never less text than a simple cut would give.
  */
 function extractRelevantSentences(
   text: string,
@@ -653,6 +660,17 @@ function extractRelevantSentences(
   n = 0
 ): string {
   const sentences = text.split(/(?<=[.!?])\s+/);
+  // The joined length of a set of sentence indices (one space between each).
+  const lenOf = (idx: Iterable<number>): number => {
+    let len = 0;
+    let count = 0;
+    for (const i of idx) {
+      len += sentences[i].length;
+      count++;
+    }
+    return len + Math.max(0, count - 1);
+  };
+
   const scored = sentences.map((s, i) => {
     const lower = s.toLowerCase();
     let score = 0;
@@ -661,18 +679,26 @@ function extractRelevantSentences(
     }
     return { i, s, score };
   });
-  const picked = scored
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score || a.i - b.i)
-    .reduce<{ i: number; s: string }[]>(
-      (acc, x) =>
-        acc.reduce((l, y) => l + y.s.length, 0) + (acc.length > 0 ? 1 : 0) + x.s.length <= cap
-          ? [...acc, x]
-          : acc,
-      []
+
+  const kept = new Set<number>();
+  for (const x of scored.sort((a, b) => b.score - a.score || a.i - b.i)) {
+    if (x.score <= 0) break;
+    if (kept.has(x.i)) continue;
+    // Prefer the ±1 neighbour window around the kept sentence...
+    const window = [x.i - 1, x.i, x.i + 1].filter(
+      (j) => j >= 0 && j < sentences.length && !kept.has(j)
     );
-  if (picked.length === 0) return text.slice(0, cap);
-  return picked.sort((a, b) => a.i - b.i).map((x) => x.s).join(" ");
+    if (lenOf([...kept, ...window]) <= cap) {
+      for (const j of window) kept.add(j);
+      continue;
+    }
+    // ...and fall back to the bare sentence when the neighbours don't fit.
+    if (lenOf([...kept, x.i]) <= cap) kept.add(x.i);
+  }
+
+  if (kept.size === 0) return text.slice(0, cap);
+  const picked = [...kept].sort((a, b) => a - b);
+  return picked.map((i) => sentences[i]).join(" ");
 }
 
 /**
@@ -683,16 +709,50 @@ function extractRelevantSentences(
 const CONTEXT_BUDGET = Number(process.env.RAG_CONTEXT_BUDGET ?? 8000);
 
 /**
- * Allocate a token budget across selected chunks proportionally to their
- * relevance scores. High-relevance chunks get more text; low-relevance get
- * truncated. Total budget is ~8000 chars (roughly 2000 tokens) — big enough
- * that a multi-sentence answer in the top chunk survives its allocation.
+ * The minimum characters every included chunk must deliver — roughly one
+ * contiguous sentence window. Small enough that a low-relevance page is still
+ * represented without crowding out the answer page's budget (issue #64).
+ */
+const MIN_CHUNK_CHARS = 100;
+
+/**
+ * The maximum share of the budget any single page may take when several
+ * pages are included (issue #64). A section-boosted page scores 80/100 — an
+ * artificial prior, not a relevance verdict — and pure score-proportional
+ * allocation lets it consume most of the budget, starving the pages that
+ * actually answer the question. Capping its share at half the budget and
+ * redistributing the excess to the other pages (proportionally to their
+ * scores) keeps every page represented without letting one dominate. A lone
+ * page takes the whole budget: with nothing else to serve, the cap would only
+ * truncate the answer.
+ */
+const MAX_PAGE_SHARE = 0.5;
+
+/**
+ * Allocate a character budget across selected chunks in two passes:
  *
- * Every chunk is capped at its allocation — the top chunk included — so one
- * long page can't consume the whole budget. When a chunk must be cut, the most
- * query-relevant sentences are kept (see extractRelevantSentences), so an
- * answer that sits deep in a long page survives instead of being sliced off
- * from the top.
+ * Pass 1 gives every chunk a floor of MIN_CHUNK_CHARS plus a share of the
+ * remaining budget proportional to its relevance score, capped so no single
+ * page can starve the rest (see MAX_PAGE_SHARE). A chunk that must be cut is
+ * cut on its most query-relevant sentence windows (see
+ * extractRelevantSentences), so an answer that sits deep in a long page
+ * survives instead of being sliced off from the top — and every included page
+ * keeps at least one contiguous window, never zero chars. A chunk whose whole
+ * text fits its allocation is delivered in full: sentence filtering only
+ * applies to chunks that must be cut, so a fitting page never loses text it
+ * could afford.
+ *
+ * Pass 2 hands whatever budget pass 1 left unused — the sparse pages that
+ * delivered less than they could — to the truncated pages, most relevant
+ * first: spare characters are worth most on the page most likely to carry the
+ * answer, so each truncated page is filled up to its shortfall (or the
+ * remaining budget) before the next is touched. Every fill is bounded by the
+ * remaining budget, so the total can never exceed it.
+ *
+ * A page that cannot fit its minimum window within the budget is dropped from
+ * the assembly entirely (and buildRagContext drops it from `pages` /
+ * `rankedPages`), so a page is never claimed without delivered text — no
+ * phantom pages.
  */
 export function adaptiveContext(
   selected: ScoredChunk[],
@@ -703,30 +763,105 @@ export function adaptiveContext(
 ): string {
   if (selected.length === 0) return "";
 
-  const totalScore = selected.reduce((s, c) => s + c.score, 0);
-  let used = 0;
-  const parts: string[] = [];
-
+  // Feasibility first: every included chunk needs its MIN_CHUNK_CHARS floor, so
+  // drop trailing (lowest-relevance) chunks until the floors fit in the budget.
+  // Dropped chunks are absent from the assembled string, and buildRagContext
+  // excludes their pages from `pages`/`rankedPages` — a page is never claimed
+  // without delivered text.
+  const feasible: ScoredChunk[] = [];
   for (const c of selected) {
-    // Proportional allocation, minimum 100 chars so every chunk is represented
-    // without low-relevance chunks crowding out the answer chunk's budget.
-    const alloc = Math.max(100, Math.round((c.score / totalScore) * budget));
-    const remaining = budget - used;
-    const cap = Math.min(alloc, Math.max(100, remaining));
-    let text: string;
-    if (c.text.length <= cap) {
-      text = c.text;
-    } else if (queryTerms && queryTerms.size > 0) {
-      text = extractRelevantSentences(c.text, queryTerms, df, cap, n);
-    } else {
-      text = c.text.slice(0, cap);
+    if ((feasible.length + 1) * MIN_CHUNK_CHARS <= budget) feasible.push(c);
+    else break;
+  }
+  if (feasible.length === 0) return "";
+
+  // Per-chunk allocation: every chunk keeps its MIN_CHUNK_CHARS floor, and the
+  // remaining budget is distributed proportionally to relevance score — capped
+  // so no single page (e.g. a section-boosted one) can starve the rest. Any
+  // share above the cap is redistributed to the uncapped pages, proportionally
+  // to their scores; each round freezes at least one page at the cap, so this
+  // terminates in at most n rounds. Rounding leaves a little headroom that
+  // pass 2 redistributes.
+  const pageCap = feasible.length === 1 ? budget : Math.floor(MAX_PAGE_SHARE * budget);
+  const allocs = feasible.map(() => MIN_CHUNK_CHARS);
+  let free = budget - feasible.length * MIN_CHUNK_CHARS;
+  const weights = feasible.map((c) => Math.max(0, c.score));
+  for (let round = 0; round < feasible.length && free > 0; round++) {
+    const open: number[] = [];
+    allocs.forEach((a, i) => {
+      if (a < pageCap) open.push(i);
+    });
+    if (open.length === 0) break;
+    const wSum = open.reduce((s, i) => s + weights[i], 0);
+    if (wSum <= 0) break; // no score signal — leave the floors in place
+    let given = 0;
+    for (const i of open) {
+      const share = Math.floor((free * weights[i]) / wSum);
+      const give = Math.min(share, pageCap - allocs[i]);
+      if (give > 0) {
+        allocs[i] += give;
+        given += give;
+      }
     }
-    parts.push(`--- Page ${c.page} ---\n${text}`);
-    used += text.length;
-    if (used >= budget) break;
+    if (given === 0) break; // every share rounded to zero — nothing left to give
+    free -= given;
   }
 
-  return parts.join("\n\n");
+  // Deliver a chunk's text under its cap: the whole text when it fits (a
+  // fitting page never loses text to sentence filtering), otherwise the most
+  // query-relevant sentence windows.
+  const excerptFor = (c: ScoredChunk, cap: number): string =>
+    c.text.length <= cap
+      ? c.text
+      : extractRelevantSentences(c.text, queryTerms ?? new Set<string>(), df, cap, n);
+
+  // Pass 1: allocate in relevance order. Each chunk is capped at its allocation
+  // and the remaining budget; because the allocations sum to ≤ budget and each
+  // floor is ≤ the remaining budget, every chunk gets at least its floor — one
+  // contiguous sentence window per page.
+  const delivered: string[] = [];
+  let used = 0;
+  feasible.forEach((c, i) => {
+    const cap = Math.min(allocs[i], budget - used);
+    const text = excerptFor(c, cap);
+    delivered.push(text);
+    used += text.length;
+  });
+
+  // Pass 2: hand the unused budget to the truncated pages, most relevant
+  // first. Each page is filled up to its shortfall (or the remaining budget)
+  // before the next is touched, so spare characters land on the page most
+  // likely to carry the answer; every fill is bounded by the remaining
+  // budget, so the total can never exceed it. One pass suffices: after it,
+  // either the budget is exhausted or every truncated page delivered in full.
+  //
+  // Pass 2: hand the unused budget to the truncated pages, most relevant
+  // first. Each page is filled up to its shortfall (or the remaining budget)
+  // before the next is touched, so spare characters land on the page most
+  // likely to carry the answer; every fill is bounded by the remaining
+  // budget, so the total can never exceed it. One pass suffices: after it,
+  // either the budget is exhausted or every truncated page delivered in full.
+  const truncated: { i: number; shortfall: number }[] = [];
+  feasible.forEach((c, i) => {
+    const shortfall = c.text.length - delivered[i].length;
+    if (shortfall > 0) truncated.push({ i, shortfall });
+  });
+  // Order by compressed (sqrt) score: a section-boosted page's 80/100 is an
+  // artificial prior, not a relevance verdict — raw scores would let it
+  // consume the spare budget ahead of the page that lexically answers the
+  // question. sqrt compresses the gap so true lexical winners lead (issue #64).
+  truncated.sort((a, b) => Math.sqrt(Math.max(0, feasible[b.i].score)) - Math.sqrt(Math.max(0, feasible[a.i].score)) || a.i - b.i);
+  for (const t of truncated) {
+    const extra = Math.min(t.shortfall, budget - used);
+    if (extra <= 0) break;
+    const newText = excerptFor(feasible[t.i], delivered[t.i].length + extra);
+    if (newText.length > delivered[t.i].length) {
+      used += newText.length - delivered[t.i].length;
+      delivered[t.i] = newText;
+    }
+  }
+
+  return feasible.map((c, i) => `--- Page ${c.page} ---\n${delivered[i]}`).join("\n\n");
 }
 
 /**
@@ -1165,18 +1300,22 @@ export async function buildRagContext(
   // redundant prefill that doubled the TOC's token cost.
   const toc = hierarchicalToc(chunks);
 
-  // Pages in retrieval-relevance order (candidate order after re-rank +
-  // cross-ref following), deduplicated with first occurrence kept — this is
-  // the ranking metrics like MRR should be computed over.
-  const rankedPages = [...new Set(candidates.map((c) => c.page))];
-  // Display order: sorted by page number, as before.
-  const pages = [...rankedPages].sort((a, b) => a - b);
-
   // 10b. Excerpt delivery measurement (issue #63): which pages are actually in
   // the assembled context, and how much of each page's original text survived
   // the budget cut — derived from the actual context string, so a returned
   // page that is not in the excerpts is impossible by construction.
   const { excerptedPages, excerptCoverage } = measureExcerptDelivery(excerpts, chunks);
+
+  // Pages in retrieval-relevance order (candidate order after re-rank +
+  // cross-ref following), deduplicated with first occurrence kept — this is
+  // the ranking metrics like MRR should be computed over. Only pages that
+  // actually made it into the assembled excerpts are claimed (issue #64): a
+  // page that couldn't fit its minimum window within the budget is dropped
+  // here, so `pages`/`rankedPages` never list text the LLM didn't see.
+  const excerpted = new Set(excerptedPages);
+  const rankedPages = [...new Set(candidates.map((c) => c.page))].filter((p) => excerpted.has(p));
+  // Display order: sorted by page number, as before.
+  const pages = [...rankedPages].sort((a, b) => a - b);
 
   return { excerpts, toc, queryType, confidence, pages, rankedPages, excerptedPages, excerptCoverage, timings };
 }
