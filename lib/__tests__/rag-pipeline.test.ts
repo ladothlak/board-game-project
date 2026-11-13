@@ -140,10 +140,12 @@ describe("buildRagContext", () => {
 
     const result = await buildRagContext(SLUG, "How does the Doom expansion work?", KEY, ["Doom"]);
 
-    // One LLM call: expansion runs, but re-ranking is skipped because the
-    // boosted expansion chunk (score 90) is a clear TF-IDF winner.
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(expansionCalls()).toBe(1);
+    // No LLM calls: the base retrieval already has a clear winner (the mentioned
+    // expansion chunk matches multiple query terms), so the quality gate passes
+    // and expansion is never fired; re-ranking is skipped because the boosted
+    // expansion chunk (score 90) is a clear TF-IDF winner.
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(expansionCalls()).toBe(0);
 
     // The expansion chunk (boosted to score 90) leads the context.
     expect(result.excerpts.startsWith("--- Page 10 ---")).toBe(true);
@@ -263,14 +265,12 @@ describe("buildRagContext", () => {
     stubLlm();
 
     // An explicit page reference gates expansion off AND skips the re-rank —
-    // so neither stage makes an LLM call. Their durations are tiny but not
-    // guaranteed to be exactly 0: expandMs also spans the per-slug DF-table
-    // build (the DF cache is cold, since beforeEach resets it), and both
-    // stages carry the clock resolution of two adjacent Date.now() reads.
+    // so neither stage makes an LLM call. expandMs is exactly 0 (expansion was
+    // never fired); rerankMs is tiny (the gate short-circuits before any LLM
+    // call, so only clock resolution between two adjacent Date.now() reads).
     const result = await buildRagContext(SLUG, "Tell me about p. 42", KEY);
 
-    expect(result.timings.expandMs).toBeGreaterThanOrEqual(0);
-    expect(result.timings.expandMs).toBeLessThan(100);
+    expect(result.timings.expandMs).toBe(0);
     expect(result.timings.rerankMs).toBeGreaterThanOrEqual(0);
     expect(result.timings.rerankMs).toBeLessThan(100);
     expect(mockFetch).not.toHaveBeenCalled();
@@ -336,28 +336,29 @@ describe("buildRagContext", () => {
 
 // ─── buildRagContext — retrieve-first (issue #58) ─────────────────────────────
 //
-// Expansion fires in the background and is only awaited when base retrieval on
-// the original question is too weak to trust. These tests pin the three
-// behaviors: gate-pass questions skip the await (expandMs 0), weak questions
-// await + merge (expandMs > 0), and a failing background expansion is swallowed
-// without an unhandled rejection.
+// Base retrieval runs first; the expansion is only fired (and awaited) when the
+// base result is too weak to trust AND the question needs expansion. These
+// tests pin the three behaviors: gate-pass questions never fire the expansion
+// (expandMs 0, no LLM call), weak questions fire + await + merge (expandMs > 0),
+// and a failing expansion is handled by expandQuery's internal catch (no throw).
 
 describe("buildRagContext — retrieve-first (issue #58)", () => {
   beforeEach(() => {
     vi.mocked(loadIndex).mockResolvedValue(CHUNKS);
   });
 
-  it("does not await the background expansion when base retrieval passes the quality gate", async () => {
-    // The expansion LLM call hangs forever: if buildRagContext awaited it,
-    // this test would time out. It must return on the base result alone.
+  it("does not fire the expansion when base retrieval passes the quality gate", async () => {
+    // The expansion LLM call hangs forever: if buildRagContext fired AND
+    // awaited it, this test would time out. On a strong base result it must
+    // return on the base result alone without ever calling the expansion.
     mockFetch.mockImplementation(() => new Promise<Response>(() => {}));
 
     const result = await buildRagContext(SLUG, "How do I set up the board for the game?", KEY);
 
-    // Expansion was fired in the background (one fetch call) but never
-    // awaited — we didn't pay for it, so expandMs is exactly 0.
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(expansionCalls()).toBe(1);
+    // Expansion was never fired — we didn't pay for it, so expandMs is 0 and
+    // no LLM call was made at all.
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(expansionCalls()).toBe(0);
     expect(result.timings.expandMs).toBe(0);
 
     // The base retrieval result (the setup chunk) carried through to the
@@ -366,7 +367,7 @@ describe("buildRagContext — retrieve-first (issue #58)", () => {
     expect(result.confidence).toBeGreaterThan(0.25);
   });
 
-  it("awaits the background expansion and merges its variants when base retrieval is weak", async () => {
+  it("fires and awaits the expansion and merges its variants when base retrieval is weak", async () => {
     // Chunks that only match rephrased variants, not the original question:
     // "with" is the sole base-term hit (a weak score), while "attack" and
     // "combat rules" are reachable only through expansion.
@@ -385,8 +386,8 @@ describe("buildRagContext — retrieve-first (issue #58)", () => {
 
     const result = await buildRagContext(SLUG, "How do I deal with enemy attacks?", KEY);
 
-    // Expansion was awaited (weak base result) and its variants were merged:
-    // page 4 is unreachable from the original question alone.
+    // Expansion was fired + awaited (weak base result) and its variants were
+    // merged: page 4 is unreachable from the original question alone.
     expect(expansionCalls()).toBe(1);
     expect(result.timings.expandMs).toBeGreaterThan(0);
     expect(result.excerpts).toContain("--- Page 4 ---");
@@ -397,30 +398,24 @@ describe("buildRagContext — retrieve-first (issue #58)", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("swallows a failing background expansion without an unhandled rejection", async () => {
-    // The provider is down: the fired expansion fails. With base retrieval
-    // passing the gate, buildRagContext must return normally and no
-    // rejection may escape as an unhandled promise rejection. (expandQuery
-    // catches its own errors today; this pins the observable contract the
-    // fire-and-forget .catch() guard enforces.)
-    const unhandled: unknown[] = [];
-    const onUnhandled = (reason: unknown) => {
-      unhandled.push(reason);
-    };
-    process.on("unhandledRejection", onUnhandled);
+  it("handles a failing expansion gracefully via expandQuery's internal catch", async () => {
+    // A weak base result forces the expansion path, but the provider is down:
+    // expandQuery catches its own error and falls back to deterministic
+    // expansion, so buildRagContext returns normally (no throw). This pins the
+    // contract that expansion failures are handled by expandQuery's internal
+    // catch — there is no fire-and-forget guard to swallow them.
+    vi.mocked(loadIndex).mockResolvedValue([
+      { id: "w1", slug: SLUG, title: "", page: 1, text: "The weather track shifts with the seasons." },
+      { id: "a2", slug: SLUG, title: "", page: 2, text: "Each turn you may attack with your forces." },
+    ]);
     mockFetch.mockRejectedValue(new Error("provider down"));
 
-    try {
-      const result = await buildRagContext(SLUG, "How do I set up the board for the game?", KEY);
+    const result = await buildRagContext(SLUG, "How do I deal with enemy attacks?", KEY);
 
-      // The function returned normally on the base result...
-      expect(result.excerpts.startsWith("--- Page 1 ---")).toBe(true);
-      expect(result.timings.expandMs).toBe(0);
-      // ...and no rejection escaped.
-      expect(unhandled).toEqual([]);
-    } finally {
-      process.off("unhandledRejection", onUnhandled);
-    }
+    // The function returned normally on the deterministic fallback...
+    expect(result.excerpts.length).toBeGreaterThan(0);
+    // ...and expandMs reflects the (failed) expansion call it awaited.
+    expect(result.timings.expandMs).toBeGreaterThanOrEqual(0);
   });
 });
 
@@ -555,14 +550,19 @@ describe("buildRagContext with the decision model enabled", () => {
   });
 
   it("feeds the decision model's query type into the expansion hint", async () => {
-    // Long query (triggers expansion) + decision model says "setup".
+    // A weak base result (the chunk doesn't lexically match the original
+    // question) forces the expansion path; the decision model says "setup", so
+    // the expansion prompt carries the setup-specific hint.
+    vi.mocked(loadIndex).mockResolvedValue([
+      { id: "s2", slug: SLUG, title: "", page: 2, text: "Set up the board by placing the tokens." },
+    ]);
     stubBoth({
       queryType: "setup",
       needsExpansion: true,
       expansion: ["set up the board", "placing tokens"],
     });
 
-    const result = await buildRagContext(SLUG, "How do I set up the board for the game?", KEY, undefined, {
+    const result = await buildRagContext(SLUG, "How do I begin the game?", KEY, undefined, {
       useDecisionModel: true,
     });
 
@@ -615,7 +615,12 @@ describe("buildRagContext with the decision model enabled", () => {
 
   it("falls back to keyword classification + LLM re-rank when the model is down", async () => {
     // Decision model unavailable; main LLM works normally. Route by URL so the
-    // /systemone call rejects while /chat/completions serves as usual.
+    // /systemone call rejects while /chat/completions serves as usual. A weak
+    // base result (the chunk doesn't lexically match the original question)
+    // forces the expansion path.
+    vi.mocked(loadIndex).mockResolvedValue([
+      { id: "s2", slug: SLUG, title: "", page: 2, text: "Set up the board by placing the tokens." },
+    ]);
     mockFetch.mockImplementation(async (input, init) => {
       const url = String(input);
       if (url.includes("/systemone")) return Promise.reject(new Error("down"));
@@ -627,8 +632,9 @@ describe("buildRagContext with the decision model enabled", () => {
       return llmResponse("[]");
     });
 
-    // A long query: expansion runs (keyword type) and the LLM re-rank is used.
-    const result = await buildRagContext(SLUG, "How do I set up the board for the game?", KEY, undefined, {
+    // A long query with a weak base result: expansion runs (keyword type) and
+    // the context is produced.
+    const result = await buildRagContext(SLUG, "How do I begin the game?", KEY, undefined, {
       useDecisionModel: true,
     });
 

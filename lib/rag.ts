@@ -29,11 +29,14 @@ interface ScoredChunk extends Chunk {
 
 /** Per-stage wall-clock durations (ms) for one `buildRagContext` run. */
 export interface RagTimings {
-  /** Query expansion — the LLM round trip when it was awaited (weak base
-   * retrieval), 0 when skipped because base retrieval passed the gate. */
+  /** Query expansion — time from firing until the await completed (weak base
+   * retrieval), 0 when never fired because base retrieval passed the gate or
+   * the question was gated off up front. Disjoint from `retrieveMs`. */
   expandMs: number;
   /** Multi-query retrieval plus the page / expansion boosts. Spans the base
-   * retrieval and, when the base result was weak, the expanded re-retrieval. */
+   * retrieval and quality gate, and — only when the base result was weak —
+   * adds the expanded re-retrieval as a separate, non-overlapping span.
+   * Disjoint from `expandMs`. */
   retrieveMs: number;
   /** Re-rank stage — the LLM / decision-model call when it fired, ~0 when skipped. */
   rerankMs: number;
@@ -763,15 +766,16 @@ export function detectExplicitPages(question: string): number[] {
  * The full enhanced RAG pipeline:
  * 1. Classify query type
  * 2. Detect explicit page references
- * 3. Expand query in the background (retrieve-first, issue #58)
- * 4. Base multi-query retrieval on the original question
- * 5. Boost explicitly-referenced pages
- * 6. Await the expansion and re-retrieve only when the base result is weak
- * 7. Re-rank with LLM
- * 8. Follow cross-references
- * 9. Adaptive context budget
- * 10. Confidence estimate
- * 11. Hierarchical TOC
+ * 3. Base multi-query retrieval on the original question
+ * 4. Boost explicitly-referenced pages
+ * 5. Quality gate (retrieve-first, issue #58): if the base result is weak AND
+ *    the question needs expansion, fire + await the expansion and re-retrieve
+ *    with the expanded queries; otherwise no expansion is ever fired
+ * 6. Re-rank with LLM
+ * 7. Follow cross-references
+ * 8. Adaptive context budget
+ * 9. Confidence estimate
+ * 10. Hierarchical TOC
  *
  * Returns a RagContext ready to inject into the chat prompt.
  */
@@ -814,10 +818,7 @@ export async function buildRagContext(
   const decision = await classifyPromise;
   const queryType: QueryType = decision?.queryType ?? classifyQuery(question);
 
-  // 3. Expand query — fired concurrently in the background (retrieve-first,
-  // issue #58). The LLM round trip (up to 30 s) no longer blocks retrieval:
-  // base retrieval runs on the original question first, and the expansion is
-  // only awaited when that base result is too weak to trust. Skip the call
+  // Decide up front whether the question even needs expansion: skip the call
   // entirely for short or page-specific queries where retrieval already works
   // well on its own; when the decision model gave us a verdict, also honor its
   // "needs rephrasing" signal; on any fallback we keep the original length
@@ -826,55 +827,59 @@ export async function buildRagContext(
   const needsExpansion = useDecision
     ? baseNeedsExpansion && (decision ? decision.needsExpansion : true)
     : baseNeedsExpansion;
+
   // Precomputed per-slug DF table — avoids re-tokenizing every chunk on each
-  // of the retrieve() calls below. Loaded BEFORE the expansion timer
-  // starts so expandMs covers only the expansion await, not the (cold-cache)
-  // DF-table build (issue #55).
+  // of the retrieve() calls below.
   const df = await docFreqFor(slug);
 
-  const expandStart = Date.now();
-  const expandPromise = needsExpansion
-    ? expandQuery(apiKey, question, queryType)
-    : Promise.resolve([question]);
-  // Swallow any rejection: when the base result passes the quality gate we
-  // never await this promise, so without a handler a failure would surface as
-  // an unhandled promise rejection. (expandQuery catches its own errors today;
-  // this keeps that guarantee explicit for the fire-and-forget path.)
-  expandPromise.catch(() => {});
-
-  // Query terms for the original question — used by the retrieve-first gate
-  // below and, when expansion is skipped, by the re-rank preview and the
-  // adaptive context budget so all stages judge relevance the same way.
+  // Query terms for the original question — used by the quality gate below and,
+  // when expansion is skipped, by the re-rank preview and the adaptive context
+  // budget so all stages judge relevance the same way.
   const baseTerms = new Set(tokenize(question));
 
-  // 4. Base retrieval on the original question first (no expansion), in the
+  // 3. Base retrieval on the original question first (no expansion), in the
   // configured lexical scoring mode (bm25 by default; tfidf when opted in).
   const retrieveStart = Date.now();
   let candidates = multiQueryRetrieve(chunks, [question], 8, df, scoring);
 
-  // 5. Boost explicitly-referenced pages and mentioned-expansion chunks.
+  // 4. Boost explicitly-referenced pages and mentioned-expansion chunks.
   candidates = boostCandidates(candidates, chunks, explicitPages, expansionNames, question);
 
-  // Retrieve-first gate (issue #58): the same quality test that skips the
-  // re-rank below. When the original question alone already has a clear
-  // winner, proceed without awaiting the background expansion — easy
-  // questions stop paying for it.
+  // Base retrieval + gate time only (disjoint from expandMs). The re-retrieval
+  // in the weak path below is timed separately and added on, so the two spans
+  // never overlap.
+  let retrieveMs = Date.now() - retrieveStart;
+
+  // 5. Quality gate (retrieve-first, issue #58): the same quality test that
+  // skips the re-rank below. When the original question alone already has a
+  // clear winner, proceed without any expansion — easy questions stop paying
+  // for it. Only when the base result is weak AND the question needs expansion
+  // do we fire + await the expansion and re-retrieve with the expanded queries,
+  // exactly as the pre-#58 pipeline did.
   const basePassesGate = explicitPages.length > 0 || passesQualityGate(candidates, baseTerms);
 
-  // 4b. Only when the base result is weak: await the background expansion and
-  // re-retrieve with the expanded queries, exactly as the pre-#58 pipeline did.
   let queries: string[];
   if (!basePassesGate && needsExpansion) {
-    queries = await expandPromise;
+    // Fire + await the expansion (weak base result). expandQuery catches its own
+    // provider errors and falls back to deterministic expansion, so this await
+    // never rejects — no fire-and-forget guard is needed.
+    const expandStart = Date.now();
+    const expanded = await expandQuery(apiKey, question, queryType);
     timings.expandMs = Date.now() - expandStart;
-    candidates = multiQueryRetrieve(chunks, queries, 8, df, scoring);
+
+    // Re-retrieve with the expanded queries (timed separately so retrieveMs and
+    // expandMs stay disjoint).
+    const reretrieveStart = Date.now();
+    candidates = multiQueryRetrieve(chunks, expanded, 8, df, scoring);
     candidates = boostCandidates(candidates, chunks, explicitPages, expansionNames, question);
+    retrieveMs += Date.now() - reretrieveStart;
+    queries = expanded;
   } else {
-    // Expansion was gated off, or finished into the void because the base
-    // result passed the gate: retrieval ran on the original question alone.
+    // Expansion was gated off (short/explicit-page question) or the base result
+    // passed the gate: retrieval ran on the original question alone.
     queries = [question];
   }
-  timings.retrieveMs = Date.now() - retrieveStart;
+  timings.retrieveMs = retrieveMs;
 
   // Query terms (tokenized variants) — the expanded phrases when expansion was
   // awaited, the original question when it wasn't. Reused by the re-rank
