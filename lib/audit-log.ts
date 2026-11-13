@@ -35,6 +35,8 @@ interface AuditEntry {
   stages?: Record<string, number>;
   /** True when the request was served from the speculative prewarm cache. */
   prewarmHit?: boolean;
+  /** True when the request was served from the final-answer cache (issue #56). */
+  answerCacheHit?: boolean;
 }
 
 /**

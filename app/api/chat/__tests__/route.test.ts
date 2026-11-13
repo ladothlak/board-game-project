@@ -16,6 +16,7 @@ import { logRequest } from "@/lib/audit-log";
 import { getGame } from "@/lib/games";
 import { buildRagContext } from "@/lib/rag";
 import { getPrewarm } from "../prewarm/route";
+import { resetAnswerCacheForTest } from "../answer-cache";
 
 vi.mock("@/lib/rate-limit", () => ({
   checkRate: vi.fn(() => ({ allowed: true })),
@@ -102,6 +103,9 @@ beforeEach(() => {
   vi.mocked(getGame).mockReset().mockResolvedValue(GAME);
   vi.mocked(buildRagContext).mockReset().mockResolvedValue(RAG_CONTEXT);
   vi.mocked(getPrewarm).mockReset().mockReturnValue(null);
+  // The final-answer cache is module state (issue #56); start every test from
+  // a cold cache so earlier successes can't be replayed into later failures.
+  resetAnswerCacheForTest();
 });
 
 afterEach(() => {

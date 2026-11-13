@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { getGame } from "@/lib/games";
 import { loadIndex, retrieve, docFreqFor } from "@/lib/retrieve";
+import { getAnswer, storeAnswer } from "./answer-cache";
 import { buildRagContext, type RagTimings } from "@/lib/rag";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { validateQuestion } from "@/lib/guard";
@@ -82,6 +83,35 @@ export async function POST(req: Request) {
   if (!apiKey) {
     logRequest({ ip, route: "/api/chat", method: "POST", status: 500, durationMs: Date.now() - start });
     return NextResponse.json({ error: "Server misconfigured" }, { status: 500 });
+  }
+
+  // Final-answer cache (issue #56): a repeat question is replayed verbatim —
+  // no RAG, no generation, zero model cost. Checked only after auth, rate
+  // limiting, and the prompt-injection guard, so blocked requests are never
+  // served from cache.
+  const cached = getAnswer(slug, question.trim());
+  if (cached) {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        // Replay through the existing SSE protocol: one token event with the
+        // full answer, then done with citations.
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "token", content: cached.answer })}\n\n`));
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "done", citations: cached.citations })}\n\n`));
+        controller.close();
+        logRequest({
+          ip, route: "/api/chat", method: "POST", status: 200, durationMs: Date.now() - start,
+          prewarmHit: false, answerCacheHit: true, stages: { firstTokenMs: Date.now() - start },
+        });
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
   }
 
   // Enhanced RAG pipeline — check the speculative prewarm cache first.
@@ -253,8 +283,15 @@ export async function POST(req: Request) {
         const answer = full.trim()
           ? full
           : "Hmm, I ran out of room to think that one through — try asking again, or break the question into smaller parts.";
-        send({ type: "done", citations: dedupePages(answer) });
+        const citations = dedupePages(answer);
+        send({ type: "done", citations });
         controller.close();
+        // Cache only successful answers with real content (issue #56) — never
+        // the fallback answer above. Stamped with the current index mtime so a
+        // re-digest invalidates it; evicts the oldest entry when over cap.
+        if (full.trim()) {
+          storeAnswer(slug, question.trim(), answer, citations);
+        }
         // Per-stage breakdown for the audit log (Tier 0, issue #55): RAG stage
         // durations when this request built the context itself, plus time to
         // first token. A prewarm hit skips the RAG stages, so only

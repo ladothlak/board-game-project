@@ -49,6 +49,16 @@ export async function loadIndex(): Promise<Chunk[]> {
   return cache;
 }
 
+/**
+ * The mtime of the search index file as last loaded by `loadIndex()` (`-1`
+ * when no index exists yet). Exposed so caches keyed to the index — like the
+ * chat answer cache (issue #56) — can detect a re-digested rulebook and drop
+ * entries built against a stale index.
+ */
+export function indexMtime(): number {
+  return cacheMtime;
+}
+
 export function tokenize(s: string): string[] {
   return s.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2);
 }
