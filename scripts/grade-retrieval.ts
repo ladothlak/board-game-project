@@ -68,6 +68,80 @@ const GRADE_CASES: GradeCase[] = [
   { slug: "tacta", question: "How do I set up the game?", expectedPages: [3] },
   { slug: "tacta", question: "How do I win?", expectedPages: [6] },
   { slug: "tacta", question: "How do I place my cards?", expectedPages: [4] },
+  // Azul
+  { slug: "azul", question: "How do I set up the game?", expectedPages: [2] },
+  { slug: "azul", question: "How do I win?", expectedPages: [3, 5] },
+  { slug: "azul", question: "What happens during the draft phase?", expectedPages: [3] },
+  // Carcassonne
+  { slug: "carcassonne", question: "How do I set up the game?", expectedPages: [1] },
+  { slug: "carcassonne", question: "How do I win?", expectedPages: [4] },
+  { slug: "carcassonne", question: "How do I score a completed city?", expectedPages: [3] },
+  // Cascadia
+  { slug: "cascadia", question: "How do I set up the game?", expectedPages: [3, 4] },
+  { slug: "cascadia", question: "How do I win?", expectedPages: [9] },
+  { slug: "cascadia", question: "What happens during my turn?", expectedPages: [5] },
+  // Catan (2nd edition)
+  { slug: "catan-2", question: "How do I set up the board?", expectedPages: [3] },
+  { slug: "catan-2", question: "What is my goal in the game?", expectedPages: [16] },
+  { slug: "catan-2", question: "What is the order of the phases in my turn?", expectedPages: [8] },
+  // Clank
+  { slug: "clank", question: "How do I set up the game?", expectedPages: [2] },
+  { slug: "clank", question: "How does deck building work in Clank?", expectedPages: [4, 5] },
+  { slug: "clank", question: "How does damage work?", expectedPages: [8] },
+  // Dominion
+  { slug: "dominion", question: "How do I set up the game?", expectedPages: [3] },
+  { slug: "dominion", question: "When does the game end?", expectedPages: [6] },
+  { slug: "dominion", question: "What do I do on my turn?", expectedPages: [5] },
+  // Everdell
+  { slug: "everdell", question: "How do I set up the game?", expectedPages: [6, 7] },
+  { slug: "everdell", question: "When does the game end?", expectedPages: [14] },
+  { slug: "everdell", question: "What actions can I take on my turn?", expectedPages: [8] },
+  // Flash Point
+  { slug: "flash-point", question: "How do I set up the game?", expectedPages: [3] },
+  { slug: "flash-point", question: "What are the three phases of my turn?", expectedPages: [4] },
+  { slug: "flash-point", question: "How do I extinguish fire?", expectedPages: [5] },
+  // Gloomhaven
+  { slug: "how-to-play-gloomhaven-official-rules-ultraboardgames", question: "How do I set up the play area?", expectedPages: [5] },
+  { slug: "how-to-play-gloomhaven-official-rules-ultraboardgames", question: "What is the victory condition?", expectedPages: [16] },
+  { slug: "how-to-play-gloomhaven-official-rules-ultraboardgames", question: "What happens during my turn?", expectedPages: [17, 18] },
+  // Hanamikoji
+  { slug: "how-to-play-hanamikoji-official-rules-ultraboardgames", question: "What actions can I take?", expectedPages: [2] },
+  { slug: "how-to-play-hanamikoji-official-rules-ultraboardgames", question: "How is scoring done?", expectedPages: [1] },
+  // Kingdomino
+  { slug: "how-to-play-kingdomino-official-rules-ultraboardgames", question: "How do I set up the game?", expectedPages: [2] },
+  { slug: "how-to-play-kingdomino-official-rules-ultraboardgames", question: "How do I place a domino?", expectedPages: [3] },
+  // Munchkin
+  { slug: "munchkin", question: "What happens when I look for trouble?", expectedPages: [2] },
+  // Oasis
+  { slug: "oasis-rules-and-questions", question: "What is the goal of the game?", expectedPages: [2] },
+  { slug: "oasis-rules-and-questions", question: "What happens on my turn?", expectedPages: [3] },
+  { slug: "oasis-rules-and-questions", question: "How do animals attract their own kind?", expectedPages: [4] },
+  // Pandemic
+  { slug: "pandemic", question: "How do I set up the game?", expectedPages: [1] },
+  { slug: "pandemic", question: "What are my actions on my turn?", expectedPages: [5] },
+  { slug: "pandemic", question: "How do I win?", expectedPages: [1] },
+  // Patchwork
+  { slug: "patchwork", question: "How do I set up the game?", expectedPages: [1] },
+  { slug: "patchwork", question: "What happens during my turn?", expectedPages: [1] },
+  // Sagrada
+  { slug: "sagrada", question: "How do I set up the game?", expectedPages: [3, 4] },
+  { slug: "sagrada", question: "How do I win?", expectedPages: [8] },
+  { slug: "sagrada", question: "What actions can I take?", expectedPages: [7] },
+  // Scythe
+  { slug: "scythe", question: "How do I set up the game?", expectedPages: [6, 7] },
+  { slug: "scythe", question: "What is the goal of the game?", expectedPages: [1, 29] },
+  { slug: "scythe", question: "How does the action selection work?", expectedPages: [10] },
+  // Splendor
+  { slug: "splendor", question: "How do I set up the game?", expectedPages: [3] },
+  { slug: "splendor", question: "How do I win?", expectedPages: [3] },
+  // Viticulture
+  { slug: "viticulture", question: "How do I set up the game?", expectedPages: [3] },
+  { slug: "viticulture", question: "What actions can I take in summer?", expectedPages: [8] },
+  { slug: "viticulture", question: "How do I win?", expectedPages: [1] },
+  // Wingspan
+  { slug: "wingspan", question: "How do I set up the game?", expectedPages: [2] },
+  { slug: "wingspan", question: "What happens at the end of a round?", expectedPages: [4, 5] },
+  { slug: "wingspan", question: "How do I win?", expectedPages: [11] },
 ];
 
 async function main(): Promise<void> {
