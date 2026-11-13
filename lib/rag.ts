@@ -10,7 +10,7 @@ const MODEL =
 /** Resolve the Unsloth base URL at call time (not import time), so a `.env`
  * loaded after module evaluation — as in the benchmark — is honored. */
 function resolveBaseUrl(): string {
-  return process.env.UNSLOTH_BASE_URL ?? "http://localhost:8888/v1";
+  return process.env.UNSLOTH_BASE_URL ?? "http://192.168.0.80:8888/v1";
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────
