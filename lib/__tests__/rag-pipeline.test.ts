@@ -113,22 +113,26 @@ describe("buildRagContext", () => {
       ...CHUNKS,
       { id: "t42", slug: SLUG, title: "Reference", page: 42, text: "The reference table lists all keywords." },
     ]);
-    stubLlm();
+    stubLlm({ rerank: [5] });
 
-    // 21 chars long (would normally trigger expansion), but the explicit
-    // page reference gates it off.
+    // 19 chars long (≤ 20), so expansion is gated off by length. The explicit
+    // page reference no longer skips the re-rank (issue #65): its bounded prior
+    // is correctable by the re-ranker, so the LLM gets a chance to reorder.
     const result = await buildRagContext(SLUG, "Tell me about p. 42", KEY);
 
-    // No LLM calls at all: expansion is gated off by the explicit page
-    // reference, and re-ranking is skipped because the referenced page is
-    // already boosted to the top.
-    expect(mockFetch).not.toHaveBeenCalled();
+    // Exactly one LLM call: the re-rank (expansion is gated off by length).
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(expansionCalls()).toBe(0);
 
-    // The referenced page is boosted ahead of everything else.
+    // The referenced page is boosted ahead of everything else and leads the
+    // context. Confidence is 0 because there is NO genuine lexical evidence:
+    // no query term matches any chunk, so the only candidate is the boosted
+    // page itself (isBoosted: true) and estimateConfidence ignores it
+    // (issue #65). A boosted query can never saturate confidence on the
+    // strength of its boost alone.
     expect(result.excerpts.startsWith("--- Page 42 ---")).toBe(true);
-    expect(result.pages).toEqual([42]);
-    expect(result.confidence).toBe(1);
+    expect(result.pages).toContain(42);
+    expect(result.confidence).toBe(0);
   });
 
   it("boosts chunks of a mentioned enabled expansion to the top", async () => {
@@ -140,17 +144,22 @@ describe("buildRagContext", () => {
 
     const result = await buildRagContext(SLUG, "How does the Doom expansion work?", KEY, ["Doom"]);
 
-    // No LLM calls: the base retrieval already has a clear winner (the mentioned
-    // expansion chunk matches multiple query terms), so the quality gate passes
-    // and expansion is never fired; re-ranking is skipped because the boosted
-    // expansion chunk (score 90) is a clear TF-IDF winner.
+    // The base retrieval already has a clear winner (the mentioned expansion
+    // chunk matches multiple distinctive query terms), so the quality gate
+    // passes on the pre-boost lexical list and expansion is never fired.
+    // Re-ranking is also skipped (gate passes). No LLM calls at all.
     expect(mockFetch).not.toHaveBeenCalled();
     expect(expansionCalls()).toBe(0);
 
-    // The expansion chunk (boosted to score 90) leads the context.
+    // The expansion chunk leads the context (bounded prior keeps it ahead of
+    // weaker lexical hits, but the re-rank could correct it if it fired).
     expect(result.excerpts.startsWith("--- Page 10 ---")).toBe(true);
     expect(result.excerpts).toContain("The Doom expansion adds terrifying new enemies.");
-    expect(result.confidence).toBe(1);
+    // Confidence is based on genuine (non-boosted) candidates only — the
+    // boosted expansion chunk is ignored, so confidence reflects the other
+    // chunks' lexical scores (weak), not the boost.
+    expect(result.confidence).toBeGreaterThan(0);
+    expect(result.confidence).toBeLessThan(1);
   });
 
   it("reports low confidence below the fallback threshold when retrieval is weak and re-ranking fails", async () => {
@@ -265,23 +274,22 @@ describe("buildRagContext", () => {
     }
   });
 
-  it("reports near-zero ms for stages that are gated off", async () => {
+  it("reports near-zero ms for expansion and a small rerankMs when only the gate gates", async () => {
     vi.mocked(loadIndex).mockResolvedValue([
       ...CHUNKS,
       { id: "t42", slug: SLUG, title: "Reference", page: 42, text: "The reference table lists all keywords." },
     ]);
     stubLlm();
 
-    // An explicit page reference gates expansion off AND skips the re-rank —
-    // so neither stage makes an LLM call. expandMs is exactly 0 (expansion was
-    // never fired); rerankMs is tiny (the gate short-circuits before any LLM
-    // call, so only clock resolution between two adjacent Date.now() reads).
+    // An explicit page reference gates expansion off (length ≤ 20), so
+    // expandMs is exactly 0. The re-rank now fires (issue #65: bounded priors
+    // are correctable), so rerankMs reflects the LLM call wall-clock.
     const result = await buildRagContext(SLUG, "Tell me about p. 42", KEY);
 
     expect(result.timings.expandMs).toBe(0);
     expect(result.timings.rerankMs).toBeGreaterThanOrEqual(0);
-    expect(result.timings.rerankMs).toBeLessThan(100);
-    expect(mockFetch).not.toHaveBeenCalled();
+    // The re-rank fired (one LLM call), so it's no longer near-zero.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   it("retrieves and merges results from all expansion query variants", async () => {
@@ -294,10 +302,10 @@ describe("buildRagContext", () => {
 
     const result = await buildRagContext(SLUG, "How do I deal with enemy attacks?", KEY);
 
-    // Expansion ran; the section boost (setup → p.1) pulls in a page that
-    // doesn't contain the query terms, so the quality gate fails and the
-    // re-rank fires as a second LLM call.
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // Expansion ran; the post-expansion genuine lexical evidence is strong
+    // enough to pass the quality gate (issue #65), so the re-rank is skipped.
+    // Only one LLM call: the expansion itself.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(expansionCalls()).toBe(1);
 
     // Each variant matched a different page; both made it into the context
@@ -681,8 +689,10 @@ describe("decisionRerank", () => {
     { id: "c2", slug: "g", title: "", page: 2, text: "You win when all enemies are destroyed.", score: 8 },
   ];
 
-  it("reorders candidates by decision-model score combined with TF-IDF", async () => {
+  it("reorders candidates by decision-model score combined with TF-IDF, both normalized", async () => {
     // The model rates c1 (index 0) highly (4) and c2 (index 1) low (1).
+    // maxScore = 8, so c1: (2/8)*1 + (4/4)*3 = 0.25 + 3 = 3.25
+    //               c2: (8/8)*1 + (1/4)*3 = 1 + 0.75 = 1.75
     mockFetch.mockResolvedValue(
       rawJson({
         answers: { c0: { type: "score", score: 4 }, c1: { type: "score", score: 1 } },
@@ -690,10 +700,10 @@ describe("decisionRerank", () => {
     );
 
     const result = await decisionRerank("set up the board", candidates);
-    // c1: 2 + 4*3 = 14 beats c2: 8 + 1*3 = 11.
+    // c1: 3.25 beats c2: 1.75.
     expect(result![0].id).toBe("c1");
-    expect(result![0].score).toBeCloseTo(14);
-    expect(result![1].score).toBeCloseTo(11);
+    expect(result![0].score).toBeCloseTo(3.25);
+    expect(result![1].score).toBeCloseTo(1.75);
   });
 
   it("returns null when the model is unavailable (so callers fall back to LLM)", async () => {

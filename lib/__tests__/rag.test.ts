@@ -6,7 +6,8 @@ import {
   adaptiveContext,
   estimateConfidence,
   hierarchicalToc,
-
+  boostCandidates,
+  passesQualityGate,
   detectExplicitPages,
   expandQuery,
   rerank,
@@ -440,13 +441,15 @@ describe("rerank", () => {
     expect(result).toEqual([]);
   });
 
-  it("combines LLM scores (weight 3) with TF-IDF scores (weight 1)", async () => {
+  it("combines LLM scores (weight 3) with TF-IDF scores (weight 1), both normalized", async () => {
     // LLM says candidate 0 is highly relevant (5) and candidate 1 is not (1).
+    // maxScore = 8, so c1: (2/8)*1 + (5/5)*3 = 0.25 + 3 = 3.25
+    //               c2: (8/8)*1 + (1/5)*3 = 1 + 0.6 = 1.6
     mockFetch.mockResolvedValue(llmResponse("[5, 1]"));
     const result = await rerank("key", "question", candidates);
-    expect(result[0].id).toBe("c1"); // 2 + 5*3 = 17 beats 8 + 1*3 = 11
-    expect(result[0].score).toBeCloseTo(17);
-    expect(result[1].score).toBeCloseTo(11);
+    expect(result[0].id).toBe("c1"); // 3.25 beats 1.6
+    expect(result[0].score).toBeCloseTo(3.25);
+    expect(result[1].score).toBeCloseTo(1.6);
   });
 
   it("previews candidates with their most query-relevant sentences, not just the first 200 chars", async () => {
@@ -463,5 +466,159 @@ describe("rerank", () => {
     const prompt = body.messages.map((m) => m.content).join("\n");
     expect(prompt).toContain(relevant);
     expect(prompt).not.toContain(filler.slice(0, 100));
+  });
+});
+
+// ─── issue #65: bounded priors, gate independence, confidence non-saturation ──
+
+describe("boostCandidates (bounded prior, issue #65)", () => {
+  const chunks: Chunk[] = [
+    { id: "b1", slug: "g", title: "", page: 1, text: "Set up the board by placing the tokens." },
+    { id: "b2", slug: "g", title: "", page: 2, text: "Each turn you may attack with your forces." },
+    { id: "b3", slug: "g", title: "", page: 42, text: "The reference table lists all keywords." },
+  ];
+
+  it("caps the boosted score at +EXPLICIT_BOOST_FACTOR over the top genuine lexical score", () => {
+    // Top genuine lexical score is 10. The boost must be ≤ 10 * 1.2 = 12.
+    const candidates = [
+      { ...chunks[0], score: 10 },
+      { ...chunks[1], score: 5 },
+    ];
+    const boosted = boostCandidates(candidates, chunks, [42], undefined, "question");
+    const page42 = boosted.find((c) => c.page === 42)!;
+    expect(page42.isBoosted).toBe(true);
+    // Bounded prior: topLexical * (1 + 0.2) = 10 * 1.2 = 12.
+    expect(page42.score).toBeCloseTo(12);
+    // Never an absolute 80/100 — stays within the +10–20% cap.
+    expect(page42.score).toBeLessThanOrEqual(12);
+  });
+
+  it("does not use a boosted score as its own baseline (no compounding)", () => {
+    // If a page is already boosted, its score must not be used as the
+    // topLexical baseline for another boost.
+    const candidates = [
+      { ...chunks[0], score: 10 },
+      { ...chunks[1], score: 5, isBoosted: true },
+    ];
+    const boosted = boostCandidates(candidates, chunks, [42], undefined, "question");
+    const page42 = boosted.find((c) => c.page === 42)!;
+    // topLexical = 10 (the non-boosted score), not 5 (the boosted one).
+    expect(page42.score).toBeCloseTo(12); // 10 * 1.2
+  });
+
+  it("marks boosted entries with isBoosted: true", () => {
+    const candidates = [{ ...chunks[0], score: 10 }];
+    const boosted = boostCandidates(candidates, chunks, [42], undefined, "question");
+    expect(boosted.find((c) => c.page === 42)?.isBoosted).toBe(true);
+    // Non-boosted entries remain unmarked.
+    expect(boosted.find((c) => c.page === 1)?.isBoosted).toBeUndefined();
+  });
+
+  it("boosts mentioned expansion chunks with the same bounded prior", () => {
+    const expChunks: Chunk[] = [
+      ...chunks,
+      { id: "exp-doom", slug: "g", title: "Doom", page: 10, text: "The Doom expansion adds enemies.", isExpansion: true },
+    ];
+    const candidates = [{ ...chunks[0], score: 10 }];
+    const boosted = boostCandidates(candidates, expChunks, [], ["Doom"], "How does the Doom expansion work?");
+    const expPage = boosted.find((c) => c.page === 10)!;
+    expect(expPage.isBoosted).toBe(true);
+    expect(expPage.score).toBeCloseTo(12); // 10 * 1.2
+  });
+});
+
+describe("passesQualityGate (independent of boost, issue #65)", () => {
+  it("returns false when only boosted candidates exist", () => {
+    // A single boosted candidate with a high score must NOT satisfy the gate:
+    // a boost is a prior, not evidence.
+    const candidates = [
+      { ...CHUNKS[0], score: 50, isBoosted: true },
+    ];
+    expect(passesQualityGate(candidates, new Set(["setup", "board"]))).toBe(false);
+  });
+
+  it("returns false when the top candidate is boosted and no genuine winner exists", () => {
+    // The boosted page scores high, but the genuine candidates are weak.
+    const candidates = [
+      { ...CHUNKS[0], score: 40, isBoosted: true },
+      { ...CHUNKS[1], score: 1 },
+      { ...CHUNKS[2], score: 0.5 },
+    ];
+    // The gate checks candidates[0] (the boosted one) — it must fail because
+    // the function is called on the pre-boost list by buildRagContext. Here we
+    // simulate what happens if someone mistakenly passes the post-boost list:
+    // the top score is 40, but the text check still applies.
+    // In practice, buildRagContext always passes lexicalCandidates (pre-boost),
+    // so this test documents the contract.
+    expect(passesQualityGate(candidates, new Set(["setup", "board"]))).toBe(false);
+  });
+
+  it("returns true for a genuine (non-boosted) clear winner", () => {
+    const candidates = [
+      { ...CHUNKS[0], score: 10 },
+      { ...CHUNKS[1], score: 3 },
+    ];
+    // "set" and "board" both appear in the top chunk's text.
+    expect(passesQualityGate(candidates, new Set(["set", "board"]))).toBe(true);
+  });
+});
+
+describe("estimateConfidence (ignores boost magnitude, issue #65)", () => {
+  it("returns 0 when all candidates are boosted (no genuine evidence)", () => {
+    const candidates = [
+      { ...CHUNKS[0], score: 100, isBoosted: true },
+      { ...CHUNKS[1], score: 90, isBoosted: true },
+    ];
+    expect(estimateConfidence(candidates)).toBe(0);
+  });
+
+  it("does not saturate to 1.0 on a boosted query with weak genuine evidence", () => {
+    // A boosted page scores 100, but the only genuine candidate scores 2.
+    // Confidence must reflect the genuine score (0.2), not the boost.
+    const candidates = [
+      { ...CHUNKS[0], score: 100, isBoosted: true },
+      { ...CHUNKS[1], score: 2 },
+    ];
+    expect(estimateConfidence(candidates)).toBeCloseTo(0.2);
+  });
+
+  it("still uses genuine scores when no candidates are boosted", () => {
+    const candidates = [
+      { ...CHUNKS[0], score: 15 },
+      { ...CHUNKS[1], score: 8 },
+    ];
+    expect(estimateConfidence(candidates)).toBe(1); // min(1, 15/10)
+  });
+});
+
+describe("rerank corrects bounded boosts (issue #65)", () => {
+  it("a wrong boosted page cannot outrank a direct lexical hit after rerank", async () => {
+    // The boosted page (score 12, isBoosted) is ahead of the genuine hit
+    // (score 10). The LLM rates the genuine hit highly (5) and the boosted
+    // page low (1). After normalization, the re-rank's swing (up to 3)
+    // dominates the lexical component (max 1), so the genuine hit wins.
+    const candidates = [
+      { ...CHUNKS[0], score: 12, isBoosted: true }, // boosted page (p. 1)
+      { ...CHUNKS[1], score: 10 },                  // genuine hit (p. 2)
+    ];
+    // LLM says: candidate 0 (boosted) is irrelevant (1), candidate 1 (genuine) is perfect (5).
+    mockFetch.mockResolvedValue(llmResponse("[1, 5]"));
+    const result = await rerank("key", "question", candidates);
+    // The genuine hit must outrank the boosted page.
+    expect(result[0].id).toBe("c2");
+    expect(result[0].page).toBe(2);
+  });
+
+  it("a boosted page the evidence endorses keeps its edge", async () => {
+    // The boosted page (score 12) is ahead of the genuine hit (score 10).
+    // The LLM rates BOTH highly (5, 5). The boosted page's small lexical edge
+    // (12/12=1 vs 10/12≈0.83) plus equal LLM scores keeps it on top.
+    const candidates = [
+      { ...CHUNKS[0], score: 12, isBoosted: true },
+      { ...CHUNKS[1], score: 10 },
+    ];
+    mockFetch.mockResolvedValue(llmResponse("[5, 5]"));
+    const result = await rerank("key", "question", candidates);
+    expect(result[0].id).toBe("c1"); // boosted page stays first
   });
 });

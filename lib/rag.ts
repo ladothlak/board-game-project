@@ -10,7 +10,7 @@ const MODEL =
 /** Resolve the Unsloth base URL at call time (not import time), so a `.env`
  * loaded after module evaluation — as in the benchmark — is honored. */
 function resolveBaseUrl(): string {
-  return process.env.UNSLOTH_BASE_URL ?? "http://localhost:8888/v1";
+  return process.env.UNSLOTH_BASE_URL ?? "http://192.168.0.80:8888/v1";
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -26,6 +26,24 @@ export type QueryType =
 
 interface ScoredChunk extends Chunk {
   score: number;
+  /**
+   * True when this candidate's score is a bounded prior from a boost (an
+   * explicit page reference, a mentioned expansion, or a section anchor)
+   * rather than genuine lexical / re-rank evidence (issue #65). The quality
+   * gate and the confidence estimate ignore boosted candidates so a prior
+   * can never stand in for evidence.
+   */
+  isBoosted?: boolean;
+  /**
+   * True when this candidate belongs to the query type's TOC section (issue
+   * #63, #65). Used for budget allocation: section-anchored pages get a
+   * dominant weight in the context budget so the page most likely to carry
+   * the answer receives enough text to reach full coverage. Unlike
+   * `isBoosted`, this is set for ALL section pages (including ones already
+   * in the candidate set from lexical retrieval), so it does not affect the
+   * confidence estimate or the quality gate.
+   */
+  sectionAnchored?: boolean;
 }
 
 /** Per-stage wall-clock durations (ms) for one `buildRagContext` run. */
@@ -319,14 +337,19 @@ export async function decisionRerank(
   const result = await askDecisionModel(state, questions);
   if (!result) return null;
 
-  // Combine decision-model score (weight 3) with TF-IDF score (weight 1),
-  // mirroring rerank() so the final ordering is comparable to the LLM path.
-  // Candidates outside the shortlist are untouched.
+  // Combine decision-model score (weight 3) with the lexical score (weight 1),
+  // BOTH normalized to [0, 1] first — mirroring rerank() so the final ordering
+  // is comparable to the LLM path, and so a bounded boost can be corrected by
+  // the model's verdict (issue #65): the re-rank's swing (up to 3) dominates
+  // the lexical component (max 1), so a page the evidence rates highly can
+  // outrank a boosted one. Candidates outside the shortlist are untouched.
+  const maxScore = Math.max(...candidates.map((c) => c.score));
   const combined = candidates.map((c, i) => {
     if (i >= shortlist.length) return c;
     const s = result.answers[`c${i}`]?.score;
     if (typeof s !== "number") return c;
-    return { ...c, score: c.score * 1 + s * 3 };
+    const lexNorm = maxScore > 0 ? c.score / maxScore : 0;
+    return { ...c, score: lexNorm * 1 + (s / 4) * 3 };
   });
   return combined.sort((a, b) => b.score - a.score);
 }
@@ -477,27 +500,68 @@ export function multiQueryRetrieve(
 }
 
 /**
+ * Bounded-prior factors (issue #65): a boost is a prior, not an evidence
+ * verdict — it may nudge a page's score but must stay within the re-ranker's
+ * correction range, never an absolute 80/100. Section anchors add
+ * +SECTION_BOOST_FACTOR over the top genuine lexical score; explicit user
+ * page references and mentioned expansions are stronger priors at
+ * +EXPLICIT_BOOST_FACTOR, but still bounded so a direct lexical hit that the
+ * re-rank rates highly can outrank them (see the normalized combined score in
+ * `rerank` / `decisionRerank`). Both factors sit inside the plan's +10–20%
+ * cap (RAG-PIPELINE-IMPROVEMENT-PLAN.md §P0.3).
+ */
+const SECTION_BOOST_FACTOR = 0.2;
+const EXPLICIT_BOOST_FACTOR = 0.2;
+
+/**
+ * The top genuine (non-boosted) lexical score among the candidates — the
+ * baseline a bounded prior is measured against (issue #65). Boosted scores
+ * are never used as their own baseline, so priors can't compound.
+ */
+function topLexicalScore(candidates: ScoredChunk[]): number {
+  let top = 0;
+  for (const c of candidates) {
+    if (!c.isBoosted && c.score > top) top = c.score;
+  }
+  return top;
+}
+
+/** A bounded prior: the top genuine score plus at most `factor` (issue #65). */
+function boundedPrior(topLexical: number, factor: number): number {
+  return topLexical * (1 + factor);
+}
+
+/**
  * Boost explicitly-referenced pages and mentioned-expansion chunks to the top
- * of the candidate list with very high scores so they always survive in the
- * final set, regardless of lexical retrieval order. Applied after every
- * multiQueryRetrieve() call (issue #58) so a re-retrieval on expanded queries
+ * of the candidate list with BOUNDED PRIORS so they always survive in the
+ * final set, regardless of lexical retrieval order (issue #58) — while staying
+ * within the re-ranker's correction range (issue #65). A boost is a prior, not
+ * an evidence verdict: each boosted score is capped at +EXPLICIT_BOOST_FACTOR
+ * over the top genuine lexical score (never an absolute 100/90), so a direct
+ * lexical hit that the re-rank rates highly can still outrank it. Applied
+ * after every multiQueryRetrieve() call so a re-retrieval on expanded queries
  * keeps exactly the same boosts as the base retrieval.
  */
-function boostCandidates(
+export function boostCandidates(
   candidates: ScoredChunk[],
   chunks: Chunk[],
   explicitPages: number[],
   expansionNames: string[] | undefined,
   question: string
 ): ScoredChunk[] {
+  const topLexical = topLexicalScore(candidates);
   let boosted = candidates;
   // Boost explicitly-referenced pages to the top of the candidate list.
   if (explicitPages.length > 0) {
     for (const p of explicitPages) {
       const pageChunk = chunks.find((c) => c.page === p);
       if (pageChunk) {
-        // Give it a very high score so it's always in the top results.
-        const pageBoost: ScoredChunk = { ...pageChunk, score: 100 };
+        // Bounded prior: strong, but correctable by the re-rank.
+        const pageBoost: ScoredChunk = {
+          ...pageChunk,
+          score: boundedPrior(topLexical, EXPLICIT_BOOST_FACTOR),
+          isBoosted: true,
+        };
         // Remove any existing entry for this page, then prepend.
         boosted = boosted.filter((c) => c.page !== p);
         boosted.unshift(pageBoost);
@@ -515,9 +579,13 @@ function boostCandidates(
       const expChunks = chunks.filter(
         (c) => c.isExpansion === true && mentionedExps.some((name) => c.id.includes(name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")))
       );
-      // Boost them to the top with a high score.
+      // Boost them to the top with a bounded prior.
       for (const ec of expChunks) {
-        const expBoost: ScoredChunk = { ...ec, score: 90 };
+        const expBoost: ScoredChunk = {
+          ...ec,
+          score: boundedPrior(topLexical, EXPLICIT_BOOST_FACTOR),
+          isBoosted: true,
+        };
         boosted = boosted.filter((c) => c.page !== ec.page);
         boosted.unshift(expBoost);
       }
@@ -531,11 +599,14 @@ function boostCandidates(
  * decision (issue #58): the top candidate is a clear winner (score ≥ 3 and ≥ 2×
  * the runner-up) AND it lexically contains at least two distinct query terms.
  * A single common word ("turn", "setup") can inflate one chunk's score while
- * it is actually irrelevant — in that case the gate must not fire. Explicit-
- * page questions are handled by callers (their referenced page is already
- * boosted and never needs re-ranking).
+ * it is actually irrelevant — in that case the gate must not fire.
+ *
+ * Callers MUST evaluate this on the pre-boost candidate list (issue #65): a
+ * boost is a prior, not evidence, so a boosted candidate must never be able
+ * to satisfy the gate on its own. Explicit-page questions no longer skip the
+ * re-rank either — their bounded prior is correctable by the re-ranker.
  */
-function passesQualityGate(candidates: ScoredChunk[], queryTerms: Set<string>): boolean {
+export function passesQualityGate(candidates: ScoredChunk[], queryTerms: Set<string>): boolean {
   const topScore = candidates[0]?.score ?? 0;
   const runnerUpScore = candidates[1]?.score ?? 0;
   if (topScore < 3 || topScore < 2 * runnerUpScore) return false;
@@ -589,10 +660,18 @@ export async function rerank(
     const scores: number[] = JSON.parse(raw.slice(start, end + 1));
     if (!Array.isArray(scores) || scores.length !== candidates.length) return candidates;
 
-    // Combine LLM score (weight 3) with TF-IDF score (weight 1).
+    // Combine the LLM score (weight 3) with the lexical score (weight 1),
+    // BOTH normalized to [0, 1] first (issue #65). Raw-score arithmetic could
+    // never let the re-rank reorder a boosted page below a direct lexical hit:
+    // any positive boost gap is bigger than the re-rank's max swing. With
+    // normalized components the re-rank's swing (up to 3) dominates the
+    // lexical component (max 1), so a bounded prior stays correctable — a
+    // page the evidence rates highly can outrank a boosted one, and a boosted
+    // page the evidence endorses keeps its edge.
+    const maxScore = Math.max(...candidates.map((c) => c.score));
     const combined = candidates.map((c, i) => ({
       ...c,
-      score: c.score * 1 + (scores[i] ?? 3) * 3,
+      score: (maxScore > 0 ? c.score / maxScore : 0) * 1 + ((scores[i] ?? 3) / 5) * 3,
     }));
     return combined.sort((a, b) => b.score - a.score);
   } catch {
@@ -783,14 +862,30 @@ export function adaptiveContext(
   // to their scores; each round freezes at least one page at the cap, so this
   // terminates in at most n rounds. Rounding leaves a little headroom that
   // pass 2 redistributes.
-  const pageCap = feasible.length === 1 ? budget : Math.floor(MAX_PAGE_SHARE * budget);
+  // Per-page caps: section-anchored / boosted pages get a higher cap so the
+  // page most likely to carry the answer can receive enough text to reach full
+  // coverage (issue #65). Other pages keep the standard cap so no single
+  // non-boosted page starves the rest.
+  const MAX_BOOSTED_PAGE_SHARE = 0.75;
+  const pageCapOf = (c: ScoredChunk) =>
+    feasible.length === 1 ? budget : Math.floor((c.sectionAnchored || c.isBoosted ? MAX_BOOSTED_PAGE_SHARE : MAX_PAGE_SHARE) * budget);
   const allocs = feasible.map(() => MIN_CHUNK_CHARS);
   let free = budget - feasible.length * MIN_CHUNK_CHARS;
-  const weights = feasible.map((c) => Math.max(0, c.score));
+  // Budget weights: boosted candidates get a dominant fixed weight so the
+  // section-anchored / explicitly-referenced page — the one most likely to
+  // carry the answer — receives a large share of the context budget. The
+  // actual score stays bounded (issue #65); only the allocation weight is
+  // amplified, so the re-rank can still correct the ordering and the quality
+  // gate / confidence remain independent of the boost magnitude. Using a
+  // fixed high weight (equivalent to the pre-#65 absolute 80) ensures the
+  // boosted page gets enough text to reach full coverage even when many
+  // candidate pages compete for the budget.
+  const BUDGET_BOOST_WEIGHT = 1000;
+  const weights = feasible.map((c) => (c.sectionAnchored || c.isBoosted ? BUDGET_BOOST_WEIGHT : Math.max(0, c.score)));
   for (let round = 0; round < feasible.length && free > 0; round++) {
     const open: number[] = [];
     allocs.forEach((a, i) => {
-      if (a < pageCap) open.push(i);
+      if (a < pageCapOf(feasible[i])) open.push(i);
     });
     if (open.length === 0) break;
     const wSum = open.reduce((s, i) => s + weights[i], 0);
@@ -798,7 +893,7 @@ export function adaptiveContext(
     let given = 0;
     for (const i of open) {
       const share = Math.floor((free * weights[i]) / wSum);
-      const give = Math.min(share, pageCap - allocs[i]);
+      const give = Math.min(share, pageCapOf(feasible[i]) - allocs[i]);
       if (give > 0) {
         allocs[i] += give;
         given += give;
@@ -848,11 +943,13 @@ export function adaptiveContext(
     const shortfall = c.text.length - delivered[i].length;
     if (shortfall > 0) truncated.push({ i, shortfall });
   });
-  // Order by compressed (sqrt) score: a section-boosted page's 80/100 is an
-  // artificial prior, not a relevance verdict — raw scores would let it
-  // consume the spare budget ahead of the page that lexically answers the
-  // question. sqrt compresses the gap so true lexical winners lead (issue #64).
-  truncated.sort((a, b) => Math.sqrt(Math.max(0, feasible[b.i].score)) - Math.sqrt(Math.max(0, feasible[a.i].score)) || a.i - b.i);
+  // Order by compressed (sqrt) score with the boosted bonus: a section-boosted
+  // page's bounded prior is not a relevance verdict, but it IS the page most
+  // likely to carry the answer — so it leads the spare-budget fills. sqrt
+  // compresses genuine score gaps so true lexical winners among non-boosted
+  // pages still rank correctly (issue #64).
+  const weightOf = (i: number) => (feasible[i].sectionAnchored || feasible[i].isBoosted ? BUDGET_BOOST_WEIGHT : Math.max(0, feasible[i].score));
+  truncated.sort((a, b) => Math.sqrt(weightOf(b.i)) - Math.sqrt(weightOf(a.i)) || a.i - b.i);
   for (const t of truncated) {
     const extra = Math.min(t.shortfall, budget - used);
     if (extra <= 0) break;
@@ -927,10 +1024,16 @@ export const HYBRID_CONFIDENCE_THRESHOLD = 0.25;
  * Estimate retrieval confidence (0-1) based on how well the top chunks score
  * relative to the maximum possible. Used to decide whether to answer or say
  * "this isn't covered in the rulebook."
+ *
+ * Boost magnitude is ignored (issue #65): a boost is a prior, not evidence, so
+ * only genuine lexical / re-rank scores count toward confidence. When every
+ * candidate is a boost there is no evidence at all and confidence is 0 — a
+ * boosted query can never saturate to 1.0 on the strength of its boost alone.
  */
 export function estimateConfidence(selected: ScoredChunk[]): number {
-  if (selected.length === 0) return 0;
-  const top = selected[0].score;
+  const genuine = selected.filter((c) => !c.isBoosted);
+  if (genuine.length === 0) return 0;
+  const top = Math.max(...genuine.map((c) => c.score));
   // Normalize: a score of 10+ is very confident, 3+ is moderate, <2 is weak.
   return Math.min(1, top / 10);
 }
@@ -1056,32 +1159,50 @@ const QUERY_TYPE_SECTION: Partial<Record<QueryType, string>> = {
 };
 
 /**
- * Boost the query type's TOC section pages into the candidate set (issue #63):
- * anchor retrieval to the classified question type's section so the page that
- * answers the question is always in the candidate set, even when lexical
- * retrieval can't discriminate a common-word query. Capped at 2 pages per
- * section to avoid consuming the entire context budget. Pages already surfaced
- * by base retrieval (including ones boosted by an explicit page reference or a
- * mentioned expansion) are left alone — the boost pulls a missing section page
- * IN, it doesn't re-rank one that's already in the set.
+ * Boost the query type's TOC section pages into the candidate set as BOUNDED
+ * PRIORS (issue #63, #65): anchor retrieval to the classified question type's
+ * section so the page that answers the question is always in the candidate
+ * set, even when lexical retrieval can't discriminate a common-word query.
+ * Capped at 2 pages per section to avoid consuming the entire context budget.
+ *
+ * The boost is a prior, not an evidence verdict (issue #65): a boosted page's
+ * score is capped at +SECTION_BOOST_FACTOR over the top genuine lexical score
+ * (never an absolute 80/100), so the re-rank can correct a wrong section page,
+ * and the quality gate / confidence estimate can never be satisfied by the
+ * boost alone. Pages already surfaced by base retrieval (including ones
+ * boosted by an explicit page reference or a mentioned expansion) are left
+ * alone — the boost pulls a missing section page IN, it doesn't re-rank one
+ * that's already in the set.
  */
-function boostSectionPages(
+export function boostSectionPages(
   candidates: ScoredChunk[],
   chunks: Chunk[],
   queryType: QueryType
 ): ScoredChunk[] {
   const sectionName = QUERY_TYPE_SECTION[queryType];
   if (!sectionName) return candidates;
+  const topLexical = topLexicalScore(candidates);
   const sectionPages = findSectionPages(chunks, sectionName);
-  let boosted = candidates;
+  // Mark ALL section pages (including ones already in the candidate set) with
+  // `sectionAnchored: true` so the budget allocator can give them a dominant
+  // weight. Existing entries keep their genuine score; missing ones get a
+  // bounded prior and are flagged `isBoosted` as well.
+  const marked = candidates.map((c) =>
+    sectionPages.includes(c.page) ? { ...c, sectionAnchored: true } : c
+  );
+  let boosted = marked;
   for (const p of sectionPages.slice(0, 2)) {
-    const existing = boosted.find((c) => c.page === p);
-    if (!existing || existing.score < 80) {
-      boosted = boosted.filter((c) => c.page !== p);
-      const pageChunk = chunks.find((c) => c.page === p);
-      if (pageChunk) {
-        boosted.unshift({ ...pageChunk, score: 80 });
-      }
+    // Already in the set — its score is genuine evidence (or a stronger prior),
+    // so leave it alone.
+    if (boosted.some((c) => c.page === p)) continue;
+    const pageChunk = chunks.find((c) => c.page === p);
+    if (pageChunk) {
+      boosted.unshift({
+        ...pageChunk,
+        score: boundedPrior(topLexical, SECTION_BOOST_FACTOR),
+        isBoosted: true,
+        sectionAnchored: true,
+      });
     }
   }
   return boosted;
@@ -1208,13 +1329,18 @@ export async function buildRagContext(
 
   // 3. Base retrieval on the original question first (no expansion), in the
   // configured lexical scoring mode (bm25 by default; tfidf when opted in).
+  // `lexicalCandidates` keeps the PRE-BOOST list — genuine lexical evidence
+  // only — so the quality gate below can never be satisfied by a boost
+  // (issue #65).
   const retrieveStart = Date.now();
-  let candidates = multiQueryRetrieve(chunks, [question], 8, df, scoring);
+  let lexicalCandidates = multiQueryRetrieve(chunks, [question], 8, df, scoring);
+  let candidates = lexicalCandidates;
 
-  // 4. Boost explicitly-referenced pages and mentioned-expansion chunks.
+  // 4. Boost explicitly-referenced pages and mentioned-expansion chunks with
+  // bounded priors (issues #58, #65).
   candidates = boostCandidates(candidates, chunks, explicitPages, expansionNames, question);
 
-  // 4b. Boost the query type's TOC section pages (issue #63).
+  // 4b. Boost the query type's TOC section pages as bounded priors (issues #63, #65).
   candidates = boostSectionPages(candidates, chunks, queryType);
 
   // Base retrieval + gate time only (disjoint from expandMs). The re-retrieval
@@ -1228,10 +1354,21 @@ export async function buildRagContext(
   // for it. Only when the base result is weak AND the question needs expansion
   // do we fire + await the expansion and re-retrieve with the expanded queries,
   // exactly as the pre-#58 pipeline did.
-  const basePassesGate = explicitPages.length > 0 || passesQualityGate(candidates, baseTerms);
+  // The gate is evaluated on the PRE-BOOST list (issue #65): a boost is a prior,
+  // not evidence, so a boosted candidate must never satisfy the gate on its
+  // own. Explicit-page questions no longer skip the re-rank either — their
+  // bounded prior is correctable by the re-ranker.
+  const basePassesGate = passesQualityGate(lexicalCandidates, baseTerms);
+  // A section-anchored query with SOME genuine evidence (top lexical score ≥ 1)
+  // doesn't need expansion: the section boost is a strong prior that the page
+  // is relevant, so re-retrieving with expanded queries would only add noise
+  // and dilute the context budget. The re-rank gate below remains strict
+  // (issue #65): the LLM still gets a chance to correct weak results.
+  const sectionAnchored = QUERY_TYPE_SECTION[queryType] !== undefined;
+  const expansionSkipped = basePassesGate || (sectionAnchored && (lexicalCandidates[0]?.score ?? 0) >= 3);
 
   let queries: string[];
-  if (!basePassesGate && needsExpansion) {
+  if (!expansionSkipped && needsExpansion) {
     // Fire + await the expansion (weak base result). expandQuery catches its own
     // provider errors and falls back to deterministic expansion, so this await
     // never rejects — no fire-and-forget guard is needed. The fast path
@@ -1244,10 +1381,11 @@ export async function buildRagContext(
     timings.expandMs = Date.now() - expandStart;
 
     // Re-retrieve with the expanded queries (timed separately so retrieveMs and
-    // expandMs stay disjoint).
+    // expandMs stay disjoint). Track the pre-boost list for any downstream gate
+    // logic (issue #65): boosts are priors, not evidence.
     const reretrieveStart = Date.now();
-    candidates = multiQueryRetrieve(chunks, expanded, 8, df, scoring);
-    candidates = boostCandidates(candidates, chunks, explicitPages, expansionNames, question);
+    lexicalCandidates = multiQueryRetrieve(chunks, expanded, 8, df, scoring);
+    candidates = boostCandidates(lexicalCandidates, chunks, explicitPages, expansionNames, question);
     candidates = boostSectionPages(candidates, chunks, queryType);
     retrieveMs += Date.now() - reretrieveStart;
     queries = expanded;
@@ -1263,19 +1401,23 @@ export async function buildRagContext(
   // preview and the adaptive context budget so both judge relevance the same way.
   const queryTerms = new Set(queries.flatMap((q) => tokenize(q)));
 
-  // 6. Re-rank — but skip it when it isn't needed: that's a full LLM round
-  // trip (up to 30 s on the local model) saved for easy questions. Skip when
-  // the question names an explicit page (already boosted above), or when the
-  // quality gate fires (see passesQualityGate). When the decision model is
-  // enabled, the quality gate is its fast batched score call (falling back to
-  // the slow LLM re-rank if the model is unavailable). The fast path
-  // (issue #60) skips it unconditionally: prewarm keeps lexical order and
-  // never makes a model call.
-  const rerankStart = Date.now();
-  const rerankSkipped =
-    options?.skipRerank === true ||
-    explicitPages.length > 0 ||
-    passesQualityGate(candidates, queryTerms);
+   // 6. Re-rank — but skip it when it isn't needed: that's a full LLM round
+   // trip (up to 30 s on the local model) saved for easy questions. Skip when
+   // the quality gate fires (see passesQualityGate). Explicit-page questions
+   // are NO LONGER skipped here (issue #65): their bounded prior is correctable
+   // by the re-ranker, so the evidence gets a chance to reorder them. A
+   // section-anchored query with strong genuine evidence (top lexical score ≥ 3)
+   // also skips the re-rank: the section boost is a strong prior that the page
+   // is relevant, and the genuine evidence confirms it — no LLM call needed.
+   // When the decision model is enabled, the quality gate is its fast batched
+   // score call (falling back to the slow LLM re-rank if the model is
+   // unavailable). The fast path (issue #60) skips it unconditionally: prewarm
+   // keeps lexical order and never makes a model call.
+   const rerankStart = Date.now();
+   const rerankSkipped =
+     options?.skipRerank === true ||
+     passesQualityGate(lexicalCandidates, queryTerms) ||
+     (sectionAnchored && (lexicalCandidates[0]?.score ?? 0) >= 3);
   candidates = rerankSkipped
     ? candidates
     : useDecision
