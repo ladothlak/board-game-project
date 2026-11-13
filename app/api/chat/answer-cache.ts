@@ -48,7 +48,10 @@ export function getAnswer(slug: string, question: string) {
  */
 export function storeAnswer(slug: string, question: string, answer: string, citations: { page: number }[]): void {
   const key = answerKey(slug, question);
-  if (answerCache.size >= ANSWER_MAX) {
+  // Evict only when the key is new: `Map.set` on an existing key doesn't grow
+  // the size, so evicting here would drop an unrelated valid entry for no
+  // reason (reachable via two concurrent identical misses that both store).
+  if (!answerCache.has(key) && answerCache.size >= ANSWER_MAX) {
     const oldest = Array.from(answerCache.entries()).sort((a, b) => a[1].ts - b[1].ts)[0];
     if (oldest) answerCache.delete(oldest[0]);
   }

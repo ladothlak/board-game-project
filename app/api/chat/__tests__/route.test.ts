@@ -17,6 +17,23 @@ import { getGame } from "@/lib/games";
 import { buildRagContext } from "@/lib/rag";
 import { getPrewarm } from "../prewarm/route";
 import { resetAnswerCacheForTest } from "../answer-cache";
+import { resetRetrieveCachesForTest } from "@/lib/retrieve";
+
+// The route refreshes the index mtime before consulting the answer cache
+// (issue #56), so `loadIndex()` runs on every request. Mock fs/promises as an
+// in-memory stand-in for public/search-index.json (same pattern as
+// answer-cache.test.ts) so lib/retrieve runs for real without touching disk.
+const indexFile = vi.hoisted(() => ({
+  mtimeMs: 1_000,
+  raw: JSON.stringify({ entries: [] }),
+}));
+
+vi.mock("fs/promises", () => ({
+  default: {
+    stat: vi.fn(async () => ({ mtimeMs: indexFile.mtimeMs })),
+    readFile: vi.fn(async () => indexFile.raw),
+  },
+}));
 
 vi.mock("@/lib/rate-limit", () => ({
   checkRate: vi.fn(() => ({ allowed: true })),
@@ -103,6 +120,11 @@ beforeEach(() => {
   vi.mocked(getGame).mockReset().mockResolvedValue(GAME);
   vi.mocked(buildRagContext).mockReset().mockResolvedValue(RAG_CONTEXT);
   vi.mocked(getPrewarm).mockReset().mockReturnValue(null);
+  // The index file and the retrieve module's mtime cache are per-test
+  // fixtures: reset both so every test starts from a cold, known index.
+  indexFile.mtimeMs = 1_000;
+  indexFile.raw = JSON.stringify({ entries: [] });
+  resetRetrieveCachesForTest();
   // The final-answer cache is module state (issue #56); start every test from
   // a cold cache so earlier successes can't be replayed into later failures.
   resetAnswerCacheForTest();

@@ -17,7 +17,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { POST } from "../route";
-import { resetAnswerCacheForTest } from "../answer-cache";
+import { resetAnswerCacheForTest, storeAnswer, getAnswer } from "../answer-cache";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 import { getGame } from "@/lib/games";
@@ -272,5 +272,42 @@ describe("POST /api/chat answer cache (issue #56)", () => {
     // The fallback was not cached — the repeat re-runs the LLM.
     expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(auditEntries()[1].answerCacheHit).toBeUndefined();
+  });
+});
+
+// ─── Eviction at cap (unit-level) ─────────────────────────────────────────────
+
+describe("storeAnswer eviction at cap (issue #56)", () => {
+  // Must match ANSWER_MAX in answer-cache.ts.
+  const CAP = 100;
+
+  it("does not evict an unrelated entry when re-storing an existing key at cap", async () => {
+    // Fill the cache to its cap with distinct keys.
+    for (let i = 0; i < CAP; i++) {
+      storeAnswer(SLUG, `q${i}`, `answer ${i}`, []);
+    }
+
+    // Re-storing an existing key must not grow the size or drop any entry:
+    // Map.set on an existing key doesn't grow the size, so evicting here would
+    // drop an unrelated valid entry for no reason (two concurrent identical
+    // misses that both store).
+    storeAnswer(SLUG, "q0", "answer 0 (updated)", []);
+
+    // The oldest and newest entries are both still present — nothing was evicted.
+    expect(getAnswer(SLUG, "q0")).not.toBeNull();
+    expect(getAnswer(SLUG, `q${CAP - 1}`)).not.toBeNull();
+  });
+
+  it("evicts the oldest entry when storing a brand-new key at cap", async () => {
+    for (let i = 0; i < CAP; i++) {
+      storeAnswer(SLUG, `q${i}`, `answer ${i}`, []);
+    }
+
+    // A genuinely new key over the cap evicts the oldest entry.
+    storeAnswer(SLUG, "brand-new", "new answer", []);
+
+    expect(getAnswer(SLUG, "q0")).toBeNull(); // oldest evicted
+    expect(getAnswer(SLUG, `q${CAP - 1}`)).not.toBeNull();
+    expect(getAnswer(SLUG, "brand-new")).not.toBeNull();
   });
 });
