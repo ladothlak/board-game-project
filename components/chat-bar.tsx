@@ -373,8 +373,8 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
                 <span />
                 <span />
               </span>
-              // Stage events (issue #57) give sub-second feedback; the 15s
-              // "Still brewing…" line stays as the fallback when none arrive.
+              {/* Stage events (issue #57) give sub-second feedback; the 15s
+                  "Still brewing…" line stays as the fallback when none arrive. */}
               {stage === "retrieving"
                 ? "Finding pages…"
                 : stage === "pages-found" && stagePages.length > 0

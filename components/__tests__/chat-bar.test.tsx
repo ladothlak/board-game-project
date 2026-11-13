@@ -167,6 +167,34 @@ describe("ChatBar", () => {
     await waitFor(() => expect(screen.getByText(/finding pages/i)).toBeInTheDocument());
   });
 
+  it("does not leak source comments into the loading line (issue #57 JSX comment regression)", async () => {
+    const enc = new TextEncoder();
+    // A stream that emits the "retrieving" stage and then stays open: loading
+    // remains true, so the stage line is observable.
+    const sseBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode('data: {"type":"stage","stage":"retrieving"}\n\n'));
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(sseBody, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+      ),
+    );
+
+    render(<ChatBar slug={slug} title={title} />);
+    const input = screen.getByRole("textbox", { name: /ask about/i });
+    await userEvent.type(input, "How do I set up?");
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    await waitFor(() => expect(screen.getByText(/finding pages/i)).toBeInTheDocument());
+    // The loading line must be clean — no leaked `//` source comment. Before the
+    // fix, a `//` comment placed inside this JSX rendered as literal text here.
+    const loadingLine = screen.getByText(/finding pages/i).parentElement!;
+    expect(loadingLine.textContent).not.toMatch(/stage events|still brewing|\/\//i);
+  });
+
   it("fires the prewarm request after 400ms of typing pause (issue #62)", () => {
     // The fetch stub from beforeEach is a plain vi.fn; vi.mocked recovers
     // its call log for assertions. Fake timers keep this deterministic —
