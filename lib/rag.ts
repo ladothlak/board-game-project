@@ -62,7 +62,8 @@ export interface RagContext {
    * The selected pages in retrieval-relevance order — the candidate order
    * after re-rank + cross-ref following, deduplicated with first occurrence
    * kept. Unlike `pages`, this preserves the ranking so metrics like MRR can
-   * be computed over relevance, not page number.
+   * be computed over relevance, not page number. Only contains pages actually
+   * represented in the excerpts: budget-dropped pages are filtered out.
    */
   rankedPages: number[];
   /**
@@ -817,8 +818,9 @@ export function adaptiveContext(
 
   // Pass 1: allocate in relevance order. Each chunk is capped at its allocation
   // and the remaining budget; because the allocations sum to ≤ budget and each
-  // floor is ≤ the remaining budget, every chunk gets at least its floor — one
-  // contiguous sentence window per page.
+  // floor is ≤ the remaining budget, every page gets at least one contiguous
+  // sentence window — though in a pathological short-window case the delivered
+  // chars can fall below MIN_CHUNK_CHARS.
   const delivered: string[] = [];
   let used = 0;
   feasible.forEach((c, i) => {
