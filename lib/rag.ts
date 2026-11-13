@@ -21,6 +21,7 @@ export type QueryType =
   | "specific-rule"
   | "edge-case"
   | "comparison"
+  | "victory"
   | "general";
 
 interface ScoredChunk extends Chunk {
@@ -150,6 +151,7 @@ async function callLlm(
 const TYPE_KEYWORDS: Record<QueryType, string[]> = {
   setup: ["set up", "setup", "prepare", "begin", "start", "place", "deal", "assemble", "arrange"],
   "turn-structure": ["turn", "round", "phase", "order", "sequence", "step", "who goes first"],
+  victory: ["victory", "how do i win", "win condition", "end of the game", "how does the game end", "who wins"],
   "specific-rule": ["how do i", "what happens", "can i", "must i", "do i", "rule"],
   "edge-case": ["if", "when", "exception", "instead", "otherwise", "special", "unique", "only"],
   comparison: ["compare", "difference", "versus", "vs", "which is"],
@@ -159,7 +161,10 @@ const TYPE_KEYWORDS: Record<QueryType, string[]> = {
 /** Classify the question type using keyword heuristics (no LLM call needed). */
 export function classifyQuery(question: string): QueryType {
   const q = question.toLowerCase();
-  for (const type of ["setup", "turn-structure", "edge-case", "comparison", "specific-rule"] as QueryType[]) {
+  // "victory" is checked before "specific-rule": a victory question like
+  // "How do I win?" contains BOTH a specific-rule keyword ("how do i") and a
+  // victory keyword ("how do i win"), so the more specific type must win.
+  for (const type of ["setup", "turn-structure", "edge-case", "comparison", "victory", "specific-rule"] as QueryType[]) {
     if (TYPE_KEYWORDS[type].some((kw) => q.includes(kw))) return type;
   }
   return "general";
@@ -179,6 +184,7 @@ export function classifyQuery(question: string): QueryType {
 const QUERY_TYPE_CRITERIA: Record<QueryType, string> = {
   setup: "Setting up, preparing, placing pieces, starting the game",
   "turn-structure": "Turn order, rounds, phases, who goes first, sequence of play",
+  victory: "Victory conditions, end of game, how to win, final scoring",
   "specific-rule": "A specific rule, action, or what happens when you do something",
   "edge-case": "Exceptions, special situations, if/when conditions, unique cases",
   comparison: "Comparing games, expansions, or options",
@@ -743,7 +749,7 @@ const SECTION_PATTERNS: { name: string; pattern: RegExp }[] = [
   { name: "Core Rules", pattern: /\b(rule|action|play|move|turn)\b/i },
   { name: "Combat / Conflict", pattern: /\b(combat|attack|assault|fight|battle)\b/i },
   { name: "Special Abilities / Keywords", pattern: /\b(ability|keyword|special|unique|trait)\b/i },
-  { name: "Victory / End of Game", pattern: /\b(victory|win|end|defeat|lose|score)\b/i },
+  { name: "Victory / End of Game", pattern: /\b(victory|win|end|defeat|lose|score|scoring|objective|goal|endgame)\b/i },
   { name: "Reference / Quick Play", pattern: /\b(reference|quick|cheat|summary|card)\b/i },
 ];
 
@@ -846,7 +852,40 @@ export function detectExplicitPages(question: string): number[] {
 const QUERY_TYPE_SECTION: Partial<Record<QueryType, string>> = {
   setup: "Setup",
   "turn-structure": "Game Structure / Turn Order",
+  victory: "Victory / End of Game",
 };
+
+/**
+ * Boost the query type's TOC section pages into the candidate set (issue #63):
+ * anchor retrieval to the classified question type's section so the page that
+ * answers the question is always in the candidate set, even when lexical
+ * retrieval can't discriminate a common-word query. Capped at 2 pages per
+ * section to avoid consuming the entire context budget. Pages already surfaced
+ * by base retrieval (including ones boosted by an explicit page reference or a
+ * mentioned expansion) are left alone — the boost pulls a missing section page
+ * IN, it doesn't re-rank one that's already in the set.
+ */
+function boostSectionPages(
+  candidates: ScoredChunk[],
+  chunks: Chunk[],
+  queryType: QueryType
+): ScoredChunk[] {
+  const sectionName = QUERY_TYPE_SECTION[queryType];
+  if (!sectionName) return candidates;
+  const sectionPages = findSectionPages(chunks, sectionName);
+  let boosted = candidates;
+  for (const p of sectionPages.slice(0, 2)) {
+    const existing = boosted.find((c) => c.page === p);
+    if (!existing || existing.score < 80) {
+      boosted = boosted.filter((c) => c.page !== p);
+      const pageChunk = chunks.find((c) => c.page === p);
+      if (pageChunk) {
+        boosted.unshift({ ...pageChunk, score: 80 });
+      }
+    }
+  }
+  return boosted;
+}
 
 /**
  * The full enhanced RAG pipeline:
@@ -965,31 +1004,8 @@ export async function buildRagContext(
   // 4. Boost explicitly-referenced pages and mentioned-expansion chunks.
   candidates = boostCandidates(candidates, chunks, explicitPages, expansionNames, question);
 
-  // 4b. Boost the query type's TOC section pages (issue #63): anchor retrieval
-  // to the classified question type's section so the page that answers the
-  // question is always in the candidate set, even when lexical retrieval can't
-  // discriminate a common-word query. Capped at 2 pages per section to avoid
-  // consuming the entire context budget. Pages already surfaced by base
-  // retrieval (including ones boosted by an explicit page reference or a
-  // mentioned expansion) are left alone — the boost pulls a missing section
-  // page IN, it doesn't re-rank one that's already in the set.
-  const sectionName = QUERY_TYPE_SECTION[queryType];
-  if (sectionName) {
-    const sectionPages = findSectionPages(chunks, sectionName);
-    for (const p of sectionPages.slice(0, 2)) {
-      const existing = candidates.find((c) => c.page === p);
-      // Boost if the page is absent or its score is below the section-boost threshold.
-      // An explicit-page boost (score 100) or expansion boost (score 90) is left alone.
-      if (!existing || existing.score < 80) {
-        candidates = candidates.filter((c) => c.page !== p);
-        const pageChunk = chunks.find((c) => c.page === p);
-        if (pageChunk) {
-          const sectionBoost: ScoredChunk = { ...pageChunk, score: 80 };
-          candidates.unshift(sectionBoost);
-        }
-      }
-    }
-  }
+  // 4b. Boost the query type's TOC section pages (issue #63).
+  candidates = boostSectionPages(candidates, chunks, queryType);
 
   // Base retrieval + gate time only (disjoint from expandMs). The re-retrieval
   // in the weak path below is timed separately and added on, so the two spans
@@ -1022,6 +1038,7 @@ export async function buildRagContext(
     const reretrieveStart = Date.now();
     candidates = multiQueryRetrieve(chunks, expanded, 8, df, scoring);
     candidates = boostCandidates(candidates, chunks, explicitPages, expansionNames, question);
+    candidates = boostSectionPages(candidates, chunks, queryType);
     retrieveMs += Date.now() - reretrieveStart;
     queries = expanded;
   } else {

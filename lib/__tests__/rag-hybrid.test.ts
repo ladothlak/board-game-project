@@ -175,15 +175,17 @@ describe("buildRagContext hybrid mode (issue #59)", () => {
   });
 
   it("falls back to the full LLM pipeline when confidence is below the threshold", async () => {
-    // Pinned low-confidence fixture (rag-pipeline.test.ts): "How do I win?"
-    // only weakly matches the victory chunk, and with every fetch rejected the
-    // raw (low) tfidf score carries through — confidence < 0.25. The question
-    // is short, so no expansion fires in any arm; each arm makes exactly one
-    // LLM re-rank attempt (which fails and falls back to the raw scores).
+    // Pinned low-confidence fixture (rag-pipeline.test.ts): "How do we win?"
+    // only weakly matches the victory chunk (it classifies as a general
+    // question, so no section-anchored boost fires), and with every fetch
+    // rejected the raw (low) tfidf score carries through — confidence < 0.25.
+    // The question is short, so no expansion fires in any arm; each arm makes
+    // exactly one LLM re-rank attempt (which fails and falls back to the raw
+    // scores).
     mockFetch.mockRejectedValue(new Error("provider down"));
 
     // Reference: the full pipeline run on its own.
-    const direct = await buildRagContext(SLUG, "How do I win?", KEY, undefined, {
+    const direct = await buildRagContext(SLUG, "How do we win?", KEY, undefined, {
       useDecisionModel: false,
       scoring: "tfidf",
     });
@@ -193,7 +195,7 @@ describe("buildRagContext hybrid mode (issue #59)", () => {
     // The hybrid run must make the extra decision-model attempts of its first
     // arm AND a second, full-pipeline arm.
     mockFetch.mockReset();
-    const hybrid = await buildRagContext(SLUG, "How do I win?", KEY, undefined, {
+    const hybrid = await buildRagContext(SLUG, "How do we win?", KEY, undefined, {
       useHybrid: true,
       scoring: "tfidf",
     });

@@ -156,13 +156,14 @@ describe("buildRagContext", () => {
   it("reports low confidence below the fallback threshold when retrieval is weak and re-ranking fails", async () => {
     mockFetch.mockRejectedValue(new Error("provider down"));
 
-    // "How do I win?" only weakly matches the victory chunk, and with the
-    // LLM unavailable the raw (low) score carries through. Pinned to the
-    // legacy "tfidf" scorer: under the default BM25 weighting this exact
-    // fixture scores 2.537 (confidence 0.254), just above the threshold, so
-    // it no longer exercises the low-confidence path. The fallback logic
-    // itself is scorer-agnostic (estimateConfidence + the chat route).
-    const result = await buildRagContext(SLUG, "How do I win?", KEY, undefined, {
+    // "How do we win?" only weakly matches the victory chunk (it classifies as
+    // a general question, so no section-anchored boost fires), and with the LLM
+    // unavailable the raw (low) score carries through. Pinned to the legacy
+    // "tfidf" scorer: under tfidf this fixture scores 1.654 (confidence 0.165),
+    // below the threshold, so it exercises the low-confidence path. The
+    // fallback logic itself is scorer-agnostic (estimateConfidence + the chat
+    // route).
+    const result = await buildRagContext(SLUG, "How do we win?", KEY, undefined, {
       scoring: "tfidf",
     });
 
@@ -289,15 +290,17 @@ describe("buildRagContext", () => {
 
     const result = await buildRagContext(SLUG, "How do I deal with enemy attacks?", KEY);
 
-    // Expansion ran; re-ranking was skipped because the merged TF-IDF
-    // winner is clear enough not to need the LLM tie-breaker.
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // Expansion ran; the section boost (setup → p.1) pulls in a page that
+    // doesn't contain the query terms, so the quality gate fails and the
+    // re-rank fires as a second LLM call.
+    expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(expansionCalls()).toBe(1);
 
-    // Each variant matched a different page; both made it into the context.
+    // Each variant matched a different page; both made it into the context
+    // along with the section-boosted setup page.
     expect(result.excerpts).toContain("--- Page 2 ---");
     expect(result.excerpts).toContain("--- Page 4 ---");
-    expect(result.pages).toEqual([2, 4]);
+    expect(result.pages).toEqual([1, 2, 4]);
   });
 
   it("follows cross-references and includes the referenced page in the final context", async () => {
@@ -335,7 +338,10 @@ describe("buildRagContext", () => {
     expect(result.toc).not.toContain("p. 3: You win when all enemies are destroyed in the game.");
 
     // The resolved query type is threaded out for per-question budgeting.
-    expect(result.queryType).toBe("specific-rule");
+    // "How do I win?" classifies as a victory question (the victory type takes
+    // precedence over specific-rule in classifyQuery), so that's the type
+    // threaded out here.
+    expect(result.queryType).toBe("victory");
   });
 });
 

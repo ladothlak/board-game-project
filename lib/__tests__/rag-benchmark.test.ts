@@ -90,6 +90,47 @@ const DATASET: Case[] = [
   { slug: "root", question: "How do I use a card for crafting?", expectedType: "specific-rule", expectedPages: [7] },
   { slug: "root", question: "What are clearings and slots on the map?", expectedType: "specific-rule", expectedPages: [6] },
   { slug: "root", question: "How does the Marquise score victory points?", expectedType: "specific-rule", expectedPages: [10] },
+  // Anachrony
+  { slug: "anachrony", question: "How do I set up the game?", expectedType: "setup", expectedPages: [3] },
+  { slug: "anachrony", question: "How do I win?", expectedType: "victory", expectedPages: [10, 11] },
+  { slug: "anachrony", question: "What happens when I get a third Paradox token?", expectedType: "edge-case", expectedPages: [5] },
+  { slug: "anachrony", question: "What happens during the Clean Up phase?", expectedType: "turn-structure", expectedPages: [6] },
+  // Betrayal at House on the Hill
+  { slug: "betrayal-at-house-on-the-hill", question: "How do I set up the game?", expectedType: "setup", expectedPages: [3] },
+  { slug: "betrayal-at-house-on-the-hill", question: "How do I win the haunt?", expectedType: "victory", expectedPages: [9] },
+  { slug: "betrayal-at-house-on-the-hill", question: "What happens during combat?", expectedType: "specific-rule", expectedPages: [8] },
+  { slug: "betrayal-at-house-on-the-hill", question: "How do I draw Event, Item, and Omen cards?", expectedType: "turn-structure", expectedPages: [6] },
+  // Brass: Birmingham
+  { slug: "brass-birmingham", question: "How do I set up the game?", expectedType: "setup", expectedPages: [3] },
+  { slug: "brass-birmingham", question: "How do I win?", expectedType: "victory", expectedPages: [6, 7] },
+  { slug: "brass-birmingham", question: "How does the Build action work?", expectedType: "specific-rule", expectedPages: [5] },
+  { slug: "brass-birmingham", question: "How does the Sell action work?", expectedType: "specific-rule", expectedPages: [6] },
+  // Castles of Burgundy
+  { slug: "castles-of-burgundy", question: "How do I set up the game?", expectedType: "setup", expectedPages: [5] },
+  { slug: "castles-of-burgundy", question: "How do I win?", expectedType: "victory", expectedPages: [12] },
+  { slug: "castles-of-burgundy", question: "What are the game phases?", expectedType: "turn-structure", expectedPages: [6] },
+  { slug: "castles-of-burgundy", question: "How do I sell goods?", expectedType: "specific-rule", expectedPages: [10] },
+  // Coup
+  { slug: "coup", question: "How do I win?", expectedType: "victory", expectedPages: [1] },
+  { slug: "coup", question: "What actions can I take?", expectedType: "specific-rule", expectedPages: [1] },
+  // Kabuto Sumo
+  { slug: "kabuto-sumo", question: "How do I set up the game?", expectedType: "setup", expectedPages: [2] },
+  { slug: "kabuto-sumo", question: "How do I win?", expectedType: "victory", expectedPages: [3, 4] },
+  { slug: "kabuto-sumo", question: "What happens on my turn?", expectedType: "turn-structure", expectedPages: [3] },
+  // Nemesis: Retaliation
+  { slug: "nemesis-retaliation", question: "How do I set up the game?", expectedType: "setup", expectedPages: [8, 10] },
+  { slug: "nemesis-retaliation", question: "How does the game end?", expectedType: "victory", expectedPages: [9] },
+  { slug: "nemesis-retaliation", question: "What happens during a player's turn?", expectedType: "turn-structure", expectedPages: [12] },
+  { slug: "nemesis-retaliation", question: "How do intruders move?", expectedType: "specific-rule", expectedPages: [30] },
+  // Puerto Rico
+  { slug: "puerto-rico", question: "How do I set up the game?", expectedType: "setup", expectedPages: [6, 7] },
+  { slug: "puerto-rico", question: "How do I win?", expectedType: "victory", expectedPages: [33] },
+  { slug: "puerto-rico", question: "What happens during the Craftsman phase?", expectedType: "turn-structure", expectedPages: [12] },
+  { slug: "puerto-rico", question: "How do I build a building?", expectedType: "specific-rule", expectedPages: [18] },
+  // Tacta
+  { slug: "tacta", question: "How do I set up the game?", expectedType: "setup", expectedPages: [3] },
+  { slug: "tacta", question: "How do I win?", expectedType: "victory", expectedPages: [6] },
+  { slug: "tacta", question: "How do I place my cards?", expectedType: "specific-rule", expectedPages: [4] },
 ];
 
 // ─── Metrics ────────────────────────────────────────────────────────────────
