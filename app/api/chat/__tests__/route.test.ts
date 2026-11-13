@@ -384,4 +384,36 @@ describe("POST /api/chat in-flight prewarm deduplication (issue #60)", () => {
 
     expect(buildRagContext).toHaveBeenCalledTimes(1);
   });
+
+  it("builds its own context when the in-flight prewarm rejects (no 502)", async () => {
+    // The in-flight prewarm build failed: the route must fall back to
+    // building this request's own context instead of failing the whole
+    // request with a misleading provider error.
+    vi.mocked(getInflightPrewarm).mockReturnValue(
+      Promise.reject(new Error("prewarm build failed"))
+    );
+    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    const text = await res.text();
+
+    // The request succeeded by building its own context...
+    expect(buildRagContext).toHaveBeenCalledTimes(1);
+    // ...and streamed tokens plus the done frame — no error frame.
+    expect(text).toContain("type\":\"token\"");
+    expect(text).toContain("type\":\"done\"");
+    expect(text).not.toContain("type\":\"error\"");
+
+    const entry = auditEntry();
+    expect(entry.status).toBe(200);
+    // The prewarm never materialized, so the audit line is a non-hit with
+    // the RAG stage durations from this request's own build.
+    expect(entry.prewarmHit).toBe(false);
+    expect(entry.stages).toEqual({
+      expandMs: 12,
+      retrieveMs: 34,
+      rerankMs: 56,
+      firstTokenMs: expect.any(Number),
+    });
+  });
 });

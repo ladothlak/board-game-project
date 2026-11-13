@@ -963,11 +963,11 @@ export async function buildRagContext(
   // (issue #60) skips it unconditionally: prewarm keeps lexical order and
   // never makes a model call.
   const rerankStart = Date.now();
-  const skipRerank =
+  const rerankSkipped =
     options?.skipRerank === true ||
     explicitPages.length > 0 ||
     passesQualityGate(candidates, queryTerms);
-  candidates = skipRerank
+  candidates = rerankSkipped
     ? candidates
     : useDecision
       ? (await decisionRerank(question, candidates, queryTerms, df, chunks.length)) ??

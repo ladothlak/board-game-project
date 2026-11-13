@@ -86,56 +86,62 @@ export async function POST(req: Request) {
     return NextResponse.json({ status: "blocked" }, { status: 200 });
   }
 
+  // Deduplication (issue #60): register the in-flight build synchronously in
+  // the handler's first tick — before any await — so two concurrent prewarms
+  // for the same question can't interleave through an await window and start
+  // a second RAG build. If a build for this exact question is already in
+  // flight, await it instead of starting one.
+  const q = question.trim();
+  const key = prewarmKey(slug, q);
+  let inflight = inflightPrewarms.get(key);
+  if (!inflight) {
+    // Fast path only (issue #60): deterministic expansion, no re-rank, and
+    // keyword classification — zero model calls, so prewarm never touches
+    // the main model's single-flight queue. Its job is to be cheap and fast,
+    // not perfect: the chat route remains the quality bar. The fast-path
+    // context is what the cache stores, so a prewarm hit stays exactly as
+    // good as before.
+    inflight = buildRagContext(slug, q, process.env.UNSLOTH_API_KEY ?? "", undefined, {
+      useDecisionModel: false,
+      expansionMode: "deterministic",
+      skipRerank: true,
+    }).then((rag) => {
+      // Evict oldest if over cap.
+      if (prewarmCache.size >= PREWARM_MAX) {
+        const oldest = Array.from(prewarmCache.entries()).sort((a, b) => a[1].ts - b[1].ts)[0];
+        if (oldest) prewarmCache.delete(oldest[0]);
+      }
+
+      prewarmCache.set(key, {
+        context: rag.excerpts,
+        toc: rag.toc,
+        confidence: rag.confidence,
+        ts: Date.now(),
+      });
+      return rag;
+    }).finally(() => {
+      // Drop the in-flight entry once settled (success or failure) so a
+      // later request starts a fresh build instead of awaiting a dead one.
+      inflightPrewarms.delete(key);
+    });
+    inflightPrewarms.set(key, inflight);
+  }
+
   const game = await getGame(slug);
   if (!game) {
+    // Abandon the registered promise (harmless — the fast path makes no
+    // model calls) and clean up the map entry.
+    inflightPrewarms.delete(key);
     return NextResponse.json({ status: "not_found" }, { status: 404 });
   }
 
   const apiKey = process.env.UNSLOTH_API_KEY;
   if (!apiKey) {
+    inflightPrewarms.delete(key);
     return NextResponse.json({ status: "no_key" }, { status: 500 });
   }
 
   try {
-    const q = question.trim();
-    const key = prewarmKey(slug, q);
-
-    // Deduplication (issue #60): if a build for this exact question is already
-    // in flight, await it instead of starting a second RAG build.
-    let inflight = inflightPrewarms.get(key);
-    if (!inflight) {
-      // Fast path only (issue #60): deterministic expansion, no re-rank, and
-      // keyword classification — zero model calls, so prewarm never touches
-      // the main model's single-flight queue. Its job is to be cheap and fast,
-      // not perfect: the chat route remains the quality bar. The fast-path
-      // context is what the cache stores, so a prewarm hit stays exactly as
-      // good as before.
-      inflight = buildRagContext(slug, q, apiKey, undefined, {
-        useDecisionModel: false,
-        expansionMode: "deterministic",
-        skipRerank: true,
-      }).then((rag) => {
-        // Evict oldest if over cap.
-        if (prewarmCache.size >= PREWARM_MAX) {
-          const oldest = Array.from(prewarmCache.entries()).sort((a, b) => a[1].ts - b[1].ts)[0];
-          if (oldest) prewarmCache.delete(oldest[0]);
-        }
-
-        prewarmCache.set(key, {
-          context: rag.excerpts,
-          toc: rag.toc,
-          confidence: rag.confidence,
-          ts: Date.now(),
-        });
-        return rag;
-      }).finally(() => {
-        // Drop the in-flight entry once settled (success or failure) so a
-        // later request starts a fresh build instead of awaiting a dead one.
-        inflightPrewarms.delete(key);
-      });
-      inflightPrewarms.set(key, inflight);
-    }
-
     await inflight;
     return NextResponse.json({ status: "warmed" }, { status: 200 });
   } catch {

@@ -161,9 +161,9 @@ export async function POST(req: Request) {
         // of starting a second RAG build. The fast-path context it produces is
         // what the prewarm cache stores, so it stands in for a prewarm hit.
         const inflight = prewarmed ? null : getInflightPrewarm(slug, question.trim());
-        let context: string;
-        let toc: string;
-        let ragConfidence: number;
+        let context: string | undefined;
+        let toc: string | undefined;
+        let ragConfidence: number | undefined;
         // The pages retrieval surfaced, for the "pages-found" stage event. A
         // prewarm hit has no page list (the cache stores only the context),
         // so that stage is skipped there; an in-flight prewarm DOES carry one.
@@ -175,13 +175,24 @@ export async function POST(req: Request) {
           toc = prewarmed.toc;
           ragConfidence = prewarmed.confidence;
         } else if (inflight) {
-          prewarmHit = true;
-          const rag = await inflight;
-          context = rag.excerpts;
-          toc = rag.toc;
-          ragConfidence = rag.confidence;
-          pages = rag.pages;
-        } else {
+          // Await the in-flight build with a local guard: if it rejected, fall
+          // back to building this request's own context below so the real
+          // question can still succeed.
+          try {
+            const rag = await inflight;
+            prewarmHit = true;
+            context = rag.excerpts;
+            toc = rag.toc;
+            ragConfidence = rag.confidence;
+            pages = rag.pages;
+          } catch {
+            // The in-flight prewarm failed: fall through to the self-build
+            // below. prewarmHit stays false so the audit line doesn't claim a
+            // hit for a context that never materialized.
+          }
+        }
+
+        if (context === undefined) {
           const expNames = (game.expansions ?? []).filter((e) => e.inChatContext).map((e) => e.name);
           // Default-on: use the fast decision model for classification + relevance
           // scoring (see PERFORMANCE-PLAN.md, "Decision-model RAG"). Set
@@ -204,8 +215,9 @@ export async function POST(req: Request) {
         if (pages && pages.length > 0) send({ type: "stage", stage: "pages-found", pages });
 
         // Low-confidence fallback: if retrieval was weak, note it in the prompt.
+        // (ragConfidence is always defined here — every branch above assigns it.)
         const confidenceNote =
-          ragConfidence < 0.25
+          (ragConfidence ?? 0) < 0.25
             ? " NOTE: The rulebook excerpts below may not directly cover this question. If you cannot find a clear answer, say so and suggest which page the player should check."
             : "";
 

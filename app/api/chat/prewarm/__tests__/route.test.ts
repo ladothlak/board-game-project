@@ -204,4 +204,20 @@ describe("POST /api/chat/prewarm in-flight deduplication", () => {
     expect(getInflightPrewarm(SLUG, QUESTION)).toBeNull();
     expect(getPrewarm(SLUG, QUESTION)).not.toBeNull();
   });
+
+  it("cleans up the in-flight entry when the build fails, so a follow-up starts fresh", async () => {
+    vi.mocked(buildRagContext).mockRejectedValue(new Error("prewarm build failed"));
+
+    const res = await post({ slug: SLUG, question: QUESTION });
+    expect(await res.json()).toEqual({ status: "error" });
+
+    // The dead in-flight entry is gone...
+    expect(getInflightPrewarm(SLUG, QUESTION)).toBeNull();
+
+    // ...and a follow-up request starts a fresh build that succeeds.
+    vi.mocked(buildRagContext).mockResolvedValue(RAG_CONTEXT);
+    const second = await post({ slug: SLUG, question: QUESTION });
+    expect(await second.json()).toEqual({ status: "warmed" });
+    expect(buildRagContext).toHaveBeenCalledTimes(2);
+  });
 });
