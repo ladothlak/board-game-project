@@ -195,8 +195,11 @@ describe("RAG decision-model benchmark", () => {
   it("compares retrieval effectiveness across the full dataset (live only)", { skip: !LIVE, timeout: 1_500_000 }, async () => {
     // The core question of the benchmark: for each labelled question, does each
     // pipeline pull the right documentation into the answer context? We run
-    // BOTH pipelines on every case and report per-case results (so the wins and
-    // losses are visible, not just averaged away) plus aggregate metrics.
+    // ALL THREE configurations on every case and report per-case results (so
+    // the wins and losses are visible, not just averaged away) plus aggregate
+    // metrics: the existing pipeline, the decision-model-enhanced pipeline,
+    // and the hybrid (decision model by default, full LLM pipeline when its
+    // confidence is below HYBRID_CONFIDENCE_THRESHOLD — issue #59).
     //
     // Metrics measure what the LLM actually sees, not page-number order:
     //   - in-context hit rate — any expected page is in the selected page set
@@ -211,12 +214,16 @@ describe("RAG decision-model benchmark", () => {
       c: Case;
       baseMs: number;
       enhMs: number;
+      hybridMs: number;
       basePages: number[];
       enhPages: number[];
+      hybridPages: number[];
       baseRanked: number[];
       enhRanked: number[];
+      hybridRanked: number[];
       baseExcerpts: string;
       enhExcerpts: string;
+      hybridExcerpts: string;
     }
     const rows: Row[] = [];
 
@@ -227,16 +234,27 @@ describe("RAG decision-model benchmark", () => {
       const enh = await timed(() =>
         buildRagContext(c.slug, c.question, KEY, undefined, { useDecisionModel: true })
       );
+      // The hybrid arm (issue #59): decision model by default, full LLM
+      // pipeline when its confidence is below the threshold. It runs through
+      // buildRagContext like the other arms, so it picks up the current
+      // defaults automatically.
+      const hybrid = await timed(() =>
+        buildRagContext(c.slug, c.question, KEY, undefined, { useHybrid: true })
+      );
       rows.push({
         c,
         baseMs: base.ms,
         enhMs: enh.ms,
+        hybridMs: hybrid.ms,
         basePages: base.value.pages,
         enhPages: enh.value.pages,
+        hybridPages: hybrid.value.pages,
         baseRanked: base.value.rankedPages,
         enhRanked: enh.value.rankedPages,
+        hybridRanked: hybrid.value.rankedPages,
         baseExcerpts: base.value.excerpts,
         enhExcerpts: enh.value.excerpts,
+        hybridExcerpts: hybrid.value.excerpts,
       });
     }
 
@@ -251,25 +269,30 @@ describe("RAG decision-model benchmark", () => {
 
     console.log("\n──────── RAG benchmark: retrieval effectiveness (LIVE) ────────");
     console.log(`cases: ${rows.length}`);
-    console.log("idx  slug               question                                        exp      existing top-3 (rel.)   ctx exc | enhanced top-3 (rel.)   ctx exc");
+    console.log("idx  slug               question                                        exp      existing top-3 (rel.)   ctx exc | enhanced top-3 (rel.)   ctx exc | hybrid top-3 (rel.)   ctx exc");
     rows.forEach((r, i) => {
       console.log(
-        `${String(i + 1).padStart(3)}  ${r.c.slug.padEnd(17)} ${r.c.question.slice(0, 52).padEnd(52)} [${r.c.expectedPages.join(",")}]   ${fmtPages(r.baseRanked).padEnd(16)}${inContext(r.basePages, r.c.expectedPages)} ${inExcerpts(r.baseExcerpts, r.c.expectedPages)} | ${fmtPages(r.enhRanked).padEnd(16)}${inContext(r.enhPages, r.c.expectedPages)} ${inExcerpts(r.enhExcerpts, r.c.expectedPages)}`
+        `${String(i + 1).padStart(3)}  ${r.c.slug.padEnd(17)} ${r.c.question.slice(0, 52).padEnd(52)} [${r.c.expectedPages.join(",")}]   ${fmtPages(r.baseRanked).padEnd(16)}${inContext(r.basePages, r.c.expectedPages)} ${inExcerpts(r.baseExcerpts, r.c.expectedPages)} | ${fmtPages(r.enhRanked).padEnd(16)}${inContext(r.enhPages, r.c.expectedPages)} ${inExcerpts(r.enhExcerpts, r.c.expectedPages)} | ${fmtPages(r.hybridRanked).padEnd(16)}${inContext(r.hybridPages, r.c.expectedPages)} ${inExcerpts(r.hybridExcerpts, r.c.expectedPages)}`
       );
     });
 
     const baseCtxHits = rows.map((r) => (inContext(r.basePages, r.c.expectedPages) === "✓" ? 1 : 0));
     const enhCtxHits = rows.map((r) => (inContext(r.enhPages, r.c.expectedPages) === "✓" ? 1 : 0));
+    const hybridCtxHits = rows.map((r) => (inContext(r.hybridPages, r.c.expectedPages) === "✓" ? 1 : 0));
     const baseExcHits = rows.map((r) => (inExcerpts(r.baseExcerpts, r.c.expectedPages) === "✓" ? 1 : 0));
     const enhExcHits = rows.map((r) => (inExcerpts(r.enhExcerpts, r.c.expectedPages) === "✓" ? 1 : 0));
+    const hybridExcHits = rows.map((r) => (inExcerpts(r.hybridExcerpts, r.c.expectedPages) === "✓" ? 1 : 0));
     // Ranking metrics over relevance order (`rankedPages`), not page number.
     const baseMrr = rows.map((r) => reciprocalRank(r.baseRanked, r.c.expectedPages));
     const enhMrr = rows.map((r) => reciprocalRank(r.enhRanked, r.c.expectedPages));
+    const hybridMrr = rows.map((r) => reciprocalRank(r.hybridRanked, r.c.expectedPages));
     const baseRecall = rows.map((r) => recallAtK(r.baseRanked, r.c.expectedPages));
     const enhRecall = rows.map((r) => recallAtK(r.enhRanked, r.c.expectedPages));
+    const hybridRecall = rows.map((r) => recallAtK(r.hybridRanked, r.c.expectedPages));
 
     console.log(`existing pipeline — in-context ${pct(baseCtxHits)} | in-excerpts ${pct(baseExcHits)} | MRR (ranked) ${pct(baseMrr)} | recall@3 (ranked) ${pct(baseRecall)} | latency ~${avg(rows.map((r) => r.baseMs)).toFixed(0)} ms`);
     console.log(`enhanced pipeline — in-context ${pct(enhCtxHits)} | in-excerpts ${pct(enhExcHits)} | MRR (ranked) ${pct(enhMrr)} | recall@3 (ranked) ${pct(enhRecall)} | latency ~${avg(rows.map((r) => r.enhMs)).toFixed(0)} ms`);
+    console.log(`hybrid pipeline   — in-context ${pct(hybridCtxHits)} | in-excerpts ${pct(hybridExcHits)} | MRR (ranked) ${pct(hybridMrr)} | recall@3 (ranked) ${pct(hybridRecall)} | latency ~${avg(rows.map((r) => r.hybridMs)).toFixed(0)} ms`);
 
     // Count the divergent cases explicitly: where one mode puts an answer page
     // in context and the other does not.
@@ -281,6 +304,7 @@ describe("RAG decision-model benchmark", () => {
     // Harness sanity: metrics are well-defined proportions.
     expect(baseMrr.every((x) => x >= 0 && x <= 1)).toBe(true);
     expect(enhMrr.every((x) => x >= 0 && x <= 1)).toBe(true);
+    expect(hybridMrr.every((x) => x >= 0 && x <= 1)).toBe(true);
     expect(rows.length).toBe(DATASET.length);
   });
 

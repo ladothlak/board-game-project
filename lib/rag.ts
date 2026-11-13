@@ -77,6 +77,15 @@ export interface RagOptions {
    */
   useDecisionModel?: boolean;
   /**
+   * Hybrid configuration (issue #59): run the decision-model pipeline and,
+   * when its confidence estimate drops below HYBRID_CONFIDENCE_THRESHOLD,
+   * re-run the full LLM pipeline and return THAT result instead. Keeps the
+   * latency win on easy questions while retaining the reasoning model for the
+   * hard ones. Opt-in — defaults to false so no behavioral change ships until
+   * the decision-model re-evaluation is complete and recorded.
+   */
+  useHybrid?: boolean;
+  /**
    * Lexical scoring mode for the base retrieval stage ("tfidf" or "bm25").
    * Defaults to "bm25" (promoted by the A/B benchmark, issue #51 — see
    * PERFORMANCE-PLAN.md §Tier 4); "tfidf" opts into the historical
@@ -674,6 +683,14 @@ export function adaptiveContext(
 // ─── 7. Citation Confidence ────────────────────────────────────────────────
 
 /**
+ * Confidence floor for the hybrid configuration (issue #59): when the
+ * decision-model pipeline's own confidence estimate drops below this, its
+ * retrieval was weak enough that the full LLM pipeline gets a chance to
+ * answer instead. Named so the threshold is tunable in one place.
+ */
+export const HYBRID_CONFIDENCE_THRESHOLD = 0.25;
+
+/**
  * Estimate retrieval confidence (0-1) based on how well the top chunks score
  * relative to the maximum possible. Used to decide whether to answer or say
  * "this isn't covered in the rulebook."
@@ -786,6 +803,27 @@ export async function buildRagContext(
   expansionNames?: string[],
   options?: RagOptions
 ): Promise<RagContext> {
+  // Hybrid configuration (issue #59): the decision-model pipeline by default,
+  // falling back to the full LLM pipeline when its confidence estimate is low.
+  // Opt-in — OFF by default so no behavioral change ships until the
+  // re-evaluation decision is made and recorded. The inner calls below must
+  // NOT carry `useHybrid`, or this would recurse forever.
+  if (options?.useHybrid === true) {
+    const inner: RagOptions = { ...options, useHybrid: undefined };
+    const decision = await buildRagContext(slug, question, apiKey, expansionNames, {
+      ...inner,
+      useDecisionModel: true,
+    });
+    if (decision.confidence < HYBRID_CONFIDENCE_THRESHOLD) {
+      // Weak retrieval — hand the question to the full LLM pipeline.
+      return buildRagContext(slug, question, apiKey, expansionNames, {
+        ...inner,
+        useDecisionModel: false,
+      });
+    }
+    return decision;
+  }
+
   const useDecision = options?.useDecisionModel === true;
   // Lexical scoring mode for the base retrieval stage. Defaults to "bm25"
   // (promoted by the A/B benchmark, issue #51); "tfidf" opts into the
