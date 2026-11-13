@@ -315,4 +315,26 @@ describe("POST /api/chat stage events (issue #57)", () => {
     // ...but no 'pages-found' frame appears.
     expect(events.find((e) => e.type === "stage" && e.stage === "pages-found")).toBeUndefined();
   });
+
+  it("skips 'pages-found' when the RAG context has no pages", async () => {
+    // An empty index or zero retrieval hits make buildRagContext return
+    // `pages: []`. The route must not emit a useless `pages: []` frame — the
+    // protocol says 'pages-found' is skipped when pages is empty.
+    vi.mocked(buildRagContext).mockResolvedValue({ ...RAG_CONTEXT, pages: [] });
+    mockFetch.mockResolvedValue(sseResponse([
+      sseChunk("Hello"),
+      "data: [DONE]\n\n",
+    ]));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    const events = await sseEvents(res);
+
+    // 'retrieving' is still the very first frame...
+    expect(events[0]).toEqual({ type: "stage", stage: "retrieving" });
+    // ...but no 'pages-found' frame appears for an empty page list.
+    expect(events.find((e) => e.type === "stage" && e.stage === "pages-found")).toBeUndefined();
+    // Tokens and the final done frame still flow normally.
+    expect(events.some((e) => e.type === "token")).toBe(true);
+    expect(events.some((e) => e.type === "done")).toBe(true);
+  });
 });

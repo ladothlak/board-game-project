@@ -184,8 +184,10 @@ export async function POST(req: Request) {
         }
 
         // Stage event (issue #57): right after the RAG context is ready, so the
-        // client can show which pages the answer will draw on.
-        if (pages) send({ type: "stage", stage: "pages-found", pages });
+        // client can show which pages the answer will draw on. Skipped when the
+        // page list is empty — an empty index or zero retrieval hits would
+        // otherwise emit a useless `pages: []` frame.
+        if (pages && pages.length > 0) send({ type: "stage", stage: "pages-found", pages });
 
         // Low-confidence fallback: if retrieval was weak, note it in the prompt.
         const confidenceNote =
