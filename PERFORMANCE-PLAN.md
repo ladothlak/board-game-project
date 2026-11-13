@@ -290,15 +290,46 @@ generation.
   - `decisionRerank()` replaces the LLM re-rank with one batched `score` call
     over all candidates, combined with TF-IDF using the same 3:1 weighting as
     `rerank()`, so orderings stay comparable.
-- Both chat routes pass `{ useDecisionModel: USE_DECISION_MODEL === "1" }`
-  (env opt-in, default off).
+- Both chat routes default to the decision model and keep an env override for
+  clean A/B benchmarking: `USE_DECISION_MODEL=0` disables it, `1` (or unset)
+  enables it. See the 2026-11-13 re-baseline below for why the default
+  flipped.
 
-**Benchmark** (`lib/__tests__/rag-benchmark.test.ts`; live numbers from the
-2026-11-12 re-baseline against the real endpoints, 32-case labeled dataset
-grounded in all five rulebooks — Agricola, Catan, Container, Nemesis:
-Lockdown, Root). The retrieval metrics below measure what the LLM actually
-sees — in-context/in-excerpts membership and MRR/recall@3 over `rankedPages`
+**Benchmark — 2026-11-13 re-baseline (issue #59).** Two live runs against the
+real endpoints on the 32-case labeled dataset, post-BM25-default (#51) and
+post-retrieve-first (CHAT-LATENCY-PLAN.md §1.2), per the pre-committed
+re-evaluation in CHAT-LATENCY-PLAN.md §1.3. Three arms: existing pipeline
+(`useDecisionModel: false`), enhanced decision model (`useDecisionModel: true`),
+and hybrid (decision model with fallback to the full LLM pipeline when
+confidence is low). The retrieval metrics measure what the LLM actually sees
+— in-context/in-excerpts membership and MRR/recall@3 over `rankedPages`
 (relevance order) — not page-number order:
+
+| Metric | Existing (keyword + LLM) | Enhanced (decision model) | Hybrid |
+| --- | --- | --- | --- |
+| In-context hit rate (run 2 / run 3) | 96.9% / 96.9% | 96.9% / 96.9% | 93.8% / 96.9% |
+| In-excerpts hit rate (run 2 / run 3) | 96.9% / 96.9% | 96.9% / 96.9% | 93.8% / 96.9% |
+| MRR over `rankedPages` (run 2 / run 3) | 65.8% / 72.4% | 60.6% / 60.8% | 60.2% / 60.8% |
+| Recall@3 over `rankedPages` (run 2 / run 3) | 68.8% / 78.1% | 67.2% / 67.2% | 67.2% / 67.2% |
+| Mean end-to-end latency (run 2 / run 3) | ~15,809 ms / ~14,308 ms | ~3,849 ms / ~3,807 ms | ~3,775 ms / ~3,792 ms |
+
+Per-case divergence (in-context hit), identical in both runs: existing-only
+1 · enhanced-only 0 · hybrid-only 0 · all miss 0.
+
+**Decision: flip the global default to the decision model.** All three
+pre-committed criteria (CHAT-LATENCY-PLAN.md §1.3) are met in both runs:
+
+- Mean latency improves ≥ 50%: ~3,800 ms vs ~14,300–15,800 ms ≈ **~75%** ✅
+- In-context hit rate regresses ≤ 2 points: 96.9% − 96.9% = **0** ✅
+- Existing-only divergence cases ≤ 1: **1** ✅
+
+The env override is kept so A/B benchmarking stays clean: `USE_DECISION_MODEL=0`
+disables the decision model, `1` (or unset) enables it — which is now the
+default in both chat routes.
+
+The original 2026-11-12 benchmark table below is **stale, pre-BM25** (measured
+against the TF-IDF pipeline before #51 and the selection-stage tuning in #53);
+kept for historical reference:
 
 | Metric | Existing (keyword + LLM) | Enhanced (decision model) |
 | --- | --- | --- |

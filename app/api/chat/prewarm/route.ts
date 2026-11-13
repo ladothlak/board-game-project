@@ -75,10 +75,12 @@ export async function POST(req: Request) {
   }
 
   try {
-    // Opt-in: use the fast decision model for classification + relevance
-    // scoring (see PERFORMANCE-PLAN.md, "Decision-model RAG"). Off by default.
+    // Default-on: use the fast decision model for classification + relevance
+    // scoring (see PERFORMANCE-PLAN.md, "Decision-model RAG"). Set
+    // USE_DECISION_MODEL=0 to disable for A/B benchmarking.
+    const useDecisionModel = process.env.USE_DECISION_MODEL !== "0";
     const rag = await buildRagContext(slug, question.trim(), apiKey, undefined, {
-      useDecisionModel: process.env.USE_DECISION_MODEL === "1",
+      useDecisionModel,
     });
     const key = prewarmKey(slug, question.trim());
 
