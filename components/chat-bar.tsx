@@ -25,6 +25,11 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
   const [collapsed, setCollapsed] = useState(false);
   const [simpleMode, setSimpleMode] = useState(false);
   const [slowBrew, setSlowBrew] = useState(false);
+  // Current SSE stage (issue #57): a "retrieving" / "pages-found" progress
+  // marker streamed before the first token, so the player sees feedback in
+  // under a second. Cleared once assistant content starts streaming.
+  const [stage, setStage] = useState<string | null>(null);
+  const [stagePages, setStagePages] = useState<number[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -113,6 +118,8 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
     setLoading(true);
     setError(null);
     assistantIndexRef.current = null;
+    setStage(null);
+    setStagePages([]);
 
     try {
       const res = await fetch("/api/chat", {
@@ -138,13 +145,15 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
           const line = buffer.slice(0, newline).trim();
           buffer = buffer.slice(newline + 1);
           if (!line.startsWith("data:")) continue;
-          let j: { type: string; content?: string; citations?: Citation[]; message?: string };
+          let j: { type: string; content?: string; citations?: Citation[]; message?: string; stage?: string; pages?: number[] };
           try {
             j = JSON.parse(line.slice(5).trim());
           } catch {
             continue;
           }
           if (j.type === "token" && j.content) {
+            // Assistant content has started streaming — the stage line is done.
+            setStage(null);
             setMessages((prev) => {
               if (assistantIndexRef.current === null) {
                 assistantIndexRef.current = prev.length;
@@ -155,6 +164,10 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
               c[i] = { ...c[i], content: c[i].content + j.content! };
               return c;
             });
+          } else if (j.type === "stage") {
+            // Pre-token progress marker (issue #57): show it in the loading line.
+            setStage(j.stage ?? null);
+            setStagePages(j.pages ?? []);
           } else if (j.type === "done") {
             setMessages((prev) => {
               const i = assistantIndexRef.current;
@@ -357,7 +370,15 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
                 <span />
                 <span />
               </span>
-              {slowBrew ? "Still brewing — the model is thinking…" : "Brewing an answer…"}
+              // Stage events (issue #57) give sub-second feedback; the 15s
+              // "Still brewing…" line stays as the fallback when none arrive.
+              {stage === "retrieving"
+                ? "Finding pages…"
+                : stage === "pages-found" && stagePages.length > 0
+                  ? `Found pp. ${stagePages.join(", ")} — brewing…`
+                  : slowBrew
+                    ? "Still brewing — the model is thinking…"
+                    : "Brewing an answer…"}
             </div>
           )}
           {error && (

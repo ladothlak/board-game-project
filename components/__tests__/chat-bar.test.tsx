@@ -65,6 +65,48 @@ describe("ChatBar", () => {
     });
   });
 
+  it("shows stage progress before the first token, then clears it as content streams", async () => {
+    // Gate the stream so each stage line is observable: "retrieving" arrives,
+    // the test asserts it, then "pages-found" arrives, then the first token.
+    let releasePages!: () => void;
+    let releaseToken!: () => void;
+    const pagesGate = new Promise<void>((r) => (releasePages = r));
+    const tokenGate = new Promise<void>((r) => (releaseToken = r));
+    const enc = new TextEncoder();
+    const sseBody = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(enc.encode('data: {"type":"stage","stage":"retrieving"}\n\n'));
+        await pagesGate;
+        controller.enqueue(enc.encode('data: {"type":"stage","stage":"pages-found","pages":[3,7]}\n\n'));
+        await tokenGate;
+        controller.enqueue(enc.encode('data: {"type":"token","content":"Set up the board"}\n\n'));
+        controller.enqueue(enc.encode('data: {"type":"done","citations":[]}\n\n'));
+        controller.close();
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(sseBody, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+      ),
+    );
+
+    render(<ChatBar slug={slug} title={title} />);
+    const input = screen.getByRole("textbox", { name: /ask about/i });
+    await userEvent.type(input, "How do I set up?");
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    // The "retrieving" stage shows before any token arrives.
+    await waitFor(() => expect(screen.getByText(/finding pages/i)).toBeInTheDocument());
+    releasePages();
+    // Then "pages-found" lists the pages from the event.
+    await waitFor(() => expect(screen.getByText(/found pp\. 3, 7/i)).toBeInTheDocument());
+    releaseToken();
+    // Once content streams, the stage line disappears and the answer renders.
+    await waitFor(() => expect(screen.getByText(/set up the board/i)).toBeInTheDocument());
+    expect(screen.queryByText(/brewing/i)).not.toBeInTheDocument();
+  });
+
   it("shows user message in the chat history", async () => {
     const sseBody = new ReadableStream<Uint8Array>({
       start(controller) {

@@ -1,13 +1,16 @@
 /**
  * Route-level tests for the per-stage latency audit fields in /api/chat
- * (issue #55).
+ * (issue #55) and the pre-token stage events (issue #57).
  *
  * The lib-level tests (lib/__tests__/rag-pipeline.test.ts) verify that
  * buildRagContext threads its timings out; these tests verify that the route
  * actually writes them into the audit line: `stages` (expandMs/retrieveMs/
  * rerankMs, spread from the RAG context), `prewarmHit`, and `firstTokenMs`
- * (present only when tokens streamed). The LLM fetch and buildRagContext are
- * mocked, so nothing touches the network.
+ * (present only when tokens streamed). They also verify the SSE protocol's
+ * additive `{type:"stage"}` events: "retrieving" before any token,
+ * "pages-found" with the RAG context's pages, and none on an answer-cache hit.
+ * The LLM fetch and buildRagContext are mocked, so nothing touches the
+ * network.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { POST } from "../route";
@@ -237,5 +240,58 @@ describe("POST /api/chat failure audit lines (issue #55)", () => {
     expect(entry.status).toBe(502);
     expect(entry.prewarmHit).toBe(false);
     expect(entry.stages).toEqual({ expandMs: 12, retrieveMs: 34, rerankMs: 56 });
+  });
+});
+
+// ─── Stage events (issue #57) ────────────────────────────────────────────────
+
+describe("POST /api/chat stage events (issue #57)", () => {
+  /** Parse the SSE frames out of a streamed response body, in wire order. */
+  async function sseEvents(res: Response): Promise<Record<string, unknown>[]> {
+    const text = await res.text();
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => JSON.parse(line.slice(5).trim()));
+  }
+
+  it("emits 'retrieving' before any token and 'pages-found' with the context's pages", async () => {
+    mockFetch.mockResolvedValue(sseResponse([
+      sseChunk("Hello"),
+      "data: [DONE]\n\n",
+    ]));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    const events = await sseEvents(res);
+
+    // The very first frame is the 'retrieving' stage — sub-second feedback
+    // before RAG starts.
+    expect(events[0]).toEqual({ type: "stage", stage: "retrieving" });
+    // 'pages-found' carries the pages array from the mocked RAG context...
+    const pagesFound = events.find((e) => e.type === "stage" && e.stage === "pages-found");
+    expect(pagesFound).toEqual({ type: "stage", stage: "pages-found", pages: [3] });
+    // ...and arrives before any token.
+    const firstToken = events.findIndex((e) => e.type === "token");
+    expect(events.indexOf(pagesFound!)).toBeLessThan(firstToken);
+  });
+
+  it("emits no stage events on an answer-cache hit", async () => {
+    // Prime the final-answer cache with a successful request (issue #56).
+    mockFetch.mockResolvedValue(sseResponse([
+      sseChunk("You win when all enemies are destroyed."),
+      "data: [DONE]\n\n",
+    ]));
+    const primed = await post({ slug: SLUG, question: "How do I win?" });
+    await primed.text();
+
+    // The repeat question replays from cache — no RAG, so no stage events.
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    const events = await sseEvents(res);
+
+    expect(events.find((e) => e.type === "stage")).toBeUndefined();
+    // The cached answer is still replayed through the existing protocol.
+    expect(events.some((e) => e.type === "token")).toBe(true);
+    expect(events.some((e) => e.type === "done")).toBe(true);
   });
 });

@@ -123,98 +123,13 @@ export async function POST(req: Request) {
     });
   }
 
-  // Enhanced RAG pipeline — check the speculative prewarm cache first.
-  // If the client fired a prewarm while the user was typing, the context
-  // is already built and we skip the (slow) LLM retrieval steps.
-  const prewarmed = getPrewarm(slug, question.trim());
-  let context: string;
-  let toc: string;
-  let ragConfidence: number;
-  // Per-stage RAG timings (expand/retrieve/rerank) — only known when this
-  // request built the context itself; a prewarm hit skips those stages.
-  let ragTimings: RagTimings | null = null;
-
-  if (prewarmed) {
-    context = prewarmed.context;
-    toc = prewarmed.toc;
-    ragConfidence = prewarmed.confidence;
-  } else {
-    const expNames = (game.expansions ?? []).filter((e) => e.inChatContext).map((e) => e.name);
-    // Opt-in: use the fast decision model for classification + relevance
-    // scoring (see PERFORMANCE-PLAN.md, "Decision-model RAG"). Off by default.
-    const rag = await buildRagContext(slug, question.trim(), apiKey, expNames, {
-      useDecisionModel: process.env.USE_DECISION_MODEL === "1",
-    });
-    context = rag.excerpts;
-    toc = rag.toc;
-    ragConfidence = rag.confidence;
-    ragTimings = rag.timings;
-  }
-
-  // Low-confidence fallback: if retrieval was weak, note it in the prompt.
-  const confidenceNote =
-    ragConfidence < 0.25
-      ? " NOTE: The rulebook excerpts below may not directly cover this question. If you cannot find a clear answer, say so and suggest which page the player should check."
-      : "";
-
-  // Optional cross-game comparison: pull a second game's most relevant pages.
-  let compareContext = "";
-  let compareTitle = "";
-  if (compareSlug && compareSlug !== slug) {
-    const other = await getGame(compareSlug);
-    if (other) {
-      compareTitle = other.title;
-      const otherChunks = (await loadIndex()).filter((c) => c.slug === compareSlug);
-      const otherTop = retrieve(otherChunks, question, 3, await docFreqFor(compareSlug));
-      compareContext = otherTop
-        .map((c) => `--- ${compareTitle}, page ${c.page} ---\n${c.text}`)
-        .join("\n\n");
-    }
-  }
-
-  const systemPrompt = compareContext
-    ? `You are a warm, knowledgeable expert comparing the board games "${game.title}" and "${compareTitle}". ` +
-      "Answer the player's question using ONLY the rulebook excerpts provided for both games. " +
-      "When you reference a rule, cite its page like (p. 3) and name which game it belongs to. " +
-      "Keep answers concise and friendly."
-    : `You are a warm, knowledgeable expert on the board game "${game.title}". ` +
-      "Answer the player's question using ONLY the rulebook excerpts provided. " +
-      "A per-page map of the whole rulebook is also included: use it to orient yourself, " +
-      "to cite the right page, and to tell the player which page to flip to when the " +
-      "answer isn't in the loaded excerpts. If you're not sure, say so and point them to the likely page. " +
-      "When you reference a rule, cite its page like (p. 3). Keep answers concise and friendly." +
-      confidenceNote +
-      (simpleMode
-        ? " IMPORTANT: The player is new to this game. Use plain language, short sentences, and real-world analogies. Avoid jargon. Explain as if talking to a friend who has never played."
-        : "");
-
-  // Mention enabled expansions so the LLM knows it has access to their content.
-  const enabledExpansions = (game.expansions ?? []).filter((e) => e.inChatContext);
-  const expansionNote = enabledExpansions.length > 0
-    ? ` Note: The rulebook excerpts also include content from the following expansion(s): ${enabledExpansions.map((e) => e.name).join(", ")}. Their pages are numbered after the base game's pages.`
-    : "";
-
-  const messages = [
-    { role: "system", content: systemPrompt + expansionNote },
-    {
-      role: "system",
-      content: `What's on each page of the rulebook (one line per page):\n${toc || "(none indexed yet)"}`,
-    },
-    {
-      role: "system",
-      content: `Rulebook excerpts:\n${context || "(no rulebook text available yet — ask the owner to add the PDF)"}`,
-    },
-    ...(compareContext
-      ? [{ role: "system" as const, content: `Comparison excerpts:\n${compareContext}` }]
-      : []),
-    ...history.slice(-6).map((m) => ({ role: m.role, content: m.content })),
-    { role: "user", content: question.trim() },
-  ];
-
   // Stream tokens back to the client as Server-Sent Events. The local model is
   // slow to reason, so streaming keeps the chat bar feeling alive instead of
   // frozen. Protocol: {type:"token"} chunks, then a final {type:"done"} with
-  // citations, or {type:"error"}.
+  // citations, or {type:"error"}. Stage events ({type:"stage"}) are additive
+  // progress markers (issue #57) — old clients that ignore unknown event
+  // types keep working. Everything from RAG onward runs inside the stream so
+  // the response (and its first stage event) returns before retrieval starts.
   const encoder = new TextEncoder();
   let full = "";
   // Tier 0 measurement (issue #55): time from the request start to the first
@@ -226,7 +141,112 @@ export async function POST(req: Request) {
     async start(controller) {
       const send = (obj: unknown) =>
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+      // Stage event (issue #57): sent immediately, before any await, so the
+      // client gets sub-second feedback while RAG runs. The answer-cache-hit
+      // path above returns before this stream is created, so a replayed
+      // answer never emits one — it never retrieves.
+      send({ type: "stage", stage: "retrieving" });
+
+      let prewarmHit = false;
+      // Per-stage RAG timings (expand/retrieve/rerank) — only known when this
+      // request built the context itself; a prewarm hit skips those stages.
+      let ragTimings: RagTimings | null = null;
       try {
+        // Enhanced RAG pipeline — check the speculative prewarm cache first.
+        // If the client fired a prewarm while the user was typing, the context
+        // is already built and we skip the (slow) LLM retrieval steps.
+        const prewarmed = getPrewarm(slug, question.trim());
+        let context: string;
+        let toc: string;
+        let ragConfidence: number;
+        // The pages retrieval surfaced, for the "pages-found" stage event. A
+        // prewarm hit has no page list (the cache stores only the context),
+        // so that stage is skipped there.
+        let pages: number[] | null = null;
+
+        if (prewarmed) {
+          prewarmHit = true;
+          context = prewarmed.context;
+          toc = prewarmed.toc;
+          ragConfidence = prewarmed.confidence;
+        } else {
+          const expNames = (game.expansions ?? []).filter((e) => e.inChatContext).map((e) => e.name);
+          // Opt-in: use the fast decision model for classification + relevance
+          // scoring (see PERFORMANCE-PLAN.md, "Decision-model RAG"). Off by default.
+          const rag = await buildRagContext(slug, question.trim(), apiKey, expNames, {
+            useDecisionModel: process.env.USE_DECISION_MODEL === "1",
+          });
+          context = rag.excerpts;
+          toc = rag.toc;
+          ragConfidence = rag.confidence;
+          ragTimings = rag.timings;
+          pages = rag.pages;
+        }
+
+        // Stage event (issue #57): right after the RAG context is ready, so the
+        // client can show which pages the answer will draw on.
+        if (pages) send({ type: "stage", stage: "pages-found", pages });
+
+        // Low-confidence fallback: if retrieval was weak, note it in the prompt.
+        const confidenceNote =
+          ragConfidence < 0.25
+            ? " NOTE: The rulebook excerpts below may not directly cover this question. If you cannot find a clear answer, say so and suggest which page the player should check."
+            : "";
+
+        // Optional cross-game comparison: pull a second game's most relevant pages.
+        let compareContext = "";
+        let compareTitle = "";
+        if (compareSlug && compareSlug !== slug) {
+          const other = await getGame(compareSlug);
+          if (other) {
+            compareTitle = other.title;
+            const otherChunks = (await loadIndex()).filter((c) => c.slug === compareSlug);
+            const otherTop = retrieve(otherChunks, question, 3, await docFreqFor(compareSlug));
+            compareContext = otherTop
+              .map((c) => `--- ${compareTitle}, page ${c.page} ---\n${c.text}`)
+              .join("\n\n");
+          }
+        }
+
+        const systemPrompt = compareContext
+          ? `You are a warm, knowledgeable expert comparing the board games "${game.title}" and "${compareTitle}". ` +
+            "Answer the player's question using ONLY the rulebook excerpts provided for both games. " +
+            "When you reference a rule, cite its page like (p. 3) and name which game it belongs to. " +
+            "Keep answers concise and friendly."
+          : `You are a warm, knowledgeable expert on the board game "${game.title}". ` +
+            "Answer the player's question using ONLY the rulebook excerpts provided. " +
+            "A per-page map of the whole rulebook is also included: use it to orient yourself, " +
+            "to cite the right page, and to tell the player which page to flip to when the " +
+            "answer isn't in the loaded excerpts. If you're not sure, say so and point them to the likely page. " +
+            "When you reference a rule, cite its page like (p. 3). Keep answers concise and friendly." +
+            confidenceNote +
+            (simpleMode
+              ? " IMPORTANT: The player is new to this game. Use plain language, short sentences, and real-world analogies. Avoid jargon. Explain as if talking to a friend who has never played."
+              : "");
+
+        // Mention enabled expansions so the LLM knows it has access to their content.
+        const enabledExpansions = (game.expansions ?? []).filter((e) => e.inChatContext);
+        const expansionNote = enabledExpansions.length > 0
+          ? ` Note: The rulebook excerpts also include content from the following expansion(s): ${enabledExpansions.map((e) => e.name).join(", ")}. Their pages are numbered after the base game's pages.`
+          : "";
+
+        const messages = [
+          { role: "system", content: systemPrompt + expansionNote },
+          {
+            role: "system",
+            content: `What's on each page of the rulebook (one line per page):\n${toc || "(none indexed yet)"}`,
+          },
+          {
+            role: "system",
+            content: `Rulebook excerpts:\n${context || "(no rulebook text available yet — ask the owner to add the PDF)"}`,
+          },
+          ...(compareContext
+            ? [{ role: "system" as const, content: `Comparison excerpts:\n${compareContext}` }]
+            : []),
+          ...history.slice(-6).map((m) => ({ role: m.role, content: m.content })),
+          { role: "user", content: question.trim() },
+        ];
+
         // Single-flight queue + 60s timeout to prevent resource exhaustion.
         const res = await withQueue(() =>
           fetch(`${BASE_URL}/chat/completions`, {
@@ -255,7 +275,7 @@ export async function POST(req: Request) {
           // other failure paths (issue #55). No token ever streamed, so only
           // the RAG stage durations are known.
           const stages: Record<string, number> = { ...(ragTimings ?? {}) };
-          logRequest({ ip, route: "/api/chat", method: "POST", status: 502, durationMs: Date.now() - start, prewarmHit: prewarmed !== null, stages });
+          logRequest({ ip, route: "/api/chat", method: "POST", status: 502, durationMs: Date.now() - start, prewarmHit, stages });
           return;
         }
 
@@ -307,7 +327,7 @@ export async function POST(req: Request) {
         // firstTokenMs is known there.
         const stages: Record<string, number> = { ...(ragTimings ?? {}) };
         if (firstTokenAt !== null) stages.firstTokenMs = firstTokenAt - start;
-        logRequest({ ip, route: "/api/chat", method: "POST", status: 200, durationMs: Date.now() - start, prewarmHit: prewarmed !== null, stages });
+        logRequest({ ip, route: "/api/chat", method: "POST", status: 200, durationMs: Date.now() - start, prewarmHit, stages });
       } catch (e) {
         send({
           type: "error",
@@ -316,7 +336,7 @@ export async function POST(req: Request) {
         controller.close();
         // No token ever streamed, so only the RAG stage durations are known.
         const stages: Record<string, number> = { ...(ragTimings ?? {}) };
-        logRequest({ ip, route: "/api/chat", method: "POST", status: 502, durationMs: Date.now() - start, prewarmHit: prewarmed !== null, stages });
+        logRequest({ ip, route: "/api/chat", method: "POST", status: 502, durationMs: Date.now() - start, prewarmHit, stages });
       }
     },
   });
