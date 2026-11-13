@@ -263,9 +263,10 @@ describe("buildRagContext", () => {
     stubLlm();
 
     // An explicit page reference gates expansion off AND skips the re-rank —
-    // so neither stage makes an LLM call. Their durations are just the clock
-    // resolution of two adjacent Date.now() reads: tiny, but not guaranteed to
-    // be exactly 0 on a loaded machine.
+    // so neither stage makes an LLM call. Their durations are tiny but not
+    // guaranteed to be exactly 0: expandMs also spans the per-slug DF-table
+    // build (the DF cache is cold, since beforeEach resets it), and both
+    // stages carry the clock resolution of two adjacent Date.now() reads.
     const result = await buildRagContext(SLUG, "Tell me about p. 42", KEY);
 
     expect(result.timings.expandMs).toBeGreaterThanOrEqual(0);

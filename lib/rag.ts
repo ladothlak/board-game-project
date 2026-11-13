@@ -752,14 +752,16 @@ export async function buildRagContext(
   const needsExpansion = useDecision
     ? baseNeedsExpansion && (decision ? decision.needsExpansion : true)
     : baseNeedsExpansion;
+  // Precomputed per-slug DF table — avoids re-tokenizing every chunk on each
+  // of the 2–3 retrieve() calls below. Loaded BEFORE the expansion timer
+  // starts so expandMs covers only the expansion await, not the (cold-cache)
+  // DF-table build (issue #55).
+  const df = await docFreqFor(slug);
+
   const expandStart = Date.now();
   const expandPromise = needsExpansion
     ? expandQuery(apiKey, question, queryType)
     : Promise.resolve([question]);
-
-  // Precomputed per-slug DF table — avoids re-tokenizing every chunk on each
-  // of the 2–3 retrieve() calls below.
-  const df = await docFreqFor(slug);
 
   const queries = await expandPromise;
   timings.expandMs = Date.now() - expandStart;

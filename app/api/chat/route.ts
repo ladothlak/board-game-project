@@ -109,7 +109,7 @@ export async function POST(req: Request) {
     context = rag.excerpts;
     toc = rag.toc;
     ragConfidence = rag.confidence;
-    ragTimings = rag.timings ?? null;
+    ragTimings = rag.timings;
   }
 
   // Low-confidence fallback: if retrieval was weak, note it in the prompt.
@@ -212,6 +212,11 @@ export async function POST(req: Request) {
           const text = await res.text();
           send({ type: "error", message: `Provider error ${res.status}: ${text.slice(0, 200)}` });
           controller.close();
+          // A provider 4xx/5xx is a full request failure — audit it like the
+          // other failure paths (issue #55). No token ever streamed, so only
+          // the RAG stage durations are known.
+          const stages: Record<string, number> = { ...(ragTimings ?? {}) };
+          logRequest({ ip, route: "/api/chat", method: "POST", status: 502, durationMs: Date.now() - start, prewarmHit: prewarmed !== null, stages });
           return;
         }
 
