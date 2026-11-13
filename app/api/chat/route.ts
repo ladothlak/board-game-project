@@ -295,7 +295,7 @@ export async function POST(req: Request) {
               model: MODEL,
               messages,
               temperature: 0.3,
-              // Reasoning model: needs room to think AND answer (see digest route).
+              // Budget scales with question type (issue #61) — see note above.
               max_tokens: maxTokens,
               stream: true,
             }),
