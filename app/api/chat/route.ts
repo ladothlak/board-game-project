@@ -141,17 +141,17 @@ export async function POST(req: Request) {
     async start(controller) {
       const send = (obj: unknown) =>
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
-      // Stage event (issue #57): sent immediately, before any await, so the
-      // client gets sub-second feedback while RAG runs. The answer-cache-hit
-      // path above returns before this stream is created, so a replayed
-      // answer never emits one — it never retrieves.
-      send({ type: "stage", stage: "retrieving" });
-
       let prewarmHit = false;
       // Per-stage RAG timings (expand/retrieve/rerank) — only known when this
       // request built the context itself; a prewarm hit skips those stages.
       let ragTimings: RagTimings | null = null;
       try {
+        // Stage event (issue #57): sent immediately, before any await, so the
+        // client gets sub-second feedback while RAG runs. The answer-cache-hit
+        // path above returns before this stream is created, so a replayed
+        // answer never emits one — it never retrieves.
+        send({ type: "stage", stage: "retrieving" });
+
         // Enhanced RAG pipeline — check the speculative prewarm cache first.
         // If the client fired a prewarm while the user was typing, the context
         // is already built and we skip the (slow) LLM retrieval steps.

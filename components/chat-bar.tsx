@@ -154,6 +154,7 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
           if (j.type === "token" && j.content) {
             // Assistant content has started streaming — the stage line is done.
             setStage(null);
+            setStagePages([]);
             setMessages((prev) => {
               if (assistantIndexRef.current === null) {
                 assistantIndexRef.current = prev.length;

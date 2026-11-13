@@ -107,6 +107,66 @@ describe("ChatBar", () => {
     expect(screen.queryByText(/brewing/i)).not.toBeInTheDocument();
   });
 
+  it("resets stale stage state on a new question and leaves none after an error frame", async () => {
+    const enc = new TextEncoder();
+    // First request: 'retrieving' + 'pages-found', then an error before any
+    // token arrives — so the stage state is left stale ("Found pp. 3, 7").
+    const firstBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode('data: {"type":"stage","stage":"retrieving"}\n\n'));
+        controller.enqueue(enc.encode('data: {"type":"stage","stage":"pages-found","pages":[3,7]}\n\n'));
+        controller.enqueue(enc.encode('data: {"type":"error","message":"Could not reach the LLM provider."}\n\n'));
+      },
+    });
+
+    // Second request: gated so no frame arrives until we have asserted that
+    // send() cleared the stale stage state. The stream stays open after the
+    // frame (no close) so `loading` remains true and the stage line is
+    // observable.
+    let releaseRetrieving!: () => void;
+    const retrievingGate = new Promise<void>((r) => (releaseRetrieving = r));
+    const secondBody = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        await retrievingGate;
+        controller.enqueue(enc.encode('data: {"type":"stage","stage":"retrieving"}\n\n'));
+      },
+    });
+
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => {
+        calls += 1;
+        const body = calls === 1 ? firstBody : secondBody;
+        return Promise.resolve(new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+      }),
+    );
+
+    render(<ChatBar slug={slug} title={title} />);
+    const input = screen.getByRole("textbox", { name: /ask about/i });
+
+    // First question ends in an error after 'pages-found'.
+    await userEvent.type(input, "How do I set up?");
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(screen.getByText(/could not reach/i)).toBeInTheDocument());
+    // After an error frame, no stage line lingers.
+    expect(screen.queryByText(/finding pages|found pp\.|brewing/i)).not.toBeInTheDocument();
+
+    // Second question: until the fresh 'retrieving' frame arrives, the stale
+    // "Found pp." line must not reappear — send() resets the stage state. The
+    // component switched from the compact pill to the full card after the
+    // first send, so re-query the input (the old reference is detached).
+    const secondInput = screen.getByRole("textbox", { name: /ask about/i });
+    await userEvent.type(secondInput, "Now tell me about setup again?");
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(screen.getByText(/brewing an answer/i)).toBeInTheDocument());
+    expect(screen.queryByText(/found pp\./i)).not.toBeInTheDocument();
+
+    releaseRetrieving();
+    // The fresh stage line arrives for the second question.
+    await waitFor(() => expect(screen.getByText(/finding pages/i)).toBeInTheDocument());
+  });
+
   it("shows user message in the chat history", async () => {
     const sseBody = new ReadableStream<Uint8Array>({
       start(controller) {

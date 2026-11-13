@@ -294,4 +294,25 @@ describe("POST /api/chat stage events (issue #57)", () => {
     expect(events.some((e) => e.type === "token")).toBe(true);
     expect(events.some((e) => e.type === "done")).toBe(true);
   });
+
+  it("emits 'retrieving' but skips 'pages-found' on a prewarm hit", async () => {
+    // A prewarm hit has no page list (the cache stores only the context), so
+    // the 'pages-found' stage must be skipped — this guards the `if (pages)`
+    // check in the route against becoming unconditional.
+    vi.mocked(getPrewarm).mockReturnValue({
+      context: "prewarmed excerpts",
+      toc: "p. 1: Setup.",
+      confidence: 0.9,
+      ts: Date.now(),
+    });
+    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    const events = await sseEvents(res);
+
+    // 'retrieving' is still the very first frame...
+    expect(events[0]).toEqual({ type: "stage", stage: "retrieving" });
+    // ...but no 'pages-found' frame appears.
+    expect(events.find((e) => e.type === "stage" && e.stage === "pages-found")).toBeUndefined();
+  });
 });
