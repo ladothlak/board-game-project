@@ -194,8 +194,8 @@ describe("buildRagContext", () => {
   });
 
   it("caps chunks at their allocation and keeps relevant sentences when cutting", async () => {
-    const longSetup = `Place tokens on the board. ${"a".repeat(4973)}`; // ~5000 chars
-    const longCombat = `${"b".repeat(4900)} set up the board`; // ~5000 chars
+    const longSetup = `Place tokens on the board. ${"a".repeat(7973)}`; // ~8000 chars
+    const longCombat = `${"b".repeat(7900)} set up the board`; // ~8000 chars
     vi.mocked(loadIndex).mockResolvedValue([
       { id: "l1", slug: SLUG, title: "Setup", page: 1, text: longSetup },
       { id: "l2", slug: SLUG, title: "Combat", page: 2, text: longCombat },
@@ -219,8 +219,8 @@ describe("buildRagContext", () => {
     // ...and the query-relevant sentence survives the cut...
     expect(page1Part).toContain("Place tokens on the board.");
 
-    // The whole context stays within the ~4000-char budget plus headers.
-    expect(result.excerpts.length).toBeLessThan(4200);
+    // The whole context stays within the ~8000-char budget plus headers.
+    expect(result.excerpts.length).toBeLessThan(8200);
   });
 
   it("returns a graceful empty context when the slug has no indexed chunks", async () => {

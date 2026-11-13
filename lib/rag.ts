@@ -654,9 +654,16 @@ function extractRelevantSentences(
 }
 
 /**
+ * The context budget in characters, configurable via RAG_CONTEXT_BUDGET.
+ * Defaults to 8000 (~2000 tokens) — big enough that a multi-sentence answer
+ * in the top chunk survives its allocation without truncating the excerpts.
+ */
+const CONTEXT_BUDGET = Number(process.env.RAG_CONTEXT_BUDGET ?? 8000);
+
+/**
  * Allocate a token budget across selected chunks proportionally to their
  * relevance scores. High-relevance chunks get more text; low-relevance get
- * truncated. Total budget is ~4000 chars (roughly 1000 tokens) — big enough
+ * truncated. Total budget is ~8000 chars (roughly 2000 tokens) — big enough
  * that a multi-sentence answer in the top chunk survives its allocation.
  *
  * Every chunk is capped at its allocation — the top chunk included — so one
@@ -667,7 +674,7 @@ function extractRelevantSentences(
  */
 export function adaptiveContext(
   selected: ScoredChunk[],
-  budget = 4000,
+  budget = CONTEXT_BUDGET,
   queryTerms?: Set<string>,
   df?: Map<string, number>,
   n = 0
@@ -1057,7 +1064,7 @@ export async function buildRagContext(
 
   // 8. Adaptive context budget — with the query terms and DF table so long
   // chunks are cut on their most relevant sentences, not from the top.
-  const excerpts = adaptiveContext(candidates, 4000, queryTerms, df, chunks.length);
+  const excerpts = adaptiveContext(candidates, CONTEXT_BUDGET, queryTerms, df, chunks.length);
 
   // 9. Confidence.
   const confidence = estimateConfidence(candidates);
