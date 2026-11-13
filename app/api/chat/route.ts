@@ -218,7 +218,7 @@ export async function POST(req: Request) {
         // (ragConfidence is always defined here — every branch above assigns it.)
         const confidenceNote =
           (ragConfidence ?? 0) < 0.25
-            ? " NOTE: The rulebook excerpts below may not directly cover this question. If you cannot find a clear answer, say so and suggest which page the player should check."
+            ? " NOTE: The rulebook excerpts below may not directly cover this question. If you cannot find a clear answer in the provided excerpts, say so plainly without guessing a specific page number."
             : "";
 
         // Optional cross-game comparison: pull a second game's most relevant pages.
@@ -240,12 +240,12 @@ export async function POST(req: Request) {
           ? `You are a warm, knowledgeable expert comparing the board games "${game.title}" and "${compareTitle}". ` +
             "Answer the player's question using ONLY the rulebook excerpts provided for both games. " +
             "When you reference a rule, cite its page like (p. 3) and name which game it belongs to. " +
+            "If the answer isn't in the loaded excerpts, say so plainly without guessing a specific page number. " +
             "Keep answers concise and friendly."
           : `You are a warm, knowledgeable expert on the board game "${game.title}". ` +
             "Answer the player's question using ONLY the rulebook excerpts provided. " +
             "A table of contents for the whole rulebook (sections with their pages) is also included: " +
-            "use it to orient yourself, to cite the right page, and to tell the player which page to flip to when the " +
-            "answer isn't in the loaded excerpts. If you're not sure, say so and point them to the likely page. " +
+            "use it to orient yourself and to cite the right page from the loaded excerpts. If the answer isn't in the loaded excerpts, say so plainly without guessing a specific page number. " +
             "When you reference a rule, cite its page like (p. 3). Keep answers concise and friendly." +
             confidenceNote +
             (simpleMode

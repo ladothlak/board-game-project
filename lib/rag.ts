@@ -725,6 +725,22 @@ export function estimateConfidence(selected: ScoredChunk[]): number {
 // ─── 8. Hierarchical TOC ───────────────────────────────────────────────────
 
 /**
+ * Section detection patterns shared by hierarchicalToc and findSectionPages:
+ * common rulebook section headers mapped to their TOC section names. Each
+ * pattern is tested against the first 200 chars of a page's text.
+ */
+const SECTION_PATTERNS: { name: string; pattern: RegExp }[] = [
+  { name: "Introduction / Overview", pattern: /\b(introduction|overview|welcome|about)\b/i },
+  { name: "Setup", pattern: /\b(setup|set up|prepare|beginning|start)\b/i },
+  { name: "Game Structure / Turn Order", pattern: /\b(turn|round|phase|order|structure)\b/i },
+  { name: "Core Rules", pattern: /\b(rule|action|play|move|turn)\b/i },
+  { name: "Combat / Conflict", pattern: /\b(combat|attack|assault|fight|battle)\b/i },
+  { name: "Special Abilities / Keywords", pattern: /\b(ability|keyword|special|unique|trait)\b/i },
+  { name: "Victory / End of Game", pattern: /\b(victory|win|end|defeat|lose|score)\b/i },
+  { name: "Reference / Quick Play", pattern: /\b(reference|quick|cheat|summary|card)\b/i },
+];
+
+/**
  * Build a structured outline from the page map: group pages into sections
  * based on content keywords. This gives the model a document structure
  * beyond a flat one-line-per-page list.
@@ -735,23 +751,11 @@ export function hierarchicalToc(chunks: Chunk[]): string {
     if (!byPage.has(c.page)) byPage.set(c.page, c.text);
   }
 
-  // Simple section detection: look for common rulebook section headers.
-  const sectionPatterns: { name: string; pattern: RegExp }[] = [
-    { name: "Introduction / Overview", pattern: /\b(introduction|overview|welcome|about)\b/i },
-    { name: "Setup", pattern: /\b(setup|set up|prepare|beginning|start)\b/i },
-    { name: "Game Structure / Turn Order", pattern: /\b(turn|round|phase|order|structure)\b/i },
-    { name: "Core Rules", pattern: /\b(rule|action|play|move|turn)\b/i },
-    { name: "Combat / Conflict", pattern: /\b(combat|attack|assault|fight|battle)\b/i },
-    { name: "Special Abilities / Keywords", pattern: /\b(ability|keyword|special|unique|trait)\b/i },
-    { name: "Victory / End of Game", pattern: /\b(victory|win|end|defeat|lose|score)\b/i },
-    { name: "Reference / Quick Play", pattern: /\b(reference|quick|cheat|summary|card)\b/i },
-  ];
-
   const sections = new Map<string, number[]>();
   for (const [page, text] of byPage) {
     const clean = text.replace(/\s+/g, " ").trim().slice(0, 200);
     let matched = false;
-    for (const { name, pattern } of sectionPatterns) {
+    for (const { name, pattern } of SECTION_PATTERNS) {
       if (pattern.test(clean)) {
         if (!sections.has(name)) sections.set(name, []);
         sections.get(name)!.push(page);
@@ -770,6 +774,32 @@ export function hierarchicalToc(chunks: Chunk[]): string {
     lines.push(`${name}: p. ${pages.join(", p. ")}`);
   }
   return lines.join("\n");
+}
+
+/**
+ * Find the pages whose text matches a named section's pattern — the same
+ * first-200-char test hierarchicalToc uses — so retrieval can be anchored to
+ * a query type's TOC section (issue #63). Returns [] when no pattern is
+ * defined for the section name.
+ */
+function findSectionPages(chunks: Chunk[], sectionName: string): number[] {
+  const entry = SECTION_PATTERNS.find((s) => s.name === sectionName);
+  if (!entry) return [];
+
+  const byPage = new Map<number, string>();
+  for (const c of chunks) {
+    if (!byPage.has(c.page)) byPage.set(c.page, c.text);
+  }
+
+  const pages: number[] = [];
+  for (const [page, text] of byPage) {
+    const clean = text.replace(/\s+/g, " ").trim().slice(0, 200);
+    // First-match-wins: only include if this section is the FIRST pattern to match,
+    // matching hierarchicalToc's assignment so the TOC and retrieval agree.
+    const firstMatch = SECTION_PATTERNS.find((s) => s.pattern.test(clean));
+    if (firstMatch?.name === sectionName) pages.push(page);
+  }
+  return pages;
 }
 
 // ─── 9. Follow-Up Detection ────────────────────────────────────────────────
@@ -800,11 +830,24 @@ export function detectExplicitPages(question: string): number[] {
 // ─── Main Pipeline ─────────────────────────────────────────────────────────
 
 /**
+ * Query types that map cleanly to a single TOC section (issue #63): the
+ * section's pages are boosted into the candidate set so the page that answers
+ * the question is always in the excerpts, even when lexical retrieval can't
+ * discriminate a common-word query. Types without a single-section anchor
+ * ("specific-rule", "edge-case", "comparison", "general") have no entry here.
+ */
+const QUERY_TYPE_SECTION: Partial<Record<QueryType, string>> = {
+  setup: "Setup",
+  "turn-structure": "Game Structure / Turn Order",
+};
+
+/**
  * The full enhanced RAG pipeline:
  * 1. Classify query type
  * 2. Detect explicit page references
  * 3. Base multi-query retrieval on the original question
  * 4. Boost explicitly-referenced pages
+ * 4b. Boost the query type's TOC section pages (issue #63)
  * 5. Quality gate (retrieve-first, issue #58): if the base result is weak AND
  *    the question needs expansion, fire + await the expansion and re-retrieve
  *    with the expanded queries; otherwise no expansion is ever fired
@@ -914,6 +957,32 @@ export async function buildRagContext(
 
   // 4. Boost explicitly-referenced pages and mentioned-expansion chunks.
   candidates = boostCandidates(candidates, chunks, explicitPages, expansionNames, question);
+
+  // 4b. Boost the query type's TOC section pages (issue #63): anchor retrieval
+  // to the classified question type's section so the page that answers the
+  // question is always in the candidate set, even when lexical retrieval can't
+  // discriminate a common-word query. Capped at 2 pages per section to avoid
+  // consuming the entire context budget. Pages already surfaced by base
+  // retrieval (including ones boosted by an explicit page reference or a
+  // mentioned expansion) are left alone — the boost pulls a missing section
+  // page IN, it doesn't re-rank one that's already in the set.
+  const sectionName = QUERY_TYPE_SECTION[queryType];
+  if (sectionName) {
+    const sectionPages = findSectionPages(chunks, sectionName);
+    for (const p of sectionPages.slice(0, 2)) {
+      const existing = candidates.find((c) => c.page === p);
+      // Boost if the page is absent or its score is below the section-boost threshold.
+      // An explicit-page boost (score 100) or expansion boost (score 90) is left alone.
+      if (!existing || existing.score < 80) {
+        candidates = candidates.filter((c) => c.page !== p);
+        const pageChunk = chunks.find((c) => c.page === p);
+        if (pageChunk) {
+          const sectionBoost: ScoredChunk = { ...pageChunk, score: 80 };
+          candidates.unshift(sectionBoost);
+        }
+      }
+    }
+  }
 
   // Base retrieval + gate time only (disjoint from expandMs). The re-retrieval
   // in the weak path below is timed separately and added on, so the two spans

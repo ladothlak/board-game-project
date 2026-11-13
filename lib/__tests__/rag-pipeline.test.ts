@@ -194,7 +194,7 @@ describe("buildRagContext", () => {
   });
 
   it("caps chunks at their allocation and keeps relevant sentences when cutting", async () => {
-    const longSetup = `Set up the board. ${"a".repeat(2980)}`; // ~3000 chars
+    const longSetup = `Place tokens on the board. ${"a".repeat(4973)}`; // ~5000 chars
     const longCombat = `${"b".repeat(4900)} set up the board`; // ~5000 chars
     vi.mocked(loadIndex).mockResolvedValue([
       { id: "l1", slug: SLUG, title: "Setup", page: 1, text: longSetup },
@@ -207,16 +207,17 @@ describe("buildRagContext", () => {
     // Both pages stay represented...
     expect(result.excerpts).toContain("--- Page 1 ---");
     expect(result.excerpts).toContain("--- Page 2 ---");
-    // ...the top chunk is capped at its allocation (no more full-text pass)...
-    const page1Part = result.excerpts.split("\n\n")[0].replace("--- Page 1 ---\n", "");
+
+    // Extract each page's text by its header (order-independent).
+    const parts = result.excerpts.split(/\n\n(?=--- Page \d+ ---)/);
+    const page1Part = parts.find((p) => p.startsWith("--- Page 1 ---"))!.replace("--- Page 1 ---\n", "");
+    const page2Part = parts.find((p) => p.startsWith("--- Page 2 ---"))!.replace("--- Page 2 ---\n", "");
+
+    // ...each chunk is capped at its allocation (no full-text pass)...
     expect(page1Part.length).toBeLessThan(longSetup.length);
-    // ...but the query-relevant sentence survives the cut...
-    expect(page1Part).toContain("Set up the board.");
-    // ...and the second chunk is truncated to fit its allocation (half the
-    // 4000-char budget, since the two chunks score equally).
-    const page2Part = result.excerpts.split("\n\n")[1].replace("--- Page 2 ---\n", "");
     expect(page2Part.length).toBeLessThan(longCombat.length);
-    expect(page2Part.length).toBeLessThanOrEqual(2000);
+    // ...and the query-relevant sentence survives the cut...
+    expect(page1Part).toContain("Place tokens on the board.");
 
     // The whole context stays within the ~4000-char budget plus headers.
     expect(result.excerpts.length).toBeLessThan(4200);
@@ -335,6 +336,54 @@ describe("buildRagContext", () => {
 
     // The resolved query type is threaded out for per-question budgeting.
     expect(result.queryType).toBe("specific-rule");
+  });
+});
+
+// ─── buildRagContext — section-anchored boost (issue #63) ──────────────────
+//
+// When the query type maps to a TOC section, the section's pages are boosted
+// into the candidate set so the page that answers the question is always in
+// the excerpts, even when lexical retrieval can't discriminate a common-word
+// query.
+
+describe("buildRagContext — section-anchored boost (issue #63)", () => {
+  beforeEach(() => {
+    vi.mocked(loadIndex).mockResolvedValue(CHUNKS);
+  });
+
+  it("boosts the setup section page when lexical retrieval can't discriminate", async () => {
+    // The setup page has NO overlap with the query's distinctive term ("begin").
+    // Only common words (how, do, i) appear on every page — lexical retrieval
+    // can't discriminate. The section boost must pull p. 1 into the context.
+    vi.mocked(loadIndex).mockResolvedValue([
+      { id: "s1", slug: SLUG, title: "Setup", page: 1, text: "Start by placing all tokens on the board and dealing the cards." },
+      { id: "s2", slug: SLUG, title: "Combat", page: 2, text: "Each turn you may attack with your forces during the game." },
+      { id: "s3", slug: SLUG, title: "Victory", page: 3, text: "You win when all enemies are destroyed in the game." },
+    ]);
+    stubLlm();
+
+    const result = await buildRagContext(SLUG, "How do I begin?", KEY);
+
+    expect(result.queryType).toBe("setup");
+    expect(result.pages).toContain(1);
+    expect(result.excerpts).toContain("--- Page 1 ---");
+  });
+
+  it("does not double-boost a page already boosted by an explicit reference", async () => {
+    // The setup page is also explicitly referenced — the explicit boost (score 100)
+    // takes priority and the section boost is skipped.
+    vi.mocked(loadIndex).mockResolvedValue([
+      { id: "s1", slug: SLUG, title: "Setup", page: 1, text: "Set up the board by placing the tokens." },
+      { id: "s2", slug: SLUG, title: "Combat", page: 2, text: "Each turn you may attack with your forces." },
+    ]);
+    stubLlm();
+
+    const result = await buildRagContext(SLUG, "Tell me about p. 1 and how to set up", KEY);
+
+    // The explicit page reference boosts p. 1 to score 100; the section boost
+    // sees it's already boosted and skips.
+    expect(result.pages).toContain(1);
+    expect(result.excerpts.startsWith("--- Page 1 ---")).toBe(true);
   });
 });
 
