@@ -323,6 +323,9 @@ pre-committed criteria (CHAT-LATENCY-PLAN.md §1.3) are met in both runs:
 - In-context hit rate regresses ≤ 2 points: 96.9% − 96.9% = **0** ✅
 - Existing-only divergence cases ≤ 1: **1** ✅
 
+Hybrid was not adopted: its run-2 in-context hit rate (93.8%) regressed 3.1 points
+above the 2-point quality bar, so it does not meet the same criteria as the enhanced arm.
+
 The env override is kept so A/B benchmarking stays clean: `USE_DECISION_MODEL=0`
 disables the decision model, `1` (or unset) enables it — which is now the
 default in both chat routes.

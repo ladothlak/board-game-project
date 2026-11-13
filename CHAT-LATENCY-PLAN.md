@@ -21,7 +21,12 @@ click "Ask" ──▶ prewarm cache? ─▶ RAG (expand → retrieve → re-rank
 | Path | Mean end-to-end |
 | --- | --- |
 | Existing pipeline (keyword + LLM expand + LLM re-rank) | ~37.7 s |
-| Decision-model pipeline (`USE_DECISION_MODEL=1`, opt-in, default **off**) | ~8.8 s |
+| Decision-model pipeline (`USE_DECISION_MODEL=1`, default **on**) | ~8.8 s |
+
+**Resolved 2026-11-13:** the decision model is now the global default — the
+`opt-in, default off` state this baseline was written against no longer exists.
+Fresh re-baseline: mean end-to-end ~3.8 s vs ~14–15.8 s for the existing pipeline
+— see `PERFORMANCE-PLAN.md` §4.1.
 
 The generation call dominates: a 27B reasoning model burning hundreds of thinking
 tokens before the first streamed character, with `max_tokens: 2000` and a 60 s
@@ -163,6 +168,10 @@ need fresh numbers before any default flip.
      meaningful latency gain; if not, keep `USE_DECISION_MODEL` opt-in and
      revisit after 1.2 and 1.4 land (they change which questions reach the
      re-rank at all, which changes what this decision is even about).
+
+    **Resolved 2026-11-13:** the default was flipped to the decision model —
+    `USE_DECISION_MODEL` is now on by default, so the "keep opt-in" fallback no
+    longer applies. See `PERFORMANCE-PLAN.md` §4.1.
 5. Whichever arm wins, keep the env override so A/B benchmarking stays clean
    going forward.
 
