@@ -248,6 +248,7 @@ describe("buildRagContext hybrid mode (issue #59)", () => {
     expect(result).toEqual({
       excerpts: "",
       toc: "",
+      queryType: "general",
       confidence: 0,
       pages: [],
       rankedPages: [],

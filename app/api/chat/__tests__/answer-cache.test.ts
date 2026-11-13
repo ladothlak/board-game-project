@@ -21,7 +21,7 @@ import { resetAnswerCacheForTest, storeAnswer, getAnswer } from "../answer-cache
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 import { getGame } from "@/lib/games";
-import { buildRagContext } from "@/lib/rag";
+import { buildRagContext, type RagContext } from "@/lib/rag";
 import { getPrewarm, getInflightPrewarm } from "../prewarm/route";
 import { resetRetrieveCachesForTest } from "@/lib/retrieve";
 
@@ -53,9 +53,12 @@ vi.mock("@/lib/games", () => ({
 }));
 // The RAG pipeline is the unit under test's dependency — mock it so misses
 // return a deterministic context.
-vi.mock("@/lib/rag", () => ({
-  buildRagContext: vi.fn(),
-}));
+// Only buildRagContext is mocked; detectExplicitPages (issue #61) stays real
+// so the route's max_tokens scaling runs against its true behavior.
+vi.mock("@/lib/rag", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual, buildRagContext: vi.fn() };
+});
 // The prewarm cache and the in-flight map are module state in the prewarm
 // route; mock both lookups so hit/miss/in-flight is controlled per test.
 vi.mock("../prewarm/route", () => ({
@@ -70,9 +73,10 @@ const SLUG = "test-game";
 const GAME = { slug: SLUG, title: "Test Game", description: "A test game." };
 
 /** Deterministic RAG context (the cache-hit path never reaches the pipeline). */
-const RAG_CONTEXT = {
+const RAG_CONTEXT: RagContext = {
   excerpts: "--- Page 3 ---\nYou win when all enemies are destroyed.",
-  toc: "p. 3: Victory condition.",
+  toc: "Victory / End of Game: p. 3",
+  queryType: "specific-rule",
   confidence: 0.8,
   pages: [3],
   rankedPages: [3],

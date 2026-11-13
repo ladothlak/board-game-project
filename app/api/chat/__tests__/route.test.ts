@@ -17,7 +17,7 @@ import { POST } from "../route";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 import { getGame } from "@/lib/games";
-import { buildRagContext } from "@/lib/rag";
+import { buildRagContext, type RagContext } from "@/lib/rag";
 import { getPrewarm, getInflightPrewarm } from "../prewarm/route";
 import { resetAnswerCacheForTest } from "../answer-cache";
 import { resetRetrieveCachesForTest } from "@/lib/retrieve";
@@ -49,10 +49,13 @@ vi.mock("@/lib/games", () => ({
   getGame: vi.fn(),
 }));
 // The RAG pipeline is the unit under test's dependency — mock it so the route
-// returns a deterministic context with known per-stage timings.
-vi.mock("@/lib/rag", () => ({
-  buildRagContext: vi.fn(),
-}));
+// returns a deterministic context with known per-stage timings. Only
+// buildRagContext is mocked; detectExplicitPages (issue #61) stays real so the
+// max_tokens scaling is exercised against its true behavior.
+vi.mock("@/lib/rag", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual, buildRagContext: vi.fn() };
+});
 // The prewarm cache and the in-flight map are module state in the prewarm
 // route; mock both lookups so hit/miss/in-flight is controlled per test.
 vi.mock("../prewarm/route", () => ({
@@ -67,9 +70,12 @@ const SLUG = "test-game";
 const GAME = { slug: SLUG, title: "Test Game", description: "A test game." };
 
 /** Deterministic RAG context with known per-stage timings (issue #55). */
-const RAG_CONTEXT = {
+const RAG_CONTEXT: RagContext = {
   excerpts: "--- Page 3 ---\nYou win when all enemies are destroyed.",
-  toc: "p. 3: Victory condition.",
+  // Hierarchical-only TOC, as buildRagContext produces it since issue #61
+  // dropped the flat one-line-per-page map.
+  toc: "Victory / End of Game: p. 3",
+  queryType: "specific-rule",
   confidence: 0.8,
   pages: [3],
   rankedPages: [3],
@@ -415,5 +421,60 @@ describe("POST /api/chat in-flight prewarm deduplication (issue #60)", () => {
       rerankMs: 56,
       firstTokenMs: expect.any(Number),
     });
+  });
+});
+
+// ─── Generation prompt trim (issue #61) ──────────────────────────────────────
+//
+// The system prompt no longer carries the flat one-line-per-page map (the
+// hierarchical TOC covers every page), and max_tokens scales with question
+// type: explicit-page questions get a smaller budget. These tests inspect the
+// provider request body that mockFetch captures — no live network involved.
+
+describe("POST /api/chat generation prompt trim (issue #61)", () => {
+  /** The JSON body the route sent to the provider (mockFetch's last call). */
+  function providerBody(): Record<string, unknown> {
+    const calls = vi.mocked(mockFetch).mock.calls;
+    expect(calls.length).toBe(1);
+    return JSON.parse(String(calls[0][1]?.body)) as Record<string, unknown>;
+  }
+
+  it("sends max_tokens 1000 for an explicit-page question", async () => {
+    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+
+    const res = await post({ slug: SLUG, question: "What does page 3 say?" });
+    await res.text();
+
+    expect(providerBody().max_tokens).toBe(1000);
+  });
+
+  it("sends max_tokens 2000 for a question without an explicit page", async () => {
+    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    await res.text();
+
+    expect(providerBody().max_tokens).toBe(2000);
+  });
+
+  it("carries the hierarchical TOC in the system prompt without the flat page map", async () => {
+    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    await res.text();
+
+    const body = providerBody();
+    const systemMessages = (body.messages as { role: string; content: string }[])
+      .filter((m) => m.role === "system")
+      .map((m) => m.content);
+
+    // The hierarchical TOC from the RAG context is present in the prompt...
+    expect(systemMessages.some((c) => c.includes("Victory / End of Game: p. 3"))).toBe(true);
+    // ...and no flat one-line-per-page map line ("p. N: <text>") appears in any
+    // system message — the TOC is carried exactly once.
+    const flatMapLine = /^p\. \d+: .+$/m;
+    for (const content of systemMessages) {
+      expect(content.match(flatMapLine)).toBeNull();
+    }
   });
 });

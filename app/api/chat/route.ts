@@ -3,7 +3,7 @@ import { requireAuth } from "@/lib/auth";
 import { getGame } from "@/lib/games";
 import { loadIndex, retrieve, docFreqFor } from "@/lib/retrieve";
 import { getAnswer, storeAnswer } from "./answer-cache";
-import { buildRagContext, type RagTimings } from "@/lib/rag";
+import { buildRagContext, detectExplicitPages, type RagTimings } from "@/lib/rag";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { validateQuestion } from "@/lib/guard";
 import { withQueue } from "@/lib/llm-queue";
@@ -243,8 +243,8 @@ export async function POST(req: Request) {
             "Keep answers concise and friendly."
           : `You are a warm, knowledgeable expert on the board game "${game.title}". ` +
             "Answer the player's question using ONLY the rulebook excerpts provided. " +
-            "A per-page map of the whole rulebook is also included: use it to orient yourself, " +
-            "to cite the right page, and to tell the player which page to flip to when the " +
+            "A table of contents for the whole rulebook (sections with their pages) is also included: " +
+            "use it to orient yourself, to cite the right page, and to tell the player which page to flip to when the " +
             "answer isn't in the loaded excerpts. If you're not sure, say so and point them to the likely page. " +
             "When you reference a rule, cite its page like (p. 3). Keep answers concise and friendly." +
             confidenceNote +
@@ -262,7 +262,7 @@ export async function POST(req: Request) {
           { role: "system", content: systemPrompt + expansionNote },
           {
             role: "system",
-            content: `What's on each page of the rulebook (one line per page):\n${toc || "(none indexed yet)"}`,
+            content: `Table of contents for the rulebook (sections with their pages):\n${toc || "(none indexed yet)"}`,
           },
           {
             role: "system",
@@ -274,6 +274,14 @@ export async function POST(req: Request) {
           ...history.slice(-6).map((m) => ({ role: m.role, content: m.content })),
           { role: "user", content: question.trim() },
         ];
+
+        // Trim the generation budget (issue #61): an explicit-page question has
+        // its answer in-context and needs less thinking, so it gets a smaller
+        // budget. The Unsloth endpoint exposes no per-request reasoning-effort
+        // knob — `unsloth run` takes --reasoning-effort as a server-startup flag
+        // only — so the token budget is the only per-question lever here.
+        const explicitPages = detectExplicitPages(question.trim());
+        const maxTokens = explicitPages.length > 0 ? 1000 : 2000;
 
         // Single-flight queue + 60s timeout to prevent resource exhaustion.
         const res = await withQueue(() =>
@@ -288,7 +296,7 @@ export async function POST(req: Request) {
               messages,
               temperature: 0.3,
               // Reasoning model: needs room to think AND answer (see digest route).
-              max_tokens: 2000,
+              max_tokens: maxTokens,
               stream: true,
             }),
             signal: AbortSignal.timeout(60_000),

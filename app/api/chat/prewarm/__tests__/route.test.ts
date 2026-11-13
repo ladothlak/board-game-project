@@ -15,7 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { POST, getPrewarm, getInflightPrewarm, resetPrewarmStateForTest } from "../route";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { getGame } from "@/lib/games";
-import { buildRagContext } from "@/lib/rag";
+import { buildRagContext, type RagContext } from "@/lib/rag";
 import { resetRetrieveCachesForTest } from "@/lib/retrieve";
 
 // The route (via buildRagContext → loadIndex) refreshes the index mtime on
@@ -63,9 +63,10 @@ const GAME = { slug: SLUG, title: "Test Game", description: "A test game." };
 const QUESTION = "How do I set up the board for the game?";
 
 /** Deterministic RAG context for the dedup tests (no real pipeline involved). */
-const RAG_CONTEXT = {
+const RAG_CONTEXT: RagContext = {
   excerpts: "--- Page 3 ---\nYou win when all enemies are destroyed.",
-  toc: "p. 3: Victory condition.",
+  toc: "Victory / End of Game: p. 3",
+  queryType: "specific-rule",
   confidence: 0.8,
   pages: [3],
   rankedPages: [3],

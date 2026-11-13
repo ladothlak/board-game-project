@@ -11,9 +11,9 @@ import type { Chunk } from "../retrieve";
 // expansion boosts → LLM re-ranking → cross-reference following → adaptive
 // budget → confidence → hierarchical TOC.
 //
-// Only loadIndex is mocked, so the real retrieve/pageMap implementations run —
-// the tests assert on observable pipeline behavior (what goes in, what comes
-// out), not on internal scoring details.
+// Only loadIndex is mocked, so the real retrieve/hierarchicalToc
+// implementations run — the tests assert on observable pipeline behavior
+// (what goes in, what comes out), not on internal scoring details.
 
 vi.mock("../retrieve", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
@@ -227,10 +227,12 @@ describe("buildRagContext", () => {
 
     const result = await buildRagContext("other-game", "How do I win?", KEY);
 
-    // No stage ran, so the timings are all zero.
+    // No stage ran, so the timings are all zero and the query type is the
+    // unclassified default.
     expect(result).toEqual({
       excerpts: "",
       toc: "",
+      queryType: "general",
       confidence: 0,
       pages: [],
       rankedPages: [],
@@ -314,23 +316,25 @@ describe("buildRagContext", () => {
     expect(result.pages).toEqual([1, 3]);
   });
 
-  it("generates a hierarchical TOC combined with the flat page map", async () => {
+  it("generates a hierarchical TOC without the redundant flat page map (issue #61)", async () => {
     stubLlm();
 
     const result = await buildRagContext(SLUG, "How do I win?", KEY);
 
-    // Hierarchical section lines, one per detected rulebook section.
+    // Hierarchical section lines, one per detected rulebook section — every
+    // chunk's page is grouped into a section, so the TOC covers all pages.
     expect(result.toc).toContain("Setup: p. 1");
     expect(result.toc).toContain("Game Structure / Turn Order: p. 2");
     expect(result.toc).toContain("Victory / End of Game: p. 3");
 
-    // Flat one-line-per-page map, appended after the sections.
-    expect(result.toc).toContain("p. 1: Set up the board by placing the tokens.");
-    expect(result.toc).toContain("p. 2: Each turn you may attack with your forces.");
-    expect(result.toc).toContain("p. 3: You win when all enemies are destroyed in the game.");
+    // The flat one-line-per-page map is no longer included: it was redundant
+    // prefill, so the prompt carries the TOC exactly once.
+    expect(result.toc).not.toContain("p. 1: Set up the board by placing the tokens.");
+    expect(result.toc).not.toContain("p. 2: Each turn you may attack with your forces.");
+    expect(result.toc).not.toContain("p. 3: You win when all enemies are destroyed in the game.");
 
-    // Section headers come before the flat map.
-    expect(result.toc.indexOf("Setup: p. 1")).toBeLessThan(result.toc.indexOf("p. 1: "));
+    // The resolved query type is threaded out for per-question budgeting.
+    expect(result.queryType).toBe("specific-rule");
   });
 });
 

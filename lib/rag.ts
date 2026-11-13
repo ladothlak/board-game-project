@@ -1,5 +1,5 @@
 import { getGame } from "./games";
-import { loadIndex, retrieve, pageMap, docFreqFor, tokenize, Chunk, type ScoringMode } from "./retrieve";
+import { loadIndex, retrieve, docFreqFor, tokenize, Chunk, type ScoringMode } from "./retrieve";
 import { askDecisionModel, type QuestionSpec } from "./decision-model";
 
 // Unsloth runs locally (Unsloth Studio / `unsloth run`) and exposes an
@@ -47,6 +47,12 @@ export interface RagContext {
   excerpts: string;
   /** The hierarchical TOC for orientation. */
   toc: string;
+  /**
+   * The resolved query type (decision-model verdict, or the keyword heuristic
+   * fallback) — threaded out so callers can budget per question type
+   * (issue #61).
+   */
+  queryType: QueryType;
   /** Confidence 0–1: how well the retrieval matched the question. */
   confidence: number;
   /** Pages cited in the excerpts, sorted by page number (display order). */
@@ -874,7 +880,7 @@ export async function buildRagContext(
 
   const chunks = (await loadIndex()).filter((c) => c.slug === slug);
   if (chunks.length === 0) {
-    return { excerpts: "", toc: "", confidence: 0, pages: [], rankedPages: [], timings };
+    return { excerpts: "", toc: "", queryType: "general", confidence: 0, pages: [], rankedPages: [], timings };
   }
 
   // Resolve classification: the decision model's verdict when available,
@@ -987,10 +993,11 @@ export async function buildRagContext(
   // 9. Confidence.
   const confidence = estimateConfidence(candidates);
 
-  // 10. Hierarchical TOC (combined with flat page map).
-  const hToc = hierarchicalToc(chunks);
-  const flatMap = pageMap(chunks).join("\n");
-  const toc = hToc ? `${hToc}\n\n${flatMap}` : flatMap;
+  // 10. Hierarchical TOC. The flat one-line-per-page map is no longer
+  // included (issue #61): hierarchicalToc groups every chunk's page into a
+  // section, so it already covers the whole rulebook — the flat map was
+  // redundant prefill that doubled the TOC's token cost.
+  const toc = hierarchicalToc(chunks);
 
   // Pages in retrieval-relevance order (candidate order after re-rank +
   // cross-ref following), deduplicated with first occurrence kept — this is
@@ -999,5 +1006,5 @@ export async function buildRagContext(
   // Display order: sorted by page number, as before.
   const pages = [...rankedPages].sort((a, b) => a - b);
 
-  return { excerpts, toc, confidence, pages, rankedPages, timings };
+  return { excerpts, toc, queryType, confidence, pages, rankedPages, timings };
 }
