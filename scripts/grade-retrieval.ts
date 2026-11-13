@@ -1,10 +1,13 @@
 /**
  * Retrieval grader (deterministic, offline).
  *
- * Runs the RAG pipeline over a fixed set of labelled questions and checks
- * that EVERY expected answer page made it into the selected page set. This is
- * the regression bar for retrieval quality: a case passes only when all of
- * its grounded pages are in `result.pages`, not just one.
+ * Runs the RAG pipeline over a fixed set of labelled questions and checks that
+ * EVERY expected answer page was actually DELIVERED in the assembled context.
+ * This is the regression bar for retrieval quality: a case passes only when
+ * all of its grounded pages are in `result.excerptedPages` (the pages present
+ * in the context string, not just the candidate set) AND each delivers at
+ * least FULL_COVERAGE_THRESHOLD of its original text — page membership alone
+ * no longer counts (issue #63).
  *
  * Fully deterministic — no LLM, decision model, or network call is ever fired:
  *   - useDecisionModel: false  → keyword-heuristic classification only
@@ -25,6 +28,13 @@ interface GradeCase {
   question: string;
   expectedPages: number[];
 }
+
+/**
+ * The "full-coverage hit" threshold (RAG-PIPELINE-IMPROVEMENT-PLAN.md §5.2):
+ * an expected page counts as delivered when at least this fraction of its
+ * original text is in the excerpts. Named so the bar lives in one place.
+ */
+const FULL_COVERAGE_THRESHOLD = 0.6;
 
 const GRADE_CASES: GradeCase[] = [
   // Anachrony
@@ -152,28 +162,72 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const rows: { c: GradeCase; type: string; pages: number[]; pass: boolean }[] = [];
+  // Original page text length per slug (first chunk per page — the same
+  // convention measureExcerptDelivery uses) so each case's delivered char
+  // count can be reported alongside the coverage ratio.
+  const originalLength = new Map<string, Map<number, number>>();
+  for (const c of index) {
+    let m = originalLength.get(c.slug);
+    if (!m) {
+      m = new Map();
+      originalLength.set(c.slug, m);
+    }
+    if (!m.has(c.page)) m.set(c.page, c.text.length);
+  }
+
+  const rows: {
+    c: GradeCase;
+    type: string;
+    pages: number[];
+    coverages: number[];
+    missingCount: number;
+    deliveredChars: number;
+    pass: boolean;
+  }[] = [];
   for (const c of GRADE_CASES) {
     const result = await buildRagContext(c.slug, c.question, "grade-key", undefined, {
       useDecisionModel: false,
       skipRerank: true,
       expansionMode: "deterministic",
     });
-    // A case passes only when EVERY expected page is in the selected set.
-    const pass = c.expectedPages.every((p) => result.pages.includes(p));
-    rows.push({ c, type: result.queryType, pages: result.pages, pass });
+    // A case passes only when EVERY expected page is in the EXCERPTS (not just
+    // the candidate set) AND delivers at least FULL_COVERAGE_THRESHOLD of its
+    // original text (issue #63). An absent page has zero coverage.
+    const coverages = c.expectedPages.map((p) => result.excerptCoverage[p] ?? 0);
+    const missingCount = c.expectedPages.filter((p) => !result.excerptedPages.includes(p)).length;
+    const pass = missingCount === 0 && coverages.every((cov) => cov >= FULL_COVERAGE_THRESHOLD);
+    // Delivered chars across the expected pages (absent pages contribute 0).
+    const deliveredChars = c.expectedPages.reduce(
+      (sum, p) => sum + Math.round((result.excerptCoverage[p] ?? 0) * (originalLength.get(c.slug)?.get(p) ?? 0)),
+      0
+    );
+    rows.push({ c, type: result.queryType, pages: result.pages, coverages, missingCount, deliveredChars, pass });
   }
 
   console.log("\n──────── Retrieval grade ────────");
-  console.log("idx  slug                        question                                        expected  got (pages)     type            pass");
+  console.log("idx  slug                        question                                        expected  got (pages)     delivered  type            pass");
   rows.forEach((r, i) => {
     console.log(
-      `${String(i + 1).padStart(3)}  ${r.c.slug.padEnd(27)} ${r.c.question.slice(0, 52).padEnd(52)} [${r.c.expectedPages.join(",")}]   [${r.pages.join(",")}]   ${r.type.padEnd(13)} ${r.pass ? "✓" : "✗"}`
+      `${String(i + 1).padStart(3)}  ${r.c.slug.padEnd(27)} ${r.c.question.slice(0, 52).padEnd(52)} [${r.c.expectedPages.join(",")}]   [${r.pages.join(",")}]   ${String(r.deliveredChars).padStart(8)}  ${r.type.padEnd(13)} ${r.pass ? "✓" : "✗"}`
     );
   });
 
   const passed = rows.filter((r) => r.pass).length;
-  console.log(`\nhit rate: ${passed}/${rows.length} (${(100 * passed / rows.length).toFixed(1)}%)`);
+  // Full-coverage hit rate: every expected page excerpted at ≥ threshold — the
+  // plan's §5.2 metric, now the pass bar itself (issue #63).
+  console.log(`\nhit rate (full-coverage, ≥${FULL_COVERAGE_THRESHOLD} of original text): ${passed}/${rows.length} (${(100 * passed / rows.length).toFixed(1)}%)`);
+
+  // §5.2 metrics: in-excerpts membership (the old page-membership bar, now
+  // measured against the ACTUAL excerpts), average expected-page coverage,
+  // and how many expected pages are absent from the excerpts entirely.
+  const allCoverages = rows.flatMap((r) => r.coverages);
+  const avgCoverage = allCoverages.length > 0 ? allCoverages.reduce((a, b) => a + b, 0) / allCoverages.length : 0;
+  const inExcerpts = rows.filter((r) => r.missingCount === 0).length;
+  const absentPages = rows.reduce((n, r) => n + r.missingCount, 0);
+  const totalExpected = rows.reduce((n, r) => n + r.c.expectedPages.length, 0);
+  console.log(`in-excerpts hit rate (membership only): ${inExcerpts}/${rows.length} (${(100 * inExcerpts / rows.length).toFixed(1)}%)`);
+  console.log(`average expected-page coverage: ${(100 * avgCoverage).toFixed(1)}%`);
+  console.log(`expected pages absent from excerpts: ${absentPages}/${totalExpected} (${(100 * absentPages / totalExpected).toFixed(1)}%)`);
 
   process.exit(passed === rows.length ? 0 : 1);
 }

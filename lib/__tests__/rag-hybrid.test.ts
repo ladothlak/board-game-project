@@ -254,6 +254,8 @@ describe("buildRagContext hybrid mode (issue #59)", () => {
       confidence: 0,
       pages: [],
       rankedPages: [],
+      excerptedPages: [],
+      excerptCoverage: {},
       timings: { expandMs: 0, retrieveMs: 0, rerankMs: 0 },
     });
     // Arm 1 (decision model) fires its classification call before the empty

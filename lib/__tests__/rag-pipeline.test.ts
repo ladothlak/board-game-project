@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { buildRagContext, decisionClassify, decisionRerank, expandQuery, expandQueryDeterministic, isEcho } from "../rag";
+import { buildRagContext, decisionClassify, decisionRerank, expandQuery, expandQueryDeterministic, isEcho, measureExcerptDelivery } from "../rag";
 import { loadIndex, resetRetrieveCachesForTest } from "../retrieve";
 import type { Chunk } from "../retrieve";
 
@@ -238,6 +238,8 @@ describe("buildRagContext", () => {
       confidence: 0,
       pages: [],
       rankedPages: [],
+      excerptedPages: [],
+      excerptCoverage: {},
       timings: { expandMs: 0, retrieveMs: 0, rerankMs: 0 },
     });
     // No LLM work is done for a game with no index.
@@ -342,6 +344,103 @@ describe("buildRagContext", () => {
     // precedence over specific-rule in classifyQuery), so that's the type
     // threaded out here.
     expect(result.queryType).toBe("victory");
+  });
+});
+
+// ─── buildRagContext — excerpt delivery measurement (issue #63) ───────────
+//
+// excerptedPages / excerptCoverage are derived from the ACTUAL assembled
+// context string, so a page that is in `pages` (candidate membership) but not
+// in the excerpts can no longer be confused with one the LLM actually saw.
+
+describe("buildRagContext — excerpt delivery measurement (issue #63)", () => {
+  beforeEach(() => {
+    vi.mocked(loadIndex).mockResolvedValue(CHUNKS);
+  });
+
+  it("reports excerptedPages exactly as the pages present in the context string", async () => {
+    stubLlm();
+    const result = await buildRagContext(SLUG, "How do I win?", KEY);
+
+    // Every page header in the excerpts is reported, and nothing else:
+    // excerptedPages is the deduplicated, sorted set of block headers.
+    const headers = [...result.excerpts.matchAll(/--- Page (\d+) ---/g)].map((m) => Number(m[1]));
+    expect(result.excerptedPages).toEqual([...new Set(headers)].sort((a, b) => a - b));
+    // A page is excerpted iff it has a block in the context string.
+    for (const p of result.excerptedPages) {
+      expect(result.excerpts).toContain(`--- Page ${p} ---`);
+    }
+  });
+
+  it("reports full coverage (1) when a page's entire text is delivered", async () => {
+    stubLlm();
+    const result = await buildRagContext(SLUG, "How do I win?", KEY);
+
+    // The victory chunk is short enough to survive its allocation uncut, so
+    // its coverage is exactly 1...
+    expect(result.excerptCoverage[3]).toBe(1);
+    // ...and every coverage value is clamped into [0, 1], keyed only by the
+    // excerpted pages.
+    expect(Object.keys(result.excerptCoverage).map(Number)).toEqual(result.excerptedPages);
+    for (const cov of Object.values(result.excerptCoverage)) {
+      expect(cov).toBeGreaterThanOrEqual(0);
+      expect(cov).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("returns empty excerpt fields when the slug has no indexed chunks", async () => {
+    stubLlm();
+
+    const result = await buildRagContext("other-game", "How do I win?", KEY);
+
+    expect(result.excerptedPages).toEqual([]);
+    expect(result.excerptCoverage).toEqual({});
+  });
+});
+
+// ─── measureExcerptDelivery (pure, CI-deterministic) ───────────────────────
+
+describe("measureExcerptDelivery", () => {
+  const MEASURE_CHUNKS: Chunk[] = [
+    { id: "e1", slug: SLUG, title: "", page: 1, text: "Set up the board by placing the tokens." }, // 40 chars
+    { id: "e2", slug: SLUG, title: "", page: 2, text: "Each turn you may attack with your forces." }, // 43 chars
+  ];
+
+  it("parses excerptedPages from the --- Page N --- blocks, sorted by page number", () => {
+    const excerpts = "--- Page 2 ---\nabc\n\n--- Page 1 ---\ndef";
+    expect(measureExcerptDelivery(excerpts, MEASURE_CHUNKS).excerptedPages).toEqual([1, 2]);
+  });
+
+  it("computes coverage as delivered chars / original page length", () => {
+    // p.1 delivers 3 of its 40 chars (7.5%); p.2 delivers all 43 of its text.
+    const excerpts =
+      "--- Page 1 ---\ndef\n\n--- Page 2 ---\nEach turn you may attack with your forces.";
+    const { excerptCoverage } = measureExcerptDelivery(excerpts, MEASURE_CHUNKS);
+    expect(excerptCoverage[1]).toBeCloseTo(3 / 40);
+    expect(excerptCoverage[2]).toBe(1);
+  });
+
+  it("sums delivered chars across duplicate page blocks", () => {
+    // Two blocks for the same page (base + expansion chunks) add up.
+    const excerpts = "--- Page 1 ---\nab\n\n--- Page 1 ---\ncd";
+    const { excerptedPages, excerptCoverage } = measureExcerptDelivery(excerpts, MEASURE_CHUNKS);
+    expect(excerptedPages).toEqual([1]);
+    expect(excerptCoverage[1]).toBeCloseTo(4 / 40);
+  });
+
+  it("clamps coverage to 1 when delivered chars exceed the original length", () => {
+    const excerpts = `--- Page 1 ---\n${"x".repeat(41)}`;
+    expect(measureExcerptDelivery(excerpts, MEASURE_CHUNKS).excerptCoverage[1]).toBe(1);
+  });
+
+  it("omits pages that are not in the context string", () => {
+    const { excerptedPages, excerptCoverage } = measureExcerptDelivery("--- Page 1 ---\nab", MEASURE_CHUNKS);
+    expect(excerptedPages).toEqual([1]);
+    expect(2 in excerptCoverage).toBe(false);
+  });
+
+  it("returns empty results for an empty context string", () => {
+    expect(measureExcerptDelivery("", MEASURE_CHUNKS)).toEqual({ excerptedPages: [], excerptCoverage: {} });
   });
 });
 

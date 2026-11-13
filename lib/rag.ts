@@ -66,6 +66,22 @@ export interface RagContext {
    */
   rankedPages: number[];
   /**
+   * The pages actually present in the assembled `excerpts` string, parsed
+   * from its `--- Page N ---` blocks (issue #63). Unlike `pages` /
+   * `rankedPages` (candidate membership), a page listed here is guaranteed to
+   * have delivered text — a returned page that is not in the excerpts is
+   * impossible by construction. Sorted by page number.
+   */
+  excerptedPages: number[];
+  /**
+   * Per excerpted page, the ratio of delivered chars to the original page
+   * text length (loaded from the search index), clamped 0..1 (issue #63). This
+   * is the "full-coverage hit" metric in RAG-PIPELINE-IMPROVEMENT-PLAN.md
+   * §5.2: a grade case passes only when every expected page is excerpted at
+   * ≥ 0.6, not merely present in the candidate set.
+   */
+  excerptCoverage: Record<number, number>;
+  /**
    * Per-stage wall-clock durations for this build (Tier 0 measurement, issue #55)
    * so callers can log a latency breakdown. Additive — consumers that only
    * need the context (e.g. the prewarm route) can ignore it.
@@ -713,6 +729,53 @@ export function adaptiveContext(
   return parts.join("\n\n");
 }
 
+/**
+ * Derive which pages are actually present in the assembled context string and
+ * how much of each page's original text made it through the budget cut
+ * (issue #63). Both fields are derived from the ACTUAL `--- Page N ---`
+ * blocks after assembly, so a returned page that is not in the excerpts is
+ * impossible by construction.
+ *
+ * - `excerptedPages`: the pages present, sorted by page number. A page with
+ *   multiple chunks (base + expansion) contributes the sum of its blocks'
+ *   delivered chars.
+ * - `excerptCoverage`: per excerpted page, delivered chars / original page
+ *   text length, clamped 0..1. The original page text is the first chunk for
+ *   that page in index order — the same convention hierarchicalToc uses. A
+ *   page with no index entry (or empty text) gets 0.
+ */
+export function measureExcerptDelivery(
+  excerpts: string,
+  chunks: Chunk[]
+): { excerptedPages: number[]; excerptCoverage: Record<number, number> } {
+  // Delivered chars per page, parsed from the actual context blocks (the same
+  // block split the pipeline tests use to inspect assembled contexts).
+  const delivered = new Map<number, number>();
+  for (const part of excerpts.split(/\n\n(?=--- Page \d+ ---)/)) {
+    const m = part.match(/^--- Page (\d+) ---\n([\s\S]*)$/);
+    if (!m) continue;
+    const page = Number(m[1]);
+    delivered.set(page, (delivered.get(page) ?? 0) + m[2].length);
+  }
+
+  const excerptedPages = [...delivered.keys()].sort((a, b) => a - b);
+
+  // Original page text: first chunk per page in index order (the same
+  // convention hierarchicalToc uses).
+  const pageText = new Map<number, string>();
+  for (const c of chunks) {
+    if (!pageText.has(c.page)) pageText.set(c.page, c.text);
+  }
+
+  const excerptCoverage: Record<number, number> = {};
+  for (const page of excerptedPages) {
+    const original = pageText.get(page)?.length ?? 0;
+    excerptCoverage[page] = original === 0 ? 0 : Math.min(1, delivered.get(page)! / original);
+  }
+
+  return { excerptedPages, excerptCoverage };
+}
+
 // ─── 7. Citation Confidence ────────────────────────────────────────────────
 
 /**
@@ -969,7 +1032,17 @@ export async function buildRagContext(
 
   const chunks = (await loadIndex()).filter((c) => c.slug === slug);
   if (chunks.length === 0) {
-    return { excerpts: "", toc: "", queryType: "general", confidence: 0, pages: [], rankedPages: [], timings };
+    return {
+      excerpts: "",
+      toc: "",
+      queryType: "general",
+      confidence: 0,
+      pages: [],
+      rankedPages: [],
+      excerptedPages: [],
+      excerptCoverage: {},
+      timings,
+    };
   }
 
   // Resolve classification: the decision model's verdict when available,
@@ -1081,6 +1154,7 @@ export async function buildRagContext(
 
   // 8. Adaptive context budget — with the query terms and DF table so long
   // chunks are cut on their most relevant sentences, not from the top.
+  if (process.env.RAG_DEBUG_SCORES) console.log("DEBUG candidates:", candidates.map((c) => `${c.page}:${c.score.toFixed(3)}`).join(", "), "budget:", CONTEXT_BUDGET);
   const excerpts = adaptiveContext(candidates, CONTEXT_BUDGET, queryTerms, df, chunks.length);
 
   // 9. Confidence.
@@ -1099,5 +1173,11 @@ export async function buildRagContext(
   // Display order: sorted by page number, as before.
   const pages = [...rankedPages].sort((a, b) => a - b);
 
-  return { excerpts, toc, queryType, confidence, pages, rankedPages, timings };
+  // 10b. Excerpt delivery measurement (issue #63): which pages are actually in
+  // the assembled context, and how much of each page's original text survived
+  // the budget cut — derived from the actual context string, so a returned
+  // page that is not in the excerpts is impossible by construction.
+  const { excerptedPages, excerptCoverage } = measureExcerptDelivery(excerpts, chunks);
+
+  return { excerpts, toc, queryType, confidence, pages, rankedPages, excerptedPages, excerptCoverage, timings };
 }
