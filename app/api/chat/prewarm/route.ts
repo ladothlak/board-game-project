@@ -130,15 +130,9 @@ export async function POST(req: Request) {
   const game = await getGame(slug);
   if (!game) {
     // Abandon the registered promise (harmless — the fast path makes no
-    // model calls) and clean up the map entry.
-    inflightPrewarms.delete(key);
+    // model calls). The map entry is cleaned up by .finally() once the
+    // in-flight build settles.
     return NextResponse.json({ status: "not_found" }, { status: 404 });
-  }
-
-  const apiKey = process.env.UNSLOTH_API_KEY;
-  if (!apiKey) {
-    inflightPrewarms.delete(key);
-    return NextResponse.json({ status: "no_key" }, { status: 500 });
   }
 
   try {
