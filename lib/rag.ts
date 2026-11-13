@@ -1154,7 +1154,6 @@ export async function buildRagContext(
 
   // 8. Adaptive context budget — with the query terms and DF table so long
   // chunks are cut on their most relevant sentences, not from the top.
-  if (process.env.RAG_DEBUG_SCORES) console.log("DEBUG candidates:", candidates.map((c) => `${c.page}:${c.score.toFixed(3)}`).join(", "), "budget:", CONTEXT_BUDGET);
   const excerpts = adaptiveContext(candidates, CONTEXT_BUDGET, queryTerms, df, chunks.length);
 
   // 9. Confidence.

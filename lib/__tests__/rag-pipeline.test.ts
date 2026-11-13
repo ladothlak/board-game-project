@@ -411,6 +411,11 @@ describe("measureExcerptDelivery", () => {
     expect(measureExcerptDelivery(excerpts, MEASURE_CHUNKS).excerptedPages).toEqual([1, 2]);
   });
 
+  it("parses multi-digit page numbers distinctly (1, 10, 100)", () => {
+    const excerpts = "--- Page 1 ---\na\n\n--- Page 10 ---\nb\n\n--- Page 100 ---\nc";
+    expect(measureExcerptDelivery(excerpts, MEASURE_CHUNKS).excerptedPages).toEqual([1, 10, 100]);
+  });
+
   it("computes coverage as delivered chars / original page length", () => {
     // p.1 delivers 3 of its 40 chars (7.5%); p.2 delivers all 43 of its text.
     const excerpts =

@@ -80,6 +80,8 @@ const RAG_CONTEXT: RagContext = {
   confidence: 0.8,
   pages: [3],
   rankedPages: [3],
+  excerptedPages: [3],
+  excerptCoverage: { 3: 1 },
   timings: { expandMs: 12, retrieveMs: 34, rerankMs: 56 },
 };
 
