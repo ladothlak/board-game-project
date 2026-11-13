@@ -490,8 +490,9 @@ describe("buildRagContext — section-anchored boost (issue #63)", () => {
   });
 
   it("does not double-boost a page already boosted by an explicit reference", async () => {
-    // The setup page is also explicitly referenced — the explicit boost (score 100)
-    // takes priority and the section boost is skipped.
+    // The setup page is also explicitly referenced — the explicit boost (a
+    // bounded prior, +20% over the top genuine lexical score) takes priority
+    // and the section boost is skipped.
     vi.mocked(loadIndex).mockResolvedValue([
       { id: "s1", slug: SLUG, title: "Setup", page: 1, text: "Set up the board by placing the tokens." },
       { id: "s2", slug: SLUG, title: "Combat", page: 2, text: "Each turn you may attack with your forces." },
@@ -500,8 +501,9 @@ describe("buildRagContext — section-anchored boost (issue #63)", () => {
 
     const result = await buildRagContext(SLUG, "Tell me about p. 1 and how to set up", KEY);
 
-    // The explicit page reference boosts p. 1 to score 100; the section boost
-    // sees it's already boosted and skips.
+    // The explicit page reference boosts p. 1 with a bounded prior (+20% over
+    // the top genuine lexical score); the section boost sees it's already
+    // boosted and skips.
     expect(result.pages).toContain(1);
     expect(result.excerpts.startsWith("--- Page 1 ---")).toBe(true);
   });

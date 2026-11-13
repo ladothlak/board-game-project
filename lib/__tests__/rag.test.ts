@@ -110,6 +110,16 @@ describe("followCrossRefs", () => {
     expect(result[1].score).toBeCloseTo(3); // 10 * 0.3
   });
 
+  it("propagates the isBoosted flag to cross-ref additions (issue #65)", () => {
+    // A boosted parent's combined score is a prior, not genuine evidence —
+    // the addition must stay flagged so estimateConfidence ignores it.
+    const result = followCrossRefs(chunks, [{ ...chunks[0], score: 10, isBoosted: true }]);
+    expect(result[1].isBoosted).toBe(true);
+    // Unboosted parents keep producing unflagged additions.
+    const plain = followCrossRefs(chunks, [{ ...chunks[0], score: 10 }]);
+    expect(plain[1].isBoosted).toBeUndefined();
+  });
+
   it("does not add pages already in the selection", () => {
     const selected = [
       { ...chunks[0], score: 10 },
@@ -544,13 +554,21 @@ describe("passesQualityGate (independent of boost, issue #65)", () => {
       { ...CHUNKS[1], score: 1 },
       { ...CHUNKS[2], score: 0.5 },
     ];
-    // The gate checks candidates[0] (the boosted one) — it must fail because
-    // the function is called on the pre-boost list by buildRagContext. Here we
-    // simulate what happens if someone mistakenly passes the post-boost list:
-    // the top score is 40, but the text check still applies.
-    // In practice, buildRagContext always passes lexicalCandidates (pre-boost),
-    // so this test documents the contract.
+    // The gate filters boosted candidates internally (issue #65), so the
+    // top genuine score is 1 — far below the threshold — and the gate fails
+    // no matter which list is passed in.
     expect(passesQualityGate(candidates, new Set(["setup", "board"]))).toBe(false);
+  });
+
+  it("rejects a boosted top candidate even when its text contains two query terms", () => {
+    // Self-enforcing (issue #65): the boosted page's text lexically matches
+    // the query ("set" and "board") and its score would clear the threshold —
+    // but a boost is a prior, not evidence, so the gate must still reject it.
+    const candidates = [
+      { ...CHUNKS[0], score: 12, isBoosted: true },
+      { ...CHUNKS[1], score: 1 },
+    ];
+    expect(passesQualityGate(candidates, new Set(["set", "board"]))).toBe(false);
   });
 
   it("returns true for a genuine (non-boosted) clear winner", () => {

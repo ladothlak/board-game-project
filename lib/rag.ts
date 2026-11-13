@@ -10,7 +10,7 @@ const MODEL =
 /** Resolve the Unsloth base URL at call time (not import time), so a `.env`
  * loaded after module evaluation — as in the benchmark — is honored. */
 function resolveBaseUrl(): string {
-  return process.env.UNSLOTH_BASE_URL ?? "http://192.168.0.80:8888/v1";
+  return process.env.UNSLOTH_BASE_URL ?? "http://localhost:8888/v1";
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -504,11 +504,11 @@ export function multiQueryRetrieve(
  * verdict — it may nudge a page's score but must stay within the re-ranker's
  * correction range, never an absolute 80/100. Section anchors add
  * +SECTION_BOOST_FACTOR over the top genuine lexical score; explicit user
- * page references and mentioned expansions are stronger priors at
- * +EXPLICIT_BOOST_FACTOR, but still bounded so a direct lexical hit that the
- * re-rank rates highly can outrank them (see the normalized combined score in
- * `rerank` / `decisionRerank`). Both factors sit inside the plan's +10–20%
- * cap (RAG-PIPELINE-IMPROVEMENT-PLAN.md §P0.3).
+ * page references and mentioned expansions are equal bounded priors at
+ * +EXPLICIT_BOOST_FACTOR — the same factor, not a stronger one — so a direct
+ * lexical hit that the re-rank rates highly can outrank them (see the
+ * normalized combined score in `rerank` / `decisionRerank`). Both factors sit
+ * inside the plan's +10–20% cap (RAG-PIPELINE-IMPROVEMENT-PLAN.md §P0.3).
  */
 const SECTION_BOOST_FACTOR = 0.2;
 const EXPLICIT_BOOST_FACTOR = 0.2;
@@ -601,16 +601,18 @@ export function boostCandidates(
  * A single common word ("turn", "setup") can inflate one chunk's score while
  * it is actually irrelevant — in that case the gate must not fire.
  *
- * Callers MUST evaluate this on the pre-boost candidate list (issue #65): a
- * boost is a prior, not evidence, so a boosted candidate must never be able
- * to satisfy the gate on its own. Explicit-page questions no longer skip the
- * re-rank either — their bounded prior is correctable by the re-ranker.
+ * The gate is self-enforcing (issue #65): it filters out `isBoosted`
+ * candidates INSIDE, so a boost — a prior, not evidence — can never satisfy
+ * the gate on its own no matter which list the caller passes. Explicit-page
+ * questions no longer skip the re-rank either — their bounded prior is
+ * correctable by the re-ranker.
  */
 export function passesQualityGate(candidates: ScoredChunk[], queryTerms: Set<string>): boolean {
-  const topScore = candidates[0]?.score ?? 0;
-  const runnerUpScore = candidates[1]?.score ?? 0;
+  const genuine = candidates.filter((c) => !c.isBoosted);
+  const topScore = genuine[0]?.score ?? 0;
+  const runnerUpScore = genuine[1]?.score ?? 0;
   if (topScore < 3 || topScore < 2 * runnerUpScore) return false;
-  const topText = candidates[0].text.toLowerCase();
+  const topText = genuine[0].text.toLowerCase();
   return [...queryTerms].filter((t) => topText.includes(t)).length >= 2;
 }
 
@@ -705,7 +707,10 @@ export function followCrossRefs(
       if (p > 0 && !selectedPages.has(p)) {
         const target = chunks.find((ch) => ch.page === p);
         if (target) {
-          extra.push({ ...target, score: c.score * 0.3 }); // lower confidence than direct match
+          // Propagate the boost flag (issue #65): a boosted parent's combined
+          // score is still a prior, not genuine evidence, so it must stay
+          // excluded from the confidence estimate.
+          extra.push({ ...target, score: c.score * 0.3, isBoosted: c.isBoosted }); // lower confidence than direct match
           selectedPages.add(p);
         }
       }
@@ -797,14 +802,14 @@ const MIN_CHUNK_CHARS = 100;
 
 /**
  * The maximum share of the budget any single page may take when several
- * pages are included (issue #64). A section-boosted page scores 80/100 — an
- * artificial prior, not a relevance verdict — and pure score-proportional
- * allocation lets it consume most of the budget, starving the pages that
- * actually answer the question. Capping its share at half the budget and
- * redistributing the excess to the other pages (proportionally to their
- * scores) keeps every page represented without letting one dominate. A lone
- * page takes the whole budget: with nothing else to serve, the cap would only
- * truncate the answer.
+ * pages are included (issue #64). A section-boosted page's score is a bounded
+ * prior (+SECTION_BOOST_FACTOR over the top genuine lexical score), not a
+ * relevance verdict — and pure score-proportional allocation lets it consume
+ * most of the budget, starving the pages that actually answer the question.
+ * Capping its share at half the budget and redistributing the excess to the
+ * other pages (proportionally to their scores) keeps every page represented
+ * without letting one dominate. A lone page takes the whole budget: with
+ * nothing else to serve, the cap would only truncate the answer.
  */
 const MAX_PAGE_SHARE = 0.5;
 
@@ -925,13 +930,6 @@ export function adaptiveContext(
     used += text.length;
   });
 
-  // Pass 2: hand the unused budget to the truncated pages, most relevant
-  // first. Each page is filled up to its shortfall (or the remaining budget)
-  // before the next is touched, so spare characters land on the page most
-  // likely to carry the answer; every fill is bounded by the remaining
-  // budget, so the total can never exceed it. One pass suffices: after it,
-  // either the budget is exhausted or every truncated page delivered in full.
-  //
   // Pass 2: hand the unused budget to the truncated pages, most relevant
   // first. Each page is filled up to its shortfall (or the remaining budget)
   // before the next is touched, so spare characters land on the page most
@@ -1354,12 +1352,12 @@ export async function buildRagContext(
   // for it. Only when the base result is weak AND the question needs expansion
   // do we fire + await the expansion and re-retrieve with the expanded queries,
   // exactly as the pre-#58 pipeline did.
-  // The gate is evaluated on the PRE-BOOST list (issue #65): a boost is a prior,
-  // not evidence, so a boosted candidate must never satisfy the gate on its
-  // own. Explicit-page questions no longer skip the re-rank either — their
-  // bounded prior is correctable by the re-ranker.
+  // The gate filters boosted candidates internally (issue #65): a boost is
+  // a prior, not evidence, so a boosted candidate can never satisfy it on
+  // its own. Explicit-page questions no longer skip the re-rank either —
+  // their bounded prior is correctable by the re-ranker.
   const basePassesGate = passesQualityGate(lexicalCandidates, baseTerms);
-  // A section-anchored query with SOME genuine evidence (top lexical score ≥ 1)
+  // A section-anchored query with SOME genuine evidence (top lexical score ≥ 3)
   // doesn't need expansion: the section boost is a strong prior that the page
   // is relevant, so re-retrieving with expanded queries would only add noise
   // and dilute the context budget. The re-rank gate below remains strict
@@ -1381,8 +1379,8 @@ export async function buildRagContext(
     timings.expandMs = Date.now() - expandStart;
 
     // Re-retrieve with the expanded queries (timed separately so retrieveMs and
-    // expandMs stay disjoint). Track the pre-boost list for any downstream gate
-    // logic (issue #65): boosts are priors, not evidence.
+    // expandMs stay disjoint). Track the pre-boost list for the genuine-evidence
+    // checks below (issue #65): boosts are priors, not evidence.
     const reretrieveStart = Date.now();
     lexicalCandidates = multiQueryRetrieve(chunks, expanded, 8, df, scoring);
     candidates = boostCandidates(lexicalCandidates, chunks, explicitPages, expansionNames, question);
