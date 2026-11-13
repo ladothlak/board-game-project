@@ -8,7 +8,7 @@ import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { validateQuestion } from "@/lib/guard";
 import { withQueue } from "@/lib/llm-queue";
 import { logRequest } from "@/lib/audit-log";
-import { getPrewarm } from "./prewarm/route";
+import { getPrewarm, getInflightPrewarm } from "./prewarm/route";
 
 // Unsloth runs locally (Unsloth Studio / `unsloth run`) and exposes an
 // OpenAI-compatible API, typically on http://localhost:8888.
@@ -156,12 +156,17 @@ export async function POST(req: Request) {
         // If the client fired a prewarm while the user was typing, the context
         // is already built and we skip the (slow) LLM retrieval steps.
         const prewarmed = getPrewarm(slug, question.trim());
+        // In-flight deduplication (issue #60): a prewarm for this exact
+        // question is still building its context — await that promise instead
+        // of starting a second RAG build. The fast-path context it produces is
+        // what the prewarm cache stores, so it stands in for a prewarm hit.
+        const inflight = prewarmed ? null : getInflightPrewarm(slug, question.trim());
         let context: string;
         let toc: string;
         let ragConfidence: number;
         // The pages retrieval surfaced, for the "pages-found" stage event. A
         // prewarm hit has no page list (the cache stores only the context),
-        // so that stage is skipped there.
+        // so that stage is skipped there; an in-flight prewarm DOES carry one.
         let pages: number[] | null = null;
 
         if (prewarmed) {
@@ -169,6 +174,13 @@ export async function POST(req: Request) {
           context = prewarmed.context;
           toc = prewarmed.toc;
           ragConfidence = prewarmed.confidence;
+        } else if (inflight) {
+          prewarmHit = true;
+          const rag = await inflight;
+          context = rag.excerpts;
+          toc = rag.toc;
+          ragConfidence = rag.confidence;
+          pages = rag.pages;
         } else {
           const expNames = (game.expansions ?? []).filter((e) => e.inChatContext).map((e) => e.name);
           // Default-on: use the fast decision model for classification + relevance

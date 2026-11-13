@@ -92,6 +92,20 @@ export interface RagOptions {
    * log-saturated weighting. See `ScoringMode` in lib/retrieve.ts.
    */
   scoring?: ScoringMode;
+  /**
+   * Expansion strategy for the weak-base path (issue #60): "llm" (default)
+   * fires the LLM `expandQuery` call; "deterministic" uses
+   * `expandQueryDeterministic` only — no model call at all. The prewarm fast
+   * path passes "deterministic" so it never touches the main model's queue.
+   */
+  expansionMode?: "llm" | "deterministic";
+  /**
+   * Skip the re-rank stage entirely, keeping lexical candidate order
+   * (issue #60). The prewarm fast path sets this: a weak gate result costs
+   * nothing there — prewarm is cheap and fast, not perfect; the chat route
+   * remains the quality bar.
+   */
+  skipRerank?: boolean;
 }
 
 // ─── LLM Helper ───────────────────────────────────────────────────────────
@@ -912,9 +926,13 @@ export async function buildRagContext(
   if (!basePassesGate && needsExpansion) {
     // Fire + await the expansion (weak base result). expandQuery catches its own
     // provider errors and falls back to deterministic expansion, so this await
-    // never rejects — no fire-and-forget guard is needed.
+    // never rejects — no fire-and-forget guard is needed. The fast path
+    // (issue #60) swaps in `expandQueryDeterministic` directly: no model call,
+    // so prewarm never touches the main model's queue.
     const expandStart = Date.now();
-    const expanded = await expandQuery(apiKey, question, queryType);
+    const expanded = options?.expansionMode === "deterministic"
+      ? expandQueryDeterministic(question)
+      : await expandQuery(apiKey, question, queryType);
     timings.expandMs = Date.now() - expandStart;
 
     // Re-retrieve with the expanded queries (timed separately so retrieveMs and
@@ -941,9 +959,14 @@ export async function buildRagContext(
   // the question names an explicit page (already boosted above), or when the
   // quality gate fires (see passesQualityGate). When the decision model is
   // enabled, the quality gate is its fast batched score call (falling back to
-  // the slow LLM re-rank if the model is unavailable).
+  // the slow LLM re-rank if the model is unavailable). The fast path
+  // (issue #60) skips it unconditionally: prewarm keeps lexical order and
+  // never makes a model call.
   const rerankStart = Date.now();
-  const skipRerank = explicitPages.length > 0 || passesQualityGate(candidates, queryTerms);
+  const skipRerank =
+    options?.skipRerank === true ||
+    explicitPages.length > 0 ||
+    passesQualityGate(candidates, queryTerms);
   candidates = skipRerank
     ? candidates
     : useDecision

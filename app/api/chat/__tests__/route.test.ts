@@ -18,7 +18,7 @@ import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 import { getGame } from "@/lib/games";
 import { buildRagContext } from "@/lib/rag";
-import { getPrewarm } from "../prewarm/route";
+import { getPrewarm, getInflightPrewarm } from "../prewarm/route";
 import { resetAnswerCacheForTest } from "../answer-cache";
 import { resetRetrieveCachesForTest } from "@/lib/retrieve";
 
@@ -53,10 +53,11 @@ vi.mock("@/lib/games", () => ({
 vi.mock("@/lib/rag", () => ({
   buildRagContext: vi.fn(),
 }));
-// The prewarm cache is module state in the prewarm route; mock the lookup so
-// hit/miss is controlled per test.
+// The prewarm cache and the in-flight map are module state in the prewarm
+// route; mock both lookups so hit/miss/in-flight is controlled per test.
 vi.mock("../prewarm/route", () => ({
   getPrewarm: vi.fn(() => null),
+  getInflightPrewarm: vi.fn(() => null),
 }));
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -123,6 +124,7 @@ beforeEach(() => {
   vi.mocked(getGame).mockReset().mockResolvedValue(GAME);
   vi.mocked(buildRagContext).mockReset().mockResolvedValue(RAG_CONTEXT);
   vi.mocked(getPrewarm).mockReset().mockReturnValue(null);
+  vi.mocked(getInflightPrewarm).mockReset().mockReturnValue(null);
   // The index file and the retrieve module's mtime cache are per-test
   // fixtures: reset both so every test starts from a cold, known index.
   indexFile.mtimeMs = 1_000;
@@ -336,5 +338,50 @@ describe("POST /api/chat stage events (issue #57)", () => {
     // Tokens and the final done frame still flow normally.
     expect(events.some((e) => e.type === "token")).toBe(true);
     expect(events.some((e) => e.type === "done")).toBe(true);
+  });
+});
+
+// ─── In-flight prewarm deduplication (issue #60) ──────────────────────────────
+//
+// A prewarm for this exact question may still be building its context when the
+// real request arrives. The route must await that in-flight promise instead of
+// starting a second RAG build — the fast-path context it produces is what the
+// prewarm cache stores, so it stands in for a prewarm hit.
+
+describe("POST /api/chat in-flight prewarm deduplication (issue #60)", () => {
+  it("awaits an in-flight prewarm promise instead of building a second context", async () => {
+    // A prewarm for this question is in flight: its promise resolves after a
+    // small real delay with the fast-path RAG context.
+    vi.mocked(getInflightPrewarm).mockReturnValue(
+      new Promise((resolve) => setTimeout(() => resolve(RAG_CONTEXT), 10))
+    );
+    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    const text = await res.text();
+
+    // No second RAG build was started for this request...
+    expect(buildRagContext).not.toHaveBeenCalled();
+    // ...and the awaited context's pages drive the 'pages-found' stage event.
+    expect(text).toContain("type\":\"stage\"");
+    expect(text).toContain("pages\":[3]");
+
+    const entry = auditEntry();
+    expect(entry.status).toBe(200);
+    // The context came from prewarm, so it is audited like a prewarm hit:
+    // prewarmHit=true and no RAG stage durations (this request didn't build).
+    expect(entry.prewarmHit).toBe(true);
+    expect(entry.stages).toEqual({ firstTokenMs: expect.any(Number) });
+  });
+
+  it("builds its own context when no in-flight prewarm exists", async () => {
+    // getInflightPrewarm returns null (the beforeEach default): the route
+    // falls through to buildRagContext exactly as before.
+    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    await res.text();
+
+    expect(buildRagContext).toHaveBeenCalledTimes(1);
   });
 });

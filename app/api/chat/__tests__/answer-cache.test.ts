@@ -22,7 +22,7 @@ import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 import { getGame } from "@/lib/games";
 import { buildRagContext } from "@/lib/rag";
-import { getPrewarm } from "../prewarm/route";
+import { getPrewarm, getInflightPrewarm } from "../prewarm/route";
 import { resetRetrieveCachesForTest } from "@/lib/retrieve";
 
 // The search index file as seen by the REAL lib/retrieve (issue #56): an
@@ -56,10 +56,11 @@ vi.mock("@/lib/games", () => ({
 vi.mock("@/lib/rag", () => ({
   buildRagContext: vi.fn(),
 }));
-// The prewarm cache is module state in the prewarm route; mock the lookup so
-// hit/miss is controlled per test.
+// The prewarm cache and the in-flight map are module state in the prewarm
+// route; mock both lookups so hit/miss/in-flight is controlled per test.
 vi.mock("../prewarm/route", () => ({
   getPrewarm: vi.fn(() => null),
+  getInflightPrewarm: vi.fn(() => null),
 }));
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -132,6 +133,7 @@ beforeEach(() => {
   vi.mocked(getGame).mockReset().mockResolvedValue(GAME);
   vi.mocked(buildRagContext).mockReset().mockResolvedValue(RAG_CONTEXT);
   vi.mocked(getPrewarm).mockReset().mockReturnValue(null);
+  vi.mocked(getInflightPrewarm).mockReset().mockReturnValue(null);
   // The index file and the retrieve module's mtime cache are per-test
   // fixtures: reset both so every test starts from a cold, known index.
   indexFile.mtimeMs = 1_000;

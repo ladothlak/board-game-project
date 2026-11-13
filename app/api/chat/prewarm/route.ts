@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getGame } from "@/lib/games";
-import { buildRagContext } from "@/lib/rag";
+import { buildRagContext, type RagContext } from "@/lib/rag";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { validateQuestion } from "@/lib/guard";
 import { requireAuth } from "@/lib/auth";
@@ -12,6 +12,13 @@ import { requireAuth } from "@/lib/auth";
 const prewarmCache = new Map<string, { context: string; toc: string; confidence: number; ts: number }>();
 const PREWARM_TTL = 60_000;
 const PREWARM_MAX = 20;
+
+/**
+ * In-flight prewarm builds keyed by slug + normalized question (issue #60).
+ * A second prewarm for the same question — or a real /api/chat request —
+ * awaits the existing promise instead of starting a second RAG build.
+ */
+const inflightPrewarms = new Map<string, Promise<RagContext>>();
 
 setInterval(() => {
   const now = Date.now();
@@ -34,6 +41,21 @@ export function getPrewarm(slug: string, question: string) {
     return null;
   }
   return entry;
+}
+
+/**
+ * Exposed so the chat route can await an in-flight prewarm build for a
+ * question (issue #60) instead of building a second context. Returns null
+ * when no build is currently in flight for that key.
+ */
+export function getInflightPrewarm(slug: string, question: string): Promise<RagContext> | null {
+  return inflightPrewarms.get(prewarmKey(slug, question)) ?? null;
+}
+
+/** Test helper: clear both module-level maps so tests start cold. */
+export function resetPrewarmStateForTest(): void {
+  prewarmCache.clear();
+  inflightPrewarms.clear();
 }
 
 export async function POST(req: Request) {
@@ -75,28 +97,46 @@ export async function POST(req: Request) {
   }
 
   try {
-    // Default-on: use the fast decision model for classification + relevance
-    // scoring (see PERFORMANCE-PLAN.md, "Decision-model RAG"). Set
-    // USE_DECISION_MODEL=0 to disable for A/B benchmarking.
-    const useDecisionModel = process.env.USE_DECISION_MODEL !== "0";
-    const rag = await buildRagContext(slug, question.trim(), apiKey, undefined, {
-      useDecisionModel,
-    });
-    const key = prewarmKey(slug, question.trim());
+    const q = question.trim();
+    const key = prewarmKey(slug, q);
 
-    // Evict oldest if over cap.
-    if (prewarmCache.size >= PREWARM_MAX) {
-      const oldest = Array.from(prewarmCache.entries()).sort((a, b) => a[1].ts - b[1].ts)[0];
-      if (oldest) prewarmCache.delete(oldest[0]);
+    // Deduplication (issue #60): if a build for this exact question is already
+    // in flight, await it instead of starting a second RAG build.
+    let inflight = inflightPrewarms.get(key);
+    if (!inflight) {
+      // Fast path only (issue #60): deterministic expansion, no re-rank, and
+      // keyword classification — zero model calls, so prewarm never touches
+      // the main model's single-flight queue. Its job is to be cheap and fast,
+      // not perfect: the chat route remains the quality bar. The fast-path
+      // context is what the cache stores, so a prewarm hit stays exactly as
+      // good as before.
+      inflight = buildRagContext(slug, q, apiKey, undefined, {
+        useDecisionModel: false,
+        expansionMode: "deterministic",
+        skipRerank: true,
+      }).then((rag) => {
+        // Evict oldest if over cap.
+        if (prewarmCache.size >= PREWARM_MAX) {
+          const oldest = Array.from(prewarmCache.entries()).sort((a, b) => a[1].ts - b[1].ts)[0];
+          if (oldest) prewarmCache.delete(oldest[0]);
+        }
+
+        prewarmCache.set(key, {
+          context: rag.excerpts,
+          toc: rag.toc,
+          confidence: rag.confidence,
+          ts: Date.now(),
+        });
+        return rag;
+      }).finally(() => {
+        // Drop the in-flight entry once settled (success or failure) so a
+        // later request starts a fresh build instead of awaiting a dead one.
+        inflightPrewarms.delete(key);
+      });
+      inflightPrewarms.set(key, inflight);
     }
 
-    prewarmCache.set(key, {
-      context: rag.excerpts,
-      toc: rag.toc,
-      confidence: rag.confidence,
-      ts: Date.now(),
-    });
-
+    await inflight;
     return NextResponse.json({ status: "warmed" }, { status: 200 });
   } catch {
     return NextResponse.json({ status: "error" }, { status: 500 });

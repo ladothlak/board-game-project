@@ -419,6 +419,60 @@ describe("buildRagContext — retrieve-first (issue #58)", () => {
   });
 });
 
+// ─── buildRagContext — prewarm fast path (issue #60) ────────────────────────
+//
+// The prewarm route calls buildRagContext with expansionMode "deterministic"
+// and skipRerank true so it never makes a model call. These tests pin both
+// halves: a weak base result fires the deterministic expansion (no fetch),
+// and a gate failure skips the re-rank entirely (still no fetch). The fetch
+// stub hangs forever in each test — if any LLM call were fired and awaited,
+// the test would time out.
+
+describe("buildRagContext — prewarm fast path (issue #60)", () => {
+  beforeEach(() => {
+    vi.mocked(loadIndex).mockResolvedValue(CHUNKS);
+  });
+
+  it("uses deterministic expansion without any LLM call when expansionMode is 'deterministic'", async () => {
+    // A weak base result (only "with" matches the original question) would
+    // normally force the LLM expansion path.
+    vi.mocked(loadIndex).mockResolvedValue([
+      { id: "w1", slug: SLUG, title: "", page: 1, text: "The weather track shifts with the seasons." },
+      { id: "a2", slug: SLUG, title: "", page: 2, text: "Each turn you may attack with your forces." },
+    ]);
+    mockFetch.mockImplementation(() => new Promise<Response>(() => {}));
+
+    const result = await buildRagContext(SLUG, "How do I deal with enemy attacks?", KEY, undefined, {
+      expansionMode: "deterministic",
+      skipRerank: true,
+    });
+
+    // No model call at all — deterministic expansion and the skipped re-rank.
+    expect(mockFetch).not.toHaveBeenCalled();
+    // The deterministic expansion still ran (weak base result) and produced a
+    // usable context.
+    expect(result.timings.expandMs).toBeGreaterThanOrEqual(0);
+    expect(result.excerpts.length).toBeGreaterThan(0);
+  });
+
+  it("skips the re-rank entirely when skipRerank is true, keeping lexical order", async () => {
+    // A short query (expansion gated off) whose base result fails the quality
+    // gate — the full pipeline would fire the LLM re-rank here.
+    vi.mocked(loadIndex).mockResolvedValue([
+      { id: "v1", slug: SLUG, title: "", page: 1, text: "You win when all enemies are destroyed." },
+    ]);
+    mockFetch.mockImplementation(() => new Promise<Response>(() => {}));
+
+    const result = await buildRagContext(SLUG, "how do i win", KEY, undefined, { skipRerank: true });
+
+    // No model call at all...
+    expect(mockFetch).not.toHaveBeenCalled();
+    // ...and the weak candidate still carries through in lexical order.
+    expect(result.excerpts).toContain("--- Page 1 ---");
+    expect(result.pages).toEqual([1]);
+  });
+});
+
 // ─── decisionClassify / decisionRerank (direct unit tests) ──────────────────
 
 describe("decisionClassify", () => {
