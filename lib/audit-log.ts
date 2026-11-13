@@ -31,6 +31,10 @@ interface AuditEntry {
   status: number;
   durationMs: number;
   body?: string;
+  /** Per-stage wall-clock durations in ms (e.g. expandMs, retrieveMs, rerankMs, firstTokenMs). */
+  stages?: Record<string, number>;
+  /** True when the request was served from the speculative prewarm cache. */
+  prewarmHit?: boolean;
 }
 
 /**

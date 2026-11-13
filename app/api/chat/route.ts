@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { getGame } from "@/lib/games";
 import { loadIndex, retrieve, docFreqFor } from "@/lib/retrieve";
-import { buildRagContext } from "@/lib/rag";
+import { buildRagContext, type RagTimings } from "@/lib/rag";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { validateQuestion } from "@/lib/guard";
 import { withQueue } from "@/lib/llm-queue";
@@ -91,6 +91,9 @@ export async function POST(req: Request) {
   let context: string;
   let toc: string;
   let ragConfidence: number;
+  // Per-stage RAG timings (expand/retrieve/rerank) — only known when this
+  // request built the context itself; a prewarm hit skips those stages.
+  let ragTimings: RagTimings | null = null;
 
   if (prewarmed) {
     context = prewarmed.context;
@@ -106,6 +109,7 @@ export async function POST(req: Request) {
     context = rag.excerpts;
     toc = rag.toc;
     ragConfidence = rag.confidence;
+    ragTimings = rag.timings ?? null;
   }
 
   // Low-confidence fallback: if retrieval was weak, note it in the prompt.
@@ -174,6 +178,10 @@ export async function POST(req: Request) {
   // citations, or {type:"error"}.
   const encoder = new TextEncoder();
   let full = "";
+  // Tier 0 measurement (issue #55): time from the request start to the first
+  // streamed token, so the audit line can separate RAG latency from
+  // generation latency.
+  let firstTokenAt: number | null = null;
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -228,6 +236,7 @@ export async function POST(req: Request) {
               const delta: string = j.choices?.[0]?.delta?.content ?? "";
               if (delta) {
                 full += delta;
+                if (firstTokenAt === null) firstTokenAt = Date.now();
                 send({ type: "token", content: delta });
               }
             } catch {
@@ -241,14 +250,22 @@ export async function POST(req: Request) {
           : "Hmm, I ran out of room to think that one through — try asking again, or break the question into smaller parts.";
         send({ type: "done", citations: dedupePages(answer) });
         controller.close();
-        logRequest({ ip, route: "/api/chat", method: "POST", status: 200, durationMs: Date.now() - start });
+        // Per-stage breakdown for the audit log (Tier 0, issue #55): RAG stage
+        // durations when this request built the context itself, plus time to
+        // first token. A prewarm hit skips the RAG stages, so only
+        // firstTokenMs is known there.
+        const stages: Record<string, number> = { ...(ragTimings ?? {}) };
+        if (firstTokenAt !== null) stages.firstTokenMs = firstTokenAt - start;
+        logRequest({ ip, route: "/api/chat", method: "POST", status: 200, durationMs: Date.now() - start, prewarmHit: prewarmed !== null, stages });
       } catch (e) {
         send({
           type: "error",
           message: "Could not reach the LLM provider.",
         });
         controller.close();
-        logRequest({ ip, route: "/api/chat", method: "POST", status: 502, durationMs: Date.now() - start });
+        // No token ever streamed, so only the RAG stage durations are known.
+        const stages: Record<string, number> = { ...(ragTimings ?? {}) };
+        logRequest({ ip, route: "/api/chat", method: "POST", status: 502, durationMs: Date.now() - start, prewarmHit: prewarmed !== null, stages });
       }
     },
   });

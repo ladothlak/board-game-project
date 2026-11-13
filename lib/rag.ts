@@ -27,6 +27,16 @@ interface ScoredChunk extends Chunk {
   score: number;
 }
 
+/** Per-stage wall-clock durations (ms) for one `buildRagContext` run. */
+export interface RagTimings {
+  /** Query expansion — the LLM call when it fired, ~0 when gated off. */
+  expandMs: number;
+  /** Multi-query retrieval plus the page / expansion boosts. */
+  retrieveMs: number;
+  /** Re-rank stage — the LLM / decision-model call when it fired, ~0 when skipped. */
+  rerankMs: number;
+}
+
 export interface RagContext {
   /** The assembled context blocks (page-labelled excerpts). */
   excerpts: string;
@@ -43,6 +53,12 @@ export interface RagContext {
    * be computed over relevance, not page number.
    */
   rankedPages: number[];
+  /**
+   * Per-stage wall-clock durations for this build (Tier 0 measurement, issue #55)
+   * so callers can log a latency breakdown. Additive — consumers that only
+   * need the context (e.g. the prewarm route) can ignore it.
+   */
+  timings: RagTimings;
 }
 
 export interface RagOptions {
@@ -702,6 +718,11 @@ export async function buildRagContext(
   // historical log-saturated weighting (see ScoringMode in lib/retrieve.ts).
   const scoring: ScoringMode = options?.scoring ?? "bm25";
 
+  // Tier 0 measurement (issue #55): wall-clock markers around each stage so
+  // callers can log a per-stage latency breakdown. Stages that are gated off
+  // (no expansion needed, re-rank skipped) report ~0 ms.
+  const timings: RagTimings = { expandMs: 0, retrieveMs: 0, rerankMs: 0 };
+
   // 1. Classify. When the decision model is enabled, classify in parallel
   // with loadIndex() so its ~0.5 s latency hides behind the index read; the
   // keyword heuristic stays as the fallback. Otherwise classify synchronously
@@ -715,7 +736,7 @@ export async function buildRagContext(
 
   const chunks = (await loadIndex()).filter((c) => c.slug === slug);
   if (chunks.length === 0) {
-    return { excerpts: "", toc: "", confidence: 0, pages: [], rankedPages: [] };
+    return { excerpts: "", toc: "", confidence: 0, pages: [], rankedPages: [], timings };
   }
 
   // Resolve classification: the decision model's verdict when available,
@@ -731,6 +752,7 @@ export async function buildRagContext(
   const needsExpansion = useDecision
     ? baseNeedsExpansion && (decision ? decision.needsExpansion : true)
     : baseNeedsExpansion;
+  const expandStart = Date.now();
   const expandPromise = needsExpansion
     ? expandQuery(apiKey, question, queryType)
     : Promise.resolve([question]);
@@ -740,6 +762,7 @@ export async function buildRagContext(
   const df = await docFreqFor(slug);
 
   const queries = await expandPromise;
+  timings.expandMs = Date.now() - expandStart;
 
   // Query terms (tokenized variants) — reused by the re-rank preview and the
   // adaptive context budget so both judge relevance the same way.
@@ -747,6 +770,7 @@ export async function buildRagContext(
 
   // 4. Multi-query retrieval (top 8 for re-ranking), in the configured
   // lexical scoring mode (bm25 by default; tfidf when opted in).
+  const retrieveStart = Date.now();
   let candidates = multiQueryRetrieve(chunks, queries, 8, df, scoring);
 
   // 5. Boost explicitly-referenced pages to the top of the candidate list.
@@ -782,6 +806,7 @@ export async function buildRagContext(
       }
     }
   }
+  timings.retrieveMs = Date.now() - retrieveStart;
 
   // 6. Re-rank — but skip it when it isn't needed: that's a full LLM round
   // trip (up to 30 s on the local model) saved for easy questions. Skip when
@@ -792,6 +817,7 @@ export async function buildRagContext(
   // irrelevant — in that case the quality gate must run. When the decision
   // model is enabled, the quality gate is its fast batched score call (falling
   // back to the slow LLM re-rank if the model is unavailable).
+  const rerankStart = Date.now();
   const topScore = candidates[0]?.score ?? 0;
   const runnerUpScore = candidates[1]?.score ?? 0;
   let skipRerank = explicitPages.length > 0;
@@ -806,6 +832,7 @@ export async function buildRagContext(
       ? (await decisionRerank(question, candidates, queryTerms, df, chunks.length)) ??
         await rerank(apiKey, question, candidates, queryTerms, df, chunks.length)
       : await rerank(apiKey, question, candidates, queryTerms, df, chunks.length);
+  timings.rerankMs = Date.now() - rerankStart;
 
   // 7. Follow cross-references. The slice matches the candidate pool size
   // (top-8 from multiQueryRetrieve) so pages ranking 7th and 8th stay in
@@ -831,5 +858,5 @@ export async function buildRagContext(
   // Display order: sorted by page number, as before.
   const pages = [...rankedPages].sort((a, b) => a - b);
 
-  return { excerpts, toc, confidence, pages, rankedPages };
+  return { excerpts, toc, confidence, pages, rankedPages, timings };
 }

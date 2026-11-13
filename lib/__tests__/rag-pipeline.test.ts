@@ -225,8 +225,53 @@ describe("buildRagContext", () => {
 
     const result = await buildRagContext("other-game", "How do I win?", KEY);
 
-    expect(result).toEqual({ excerpts: "", toc: "", confidence: 0, pages: [], rankedPages: [] });
+    // No stage ran, so the timings are all zero.
+    expect(result).toEqual({
+      excerpts: "",
+      toc: "",
+      confidence: 0,
+      pages: [],
+      rankedPages: [],
+      timings: { expandMs: 0, retrieveMs: 0, rerankMs: 0 },
+    });
     // No LLM work is done for a game with no index.
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("threads per-stage timings (expandMs, retrieveMs, rerankMs) out for the audit log", async () => {
+    stubLlm();
+
+    const result = await buildRagContext(SLUG, "How do I win?", KEY);
+
+    // Tier 0 measurement (issue #55): the chat route writes these into its
+    // audit line. Every stage reports a non-negative duration in ms.
+    expect(result.timings).toEqual({
+      expandMs: expect.any(Number),
+      retrieveMs: expect.any(Number),
+      rerankMs: expect.any(Number),
+    });
+    for (const ms of Object.values(result.timings)) {
+      expect(ms).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("reports near-zero ms for stages that are gated off", async () => {
+    vi.mocked(loadIndex).mockResolvedValue([
+      ...CHUNKS,
+      { id: "t42", slug: SLUG, title: "Reference", page: 42, text: "The reference table lists all keywords." },
+    ]);
+    stubLlm();
+
+    // An explicit page reference gates expansion off AND skips the re-rank —
+    // so neither stage makes an LLM call. Their durations are just the clock
+    // resolution of two adjacent Date.now() reads: tiny, but not guaranteed to
+    // be exactly 0 on a loaded machine.
+    const result = await buildRagContext(SLUG, "Tell me about p. 42", KEY);
+
+    expect(result.timings.expandMs).toBeGreaterThanOrEqual(0);
+    expect(result.timings.expandMs).toBeLessThan(100);
+    expect(result.timings.rerankMs).toBeGreaterThanOrEqual(0);
+    expect(result.timings.rerankMs).toBeLessThan(100);
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
