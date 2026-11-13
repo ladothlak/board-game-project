@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { buildRagContext, HYBRID_CONFIDENCE_THRESHOLD } from "../rag";
+import { buildRagContext, estimateConfidence, HYBRID_CONFIDENCE_THRESHOLD } from "../rag";
 import { loadIndex, resetRetrieveCachesForTest } from "../retrieve";
 import type { Chunk } from "../retrieve";
 
@@ -142,8 +142,13 @@ describe("buildRagContext hybrid mode (issue #59)", () => {
     expect(hybrid.confidence).toBeGreaterThanOrEqual(HYBRID_CONFIDENCE_THRESHOLD);
 
     // The hybrid result IS the decision-model result: run that arm directly and
-    // compare (timings excluded — wall clock differs between runs).
+    // compare (timings excluded — wall clock differs between runs). Re-stub the
+    // decision model after the reset so this comparison run exercises the same
+    // live decision-model path as arm 1 (a bare reset would leave no fetch
+    // implementation, forcing askDecisionModel to throw and fall back to the
+    // keyword heuristic — making the equality hold only by coincidence).
     mockFetch.mockReset();
+    stubDecisionUp();
     const direct = await buildRagContext(
       SLUG,
       "How do I set up the board for the game?",
@@ -152,6 +157,21 @@ describe("buildRagContext hybrid mode (issue #59)", () => {
       { useDecisionModel: true }
     );
     expect(withoutTimings(hybrid)).toEqual(withoutTimings(direct));
+  });
+
+  it("pins the exact-threshold confidence mapping (boundary)", () => {
+    // Pins the exact-0.25 boundary the above/below tests leave open. A top
+    // retrieval score of EXACTLY 2.5 maps to estimateConfidence = min(1, 2.5/10)
+    // = HYBRID_CONFIDENCE_THRESHOLD — neither above nor below it. This is the
+    // value the hybrid branch's `confidence < THRESHOLD` test compares against,
+    // so pinning the mapping here fixes what "at the threshold" means: the `<`
+    // operator keeps the decision-model result (it does not fall back).
+    expect(estimateConfidence([{ ...CHUNKS[0], score: 2.5 }])).toBe(HYBRID_CONFIDENCE_THRESHOLD);
+    // Just above the boundary stays strictly above it (the keep side), and just
+    // below drops strictly below (the fallback side) — the two sides the
+    // above/below hybrid tests exercise.
+    expect(estimateConfidence([{ ...CHUNKS[0], score: 2.51 }])).toBeGreaterThan(HYBRID_CONFIDENCE_THRESHOLD);
+    expect(estimateConfidence([{ ...CHUNKS[0], score: 2.49 }])).toBeLessThan(HYBRID_CONFIDENCE_THRESHOLD);
   });
 
   it("falls back to the full LLM pipeline when confidence is below the threshold", async () => {

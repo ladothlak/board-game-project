@@ -192,7 +192,9 @@ describe("RAG decision-model benchmark", () => {
     expect(dm.value?.length).toBe(candidates.length);
   });
 
-  it("compares retrieval effectiveness across the full dataset (live only)", { skip: !LIVE, timeout: 1_500_000 }, async () => {
+  // Three arms (existing + enhanced + hybrid) run sequentially over the full
+  // dataset, so the live timeout is rescaled from the two-arm 25 min to 50 min.
+  it("compares retrieval effectiveness across the full dataset (live only)", { skip: !LIVE, timeout: 3_000_000 }, async () => {
     // The core question of the benchmark: for each labelled question, does each
     // pipeline pull the right documentation into the answer context? We run
     // ALL THREE configurations on every case and report per-case results (so
@@ -294,12 +296,14 @@ describe("RAG decision-model benchmark", () => {
     console.log(`enhanced pipeline — in-context ${pct(enhCtxHits)} | in-excerpts ${pct(enhExcHits)} | MRR (ranked) ${pct(enhMrr)} | recall@3 (ranked) ${pct(enhRecall)} | latency ~${avg(rows.map((r) => r.enhMs)).toFixed(0)} ms`);
     console.log(`hybrid pipeline   — in-context ${pct(hybridCtxHits)} | in-excerpts ${pct(hybridExcHits)} | MRR (ranked) ${pct(hybridMrr)} | recall@3 (ranked) ${pct(hybridRecall)} | latency ~${avg(rows.map((r) => r.hybridMs)).toFixed(0)} ms`);
 
-    // Count the divergent cases explicitly: where one mode puts an answer page
-    // in context and the other does not.
-    const baseWins = rows.filter((r) => inContext(r.basePages, r.c.expectedPages) === "✓" && inContext(r.enhPages, r.c.expectedPages) === "✗").length;
-    const enhWins = rows.filter((r) => inContext(r.basePages, r.c.expectedPages) === "✗" && inContext(r.enhPages, r.c.expectedPages) === "✓").length;
-    const bothMiss = rows.filter((r) => inContext(r.basePages, r.c.expectedPages) === "✗" && inContext(r.enhPages, r.c.expectedPages) === "✗").length;
-    console.log(`divergence (in-context): existing-only hits ${baseWins} | enhanced-only hits ${enhWins} | both miss ${bothMiss}`);
+    // Count the divergent cases explicitly: for each arm, the cases where it
+    // puts an answer page in context and BOTH of the other arms do not. This
+    // surfaces the hybrid-vs-existing (and hybrid-vs-enhanced) divergence the
+    // pre-committed decision criteria need, not just existing-vs-enhanced.
+    const baseOnly = rows.filter((r) => inContext(r.basePages, r.c.expectedPages) === "✓" && inContext(r.enhPages, r.c.expectedPages) === "✗" && inContext(r.hybridPages, r.c.expectedPages) === "✗").length;
+    const enhOnly = rows.filter((r) => inContext(r.basePages, r.c.expectedPages) === "✗" && inContext(r.enhPages, r.c.expectedPages) === "✓" && inContext(r.hybridPages, r.c.expectedPages) === "✗").length;
+    const hybridOnly = rows.filter((r) => inContext(r.basePages, r.c.expectedPages) === "✗" && inContext(r.enhPages, r.c.expectedPages) === "✗" && inContext(r.hybridPages, r.c.expectedPages) === "✓").length;
+    console.log(`divergence (in-context): existing-only hits ${baseOnly} | enhanced-only hits ${enhOnly} | hybrid-only hits ${hybridOnly}`);
 
     // Harness sanity: metrics are well-defined proportions.
     expect(baseMrr.every((x) => x >= 0 && x <= 1)).toBe(true);

@@ -810,18 +810,30 @@ export async function buildRagContext(
   // NOT carry `useHybrid`, or this would recurse forever.
   if (options?.useHybrid === true) {
     const inner: RagOptions = { ...options, useHybrid: undefined };
-    const decision = await buildRagContext(slug, question, apiKey, expansionNames, {
+    // `fastCtx` (not `decision`) — this is a RagContext from the decision-model
+    // arm, distinct from the `decision` classification verdict resolved below.
+    const fastCtx = await buildRagContext(slug, question, apiKey, expansionNames, {
       ...inner,
       useDecisionModel: true,
     });
-    if (decision.confidence < HYBRID_CONFIDENCE_THRESHOLD) {
+    if (fastCtx.confidence < HYBRID_CONFIDENCE_THRESHOLD) {
       // Weak retrieval — hand the question to the full LLM pipeline.
-      return buildRagContext(slug, question, apiKey, expansionNames, {
+      const fullCtx = await buildRagContext(slug, question, apiKey, expansionNames, {
         ...inner,
         useDecisionModel: false,
       });
+      // Accumulate timings across BOTH arms so Tier 0 per-stage logging stays
+      // accurate if/when hybrid becomes the default: returning only the
+      // fallback arm's RagContext would silently drop the decision-model
+      // arm's expand/retrieve/rerank cost.
+      fullCtx.timings = {
+        expandMs: fastCtx.timings.expandMs + fullCtx.timings.expandMs,
+        retrieveMs: fastCtx.timings.retrieveMs + fullCtx.timings.retrieveMs,
+        rerankMs: fastCtx.timings.rerankMs + fullCtx.timings.rerankMs,
+      };
+      return fullCtx;
     }
-    return decision;
+    return fastCtx;
   }
 
   const useDecision = options?.useDecisionModel === true;
