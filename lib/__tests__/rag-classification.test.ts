@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { classifyQuery } from "../rag";
 import type { QueryType } from "../rag";
+import { DATASET } from "./rag-dataset";
 
 /**
  * Classification regression tests (issue #66).
@@ -26,8 +27,8 @@ import type { QueryType } from "../rag";
  */
 
 // The labelled benchmark dataset: question → expected query type. Mirrors
-// DATASET in rag-benchmark.test.ts (kept local so this file is
-// self-contained and runs with no index, env, or network access). Duplicate
+// DATASET in ./rag-dataset (shared with rag-benchmark.test.ts, so the
+// coverage cross-check below can see the real labelled set). Duplicate
 // question strings are listed once — the classifier is a pure function of
 // the question text.
 const CLASSIFICATION_CASES: [string, QueryType][] = [
@@ -166,13 +167,22 @@ describe("classifyQuery — labelled benchmark regression (issue #66)", () => {
   });
 
   // Every labelled case is accounted for: the passing set plus the documented
-  // known misses and label conflicts cover the full 118-case benchmark
-  // dataset (61 pinned + 10 pure misses + 2 conflicting labels = 71 unique
-  // questions; the remaining 47 benchmark cases repeat pinned wording).
+  // known misses and label conflicts cover the full benchmark dataset. This
+  // cross-checks against DATASET itself (shared via ./rag-dataset), so adding
+  // a case to the benchmark without updating this file fails the build — the
+  // coverage claim is an executable invariant, not a comment.
   it("accounts for every labelled benchmark question", () => {
     const pinned = new Set(CLASSIFICATION_CASES.map(([q]) => q));
     for (const [q] of KNOWN_MISSES) expect(pinned.has(q)).toBe(false); // no double-counting
     for (const [q] of LABEL_CONFLICTS) expect(pinned.has(q)).toBe(true); // pinned above
+
+    const covered = new Set<string>([
+      ...pinned,
+      ...KNOWN_MISSES.map(([q]) => q),
+      ...LABEL_CONFLICTS.map(([q]) => q),
+    ]);
+    const uncovered = DATASET.filter((c) => !covered.has(c.question));
+    expect(uncovered.map((c) => c.question)).toEqual([]);
   });
 });
 
