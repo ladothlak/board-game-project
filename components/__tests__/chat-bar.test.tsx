@@ -167,6 +167,53 @@ describe("ChatBar", () => {
     await waitFor(() => expect(screen.getByText(/finding pages/i)).toBeInTheDocument());
   });
 
+  it("fires the prewarm request after 400ms of typing pause (issue #62)", () => {
+    // The fetch stub from beforeEach is a plain vi.fn; vi.mocked recovers
+    // its call log for assertions. Fake timers keep this deterministic —
+    // no real waiting on the debounce window.
+    const fetchMock = vi.mocked(fetch);
+    vi.useFakeTimers();
+    try {
+      render(<ChatBar slug={slug} title={title} />);
+      const input = screen.getByRole("textbox", { name: /ask about/i });
+      // A question long enough to clear the ≥ 15-char threshold.
+      fireEvent.change(input, { target: { value: "How do I set up the game?" } });
+
+      // Nothing fires before the debounce elapses.
+      expect(fetchMock).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(399);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      // Once the input has been stable for 400ms, the prewarm request goes out.
+      vi.advanceTimersByTime(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe("/api/chat/prewarm");
+      expect(JSON.parse(String(init!.body))).toEqual({
+        slug,
+        question: "How do I set up the game?",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not fire prewarm below the 15-char threshold", () => {
+    const fetchMock = vi.mocked(fetch);
+    vi.useFakeTimers();
+    try {
+      render(<ChatBar slug={slug} title={title} />);
+      const input = screen.getByRole("textbox", { name: /ask about/i });
+      fireEvent.change(input, { target: { value: "Too short" } });
+
+      // Well past the debounce window — still under 15 chars, so no request.
+      vi.advanceTimersByTime(1000);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows user message in the chat history", async () => {
     const sseBody = new ReadableStream<Uint8Array>({
       start(controller) {

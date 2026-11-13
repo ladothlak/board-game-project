@@ -79,8 +79,10 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
 
   // Speculative RAG: pre-warm the server-side context while the user types.
   // Fires a debounced request once the input has ≥ 15 chars (matching the
-  // server's prewarm threshold) and been stable for 800ms. By the time they
-  // hit "Ask," the RAG context is already built.
+  // server's prewarm threshold) and been stable for 400ms (issue #62) — the
+  // server fast path completes in well under a second, so this warms the
+  // cache within normal typing pace. By the time they hit "Ask," the RAG
+  // context is already built.
   useEffect(() => {
     if (input.trim().length < 15 || loading) return;
     const t = setTimeout(() => {
@@ -89,7 +91,7 @@ export default function ChatBar({ slug, title }: { slug: string; title: string }
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ slug, question: input.trim() }),
       }).catch(() => {});
-    }, 800);
+    }, 400);
     return () => clearTimeout(t);
   }, [input, slug, loading]);
 
