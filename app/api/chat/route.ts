@@ -12,7 +12,7 @@ import { getPrewarm, getInflightPrewarm, type PrewarmEntry } from "./prewarm/rou
 
 // Unsloth runs locally (Unsloth Studio / `unsloth run`) and exposes an
 // OpenAI-compatible API, typically on http://localhost:8888.
-const BASE_URL = process.env.UNSLOTH_BASE_URL ?? "http://192.168.0.80:8888/v1";
+const BASE_URL = process.env.UNSLOTH_BASE_URL ?? "http://localhost:8888/v1";
 const MODEL =
   process.env.UNSLOTH_MODEL ?? "ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF";
 
