@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { buildRagContext } from "../rag";
 
@@ -27,7 +29,12 @@ afterEach(() => {
 
 const FAST_PATH = { expansionMode: "deterministic", skipRerank: true } as const;
 
-describe("evidence-based expansion gate on the real index (issue #68)", () => {
+// These tests run against the REAL search index, which is gitignored and not
+// present on a fresh clone. Skip the whole suite when it's absent so a clean
+// checkout stays green; build it with `npm run build:search` to run them.
+const hasIndex = existsSync(join(process.cwd(), "public", "search-index.json"));
+
+describe.skipIf(!hasIndex)("evidence-based expansion gate on the real index (issue #68)", () => {
   // The labelled answer pages per game (rag-dataset.ts): the regression
   // contract is that the short question surfaces them, not just any page.
   it.each([

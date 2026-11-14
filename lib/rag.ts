@@ -1364,7 +1364,8 @@ export async function finishRagContext(
       baseTerms.size <= 2) &&
     explicitPages.length === 0;
   const needsExpansion =
-    evidenceGate || (useDecision && decision?.needsExpansion === true);
+    evidenceGate ||
+    (useDecision && decision?.needsExpansion === true && explicitPages.length === 0);
 
   let candidates = lexicalCandidates;
 

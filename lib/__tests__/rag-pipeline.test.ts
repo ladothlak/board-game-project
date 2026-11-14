@@ -119,12 +119,14 @@ describe("buildRagContext", () => {
     ]);
     stubLlm({ rerank: [5] });
 
-    // 19 chars long (≤ 20), so expansion is gated off by length. The explicit
-    // page reference no longer skips the re-rank (issue #65): its bounded prior
-    // is correctable by the re-ranker, so the LLM gets a chance to reorder.
+    // The explicit page reference (p. 42) gates expansion off via the
+    // explicit-page exclusion (issue #68): no expansion fires for a query that
+    // names a specific page. The explicit page reference no longer skips the
+    // re-rank (issue #65): its bounded prior is correctable by the re-ranker,
+    // so the LLM gets a chance to reorder.
     const result = await buildRagContext(SLUG, "Tell me about p. 42", KEY);
 
-    // Exactly one LLM call: the re-rank (expansion is gated off by length).
+    // Exactly one LLM call: the re-rank (expansion is gated off by the explicit-page exclusion).
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(expansionCalls()).toBe(0);
 
@@ -908,7 +910,9 @@ describe("buildRagContext with the decision model enabled", () => {
       useDecisionModel: true,
     });
 
-    // No expansion LLM call was made — the model's verdict gated it off.
+    // No expansion LLM call was made — the evidence gate closed it off; the
+    // model's "no rephrasing" verdict is irrelevant here (it can only ever
+    // enable expansion, never suppress one).
     expect(llmExpandCalls()).toBe(0);
     expect(result.excerpts.length).toBeGreaterThan(0);
   });
