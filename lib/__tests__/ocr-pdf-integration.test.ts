@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { ocrPdfPages, OCR_PARTIAL_CHAR_THRESHOLD } from "../ocr-pdf.mjs";
 
 // ─── OCR integration (issue #74, P1.5) — real gs + tesseract pipeline ────────
@@ -17,8 +18,13 @@ import { ocrPdfPages, OCR_PARTIAL_CHAR_THRESHOLD } from "../ocr-pdf.mjs";
 const hasMonopolyPdf = existsSync(
   join(process.cwd(), "content", "games", "monopoly", "rules.pdf"),
 );
+// The real pipeline needs gs (page rendering) and tesseract (OCR). Without
+// either binary the test would fail on empty pages, so skip alongside the
+// missing-PDF guard.
+const hasGs = spawnSync("which", ["gs"]).status === 0;
+const hasTesseract = spawnSync("which", ["tesseract"]).status === 0;
 
-describe.skipIf(!hasMonopolyPdf)(
+describe.skipIf(!hasMonopolyPdf || !hasGs || !hasTesseract)(
   "ocrPdfPages — real scanned PDF (issue #74)",
   () => {
     it("OCRs every page of the Monopoly rulebook with per-page partial flags", async () => {

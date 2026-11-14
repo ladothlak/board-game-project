@@ -83,8 +83,9 @@ async function pdfIdentity(pdfPath) {
 
 /**
  * Extract page text AND heading info from a PDF (OCR fallback for scanned
- * files). Returns an array of `{ text: string; headings: HeadingInfo[] }`
- * per page, or null on failure.
+ * files). Returns an array of `{ text: string; headings: HeadingInfo[]; ocrPartial?: boolean }`
+ * per page, or null on failure. `ocrPartial` is set when the page came from
+ * OCR and its text is empty or thin (issue #74).
  */
 async function extractPagesWithHeadings(slug, pdfName, pdfPath) {
   try {
