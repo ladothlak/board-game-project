@@ -3,12 +3,12 @@ import { requireAuth } from "@/lib/auth";
 import { getGame } from "@/lib/games";
 import { loadIndex, retrieve, docFreqFor } from "@/lib/retrieve";
 import { getAnswer, storeAnswer } from "./answer-cache";
-import { buildRagContext, detectExplicitPages, type RagTimings } from "@/lib/rag";
+import { buildRagContext, finishRagContext, detectExplicitPages, type PrewarmHeadStart, type RagTimings } from "@/lib/rag";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { validateQuestion } from "@/lib/guard";
 import { withQueue } from "@/lib/llm-queue";
 import { logRequest } from "@/lib/audit-log";
-import { getPrewarm, getInflightPrewarm } from "./prewarm/route";
+import { getPrewarm, getInflightPrewarm, type PrewarmEntry } from "./prewarm/route";
 
 // Unsloth runs locally (Unsloth Studio / `unsloth run`) and exposes an
 // OpenAI-compatible API, typically on http://localhost:8888.
@@ -153,51 +153,63 @@ export async function POST(req: Request) {
         send({ type: "stage", stage: "retrieving" });
 
         // Enhanced RAG pipeline — check the speculative prewarm cache first.
-        // If the client fired a prewarm while the user was typing, the context
-        // is already built and we skip the (slow) LLM retrieval steps.
+        // If the client fired a prewarm while the user was typing, its
+        // deterministic head start (index load, DF table, base retrieval,
+        // keyword classification) is already built and we skip that prefix.
         const prewarmed = getPrewarm(slug, question.trim());
         // In-flight deduplication (issue #60): a prewarm for this exact
-        // question is still building its context — await that promise instead
-        // of starting a second RAG build. The fast-path context it produces is
-        // what the prewarm cache stores, so it stands in for a prewarm hit.
+        // question is still building its head start — await that promise
+        // instead of starting a second head-start build.
         const inflight = prewarmed ? null : getInflightPrewarm(slug, question.trim());
         let context: string | undefined;
         let toc: string | undefined;
         let ragConfidence: number | undefined;
-        // The pages retrieval surfaced, for the "pages-found" stage event. A
-        // prewarm hit has no page list (the cache stores only the context),
-        // so that stage is skipped there; an in-flight prewarm DOES carry one.
+        // The pages retrieval surfaced, for the "pages-found" stage event.
         let pages: number[] | null = null;
 
+        // A cached payload is a head start (quality "fast"), never a
+        // final-answer-ready context (issue #67 rejection rule): on a hit we
+        // ALWAYS finish the full quality pipeline over it below, so a prewarm
+        // hit and a cold request produce byte-identical excerpts. A payload
+        // without a quality flag is treated the same — never served verbatim.
+        let headStart: PrewarmHeadStart | null = null;
         if (prewarmed) {
           prewarmHit = true;
-          context = prewarmed.context;
-          toc = prewarmed.toc;
-          ragConfidence = prewarmed.confidence;
+          headStart = prewarmed.headStart;
         } else if (inflight) {
           // Await the in-flight build with a local guard: if it rejected, fall
-          // back to building this request's own context below so the real
+          // back to building this request's own head start below so the real
           // question can still succeed.
           try {
-            const rag = await inflight;
+            headStart = await inflight;
             prewarmHit = true;
-            context = rag.excerpts;
-            toc = rag.toc;
-            ragConfidence = rag.confidence;
-            pages = rag.pages;
           } catch {
             // The in-flight prewarm failed: fall through to the self-build
             // below. prewarmHit stays false so the audit line doesn't claim a
-            // hit for a context that never materialized.
+            // hit for a head start that never materialized.
           }
         }
 
-        if (context === undefined) {
-          const expNames = (game.expansions ?? []).filter((e) => e.inChatContext).map((e) => e.name);
-          // Default-on: use the fast decision model for classification + relevance
-          // scoring (see PERFORMANCE-PLAN.md, "Decision-model RAG"). Set
-          // USE_DECISION_MODEL=0 to disable for A/B benchmarking.
-          const useDecisionModel = process.env.USE_DECISION_MODEL !== "0";
+        const expNames = (game.expansions ?? []).filter((e) => e.inChatContext).map((e) => e.name);
+        // Default-on: use the fast decision model for classification + relevance
+        // scoring (see PERFORMANCE-PLAN.md, "Decision-model RAG"). Set
+        // USE_DECISION_MODEL=0 to disable for A/B benchmarking.
+        const useDecisionModel = process.env.USE_DECISION_MODEL !== "0";
+
+        if (headStart) {
+          // Prewarm hit: finish the full quality pipeline over the cached head
+          // start (issue #67). Both this and the cold path below share
+          // buildPrewarmHeadStart + finishRagContext, so they produce identical
+          // excerpts for the same question.
+          const rag = await finishRagContext(headStart, slug, question.trim(), apiKey, expNames, {
+            useDecisionModel,
+          });
+          context = rag.excerpts;
+          toc = rag.toc;
+          ragConfidence = rag.confidence;
+          ragTimings = rag.timings;
+          pages = rag.pages;
+        } else {
           const rag = await buildRagContext(slug, question.trim(), apiKey, expNames, {
             useDecisionModel,
           });
@@ -357,10 +369,10 @@ export async function POST(req: Request) {
         if (full.trim()) {
           storeAnswer(slug, question.trim(), answer, citations);
         }
-        // Per-stage breakdown for the audit log (Tier 0, issue #55): RAG stage
-        // durations when this request built the context itself, plus time to
-        // first token. A prewarm hit skips the RAG stages, so only
-        // firstTokenMs is known there.
+        // Per-stage breakdown for the audit log (Tier 0, issue #55): the
+        // quality stages' durations (expand/retrieve/rerank) — known on every
+        // path since both the prewarm-hit and cold paths run finishRagContext
+        // (issue #67) — plus time to first token.
         const stages: Record<string, number> = { ...(ragTimings ?? {}) };
         if (firstTokenAt !== null) stages.firstTokenMs = firstTokenAt - start;
         logRequest({ ip, route: "/api/chat", method: "POST", status: 200, durationMs: Date.now() - start, prewarmHit, stages });

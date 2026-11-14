@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { buildRagContext, decisionClassify, decisionRerank, expandQuery, expandQueryDeterministic, isEcho, measureExcerptDelivery } from "../rag";
+import { buildPrewarmHeadStart, buildRagContext, decisionClassify, decisionRerank, expandQuery, expandQueryDeterministic, finishRagContext, isEcho, measureExcerptDelivery } from "../rag";
 import { loadIndex, resetRetrieveCachesForTest } from "../retrieve";
 import type { Chunk } from "../retrieve";
 
@@ -645,6 +645,79 @@ describe("buildRagContext — prewarm fast path (issue #60)", () => {
     // ...and the weak candidate still carries through in lexical order.
     expect(result.excerpts).toContain("--- Page 1 ---");
     expect(result.pages).toEqual([1]);
+  });
+});
+
+// ─── Prewarm head start + finishRagContext parity (issue #67) ───────────────
+//
+// A prewarm hit and a cold request must produce byte-identical excerpts. Both
+// paths share buildPrewarmHeadStart (the deterministic prefix — zero model
+// calls) and finishRagContext (the quality stages), so parity holds by
+// construction: these tests pin it with a mocked LLM, CI-deterministic.
+
+describe("prewarm head start + finishRagContext parity (issue #67)", () => {
+  beforeEach(() => {
+    vi.mocked(loadIndex).mockResolvedValue(CHUNKS);
+  });
+
+  it("builds the head start with zero model calls", async () => {
+    // The fetch stub hangs forever: if buildPrewarmHeadStart made ANY model
+    // call (expansion, re-rank, or classification), this test would time out.
+    mockFetch.mockImplementation(() => new Promise<Response>(() => {}));
+
+    const headStart = await buildPrewarmHeadStart(SLUG, "How do I win?");
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    // The deterministic prefix is a pure function of (slug, question): the
+    // index chunks, base retrieval candidates, and the keyword classification.
+    // (The DF table is built from the on-disk index, which this fixture's slug
+    // is not part of, so it is undefined here.)
+    expect(headStart.chunks).toEqual(CHUNKS);
+    expect(headStart.lexicalCandidates.length).toBeGreaterThan(0);
+  });
+
+  it("produces byte-identical excerpts for a prewarm hit and a cold request", async () => {
+    stubLlm({ rerank: [5, 1] });
+
+    // Cold path: the full pipeline from scratch.
+    const cold = await buildRagContext(SLUG, "How do I win?", KEY);
+
+    // Prewarm-hit path: the cached head start, finished by the quality stages.
+    const headStart = await buildPrewarmHeadStart(SLUG, "How do I win?");
+    const warmed = await finishRagContext(headStart, SLUG, "How do I win?", KEY);
+
+    // Byte-identical excerpts — the parity guarantee of issue #67.
+    expect(warmed.excerpts).toBe(cold.excerpts);
+    // The rest of the context matches too (same configuration and stages).
+    expect(warmed.toc).toBe(cold.toc);
+    expect(warmed.pages).toEqual(cold.pages);
+    expect(warmed.rankedPages).toEqual(cold.rankedPages);
+    expect(warmed.confidence).toBe(cold.confidence);
+  });
+
+  it("keeps parity when the weak-base path fires the expansion", async () => {
+    // Chunks that only match rephrased variants, not the original question:
+    // the base result is weak, so BOTH paths fire + await the (mocked) LLM
+    // expansion and re-retrieve with its variants.
+    vi.mocked(loadIndex).mockResolvedValue([
+      { id: "w1", slug: SLUG, title: "", page: 1, text: "The weather track shifts with the seasons." },
+      { id: "a2", slug: SLUG, title: "", page: 2, text: "Each turn you may attack with your forces." },
+      { id: "b4", slug: SLUG, title: "", page: 4, text: "Combat rules: resolve the battle each round." },
+    ]);
+    stubLlm({ expansion: ["enemy attack", "combat rules"] });
+
+    const cold = await buildRagContext(SLUG, "How do I deal with enemy attacks?", KEY);
+
+    const headStart = await buildPrewarmHeadStart(SLUG, "How do I deal with enemy attacks?");
+    const warmed = await finishRagContext(headStart, SLUG, "How do I deal with enemy attacks?", KEY);
+
+    // Both paths fired the expansion (one LLM call each)...
+    expect(expansionCalls()).toBe(2);
+    // ...and still produce byte-identical excerpts.
+    expect(warmed.excerpts).toBe(cold.excerpts);
+    expect(warmed.toc).toBe(cold.toc);
+    expect(warmed.pages).toEqual(cold.pages);
+    expect(warmed.confidence).toBe(cold.confidence);
   });
 });
 

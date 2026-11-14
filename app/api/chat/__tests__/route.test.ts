@@ -11,14 +11,20 @@
  * "pages-found" with the RAG context's pages, and none on an answer-cache hit.
  * The LLM fetch and buildRagContext are mocked, so nothing touches the
  * network.
+ *
+ * Prewarm parity (issue #67): a cached prewarm payload is a head start, never
+ * a final-answer-ready context — the route finishes the full quality pipeline
+ * over it via finishRagContext before returning, so a prewarm hit and a cold
+ * request produce identical excerpts. These tests pin that rejection rule:
+ * a "fast" (or flagless) payload is never served verbatim.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { POST } from "../route";
 import { checkRate, getClientIp } from "@/lib/rate-limit";
 import { logRequest } from "@/lib/audit-log";
 import { getGame } from "@/lib/games";
-import { buildRagContext, type RagContext } from "@/lib/rag";
-import { getPrewarm, getInflightPrewarm } from "../prewarm/route";
+import { buildRagContext, finishRagContext, type PrewarmHeadStart, type RagContext } from "@/lib/rag";
+import { getPrewarm, getInflightPrewarm, type PrewarmEntry } from "../prewarm/route";
 import { resetAnswerCacheForTest } from "../answer-cache";
 import { resetRetrieveCachesForTest } from "@/lib/retrieve";
 
@@ -50,11 +56,12 @@ vi.mock("@/lib/games", () => ({
 }));
 // The RAG pipeline is the unit under test's dependency — mock it so the route
 // returns a deterministic context with known per-stage timings. Only
-// buildRagContext is mocked; detectExplicitPages (issue #61) stays real so the
+// buildRagContext (cold path) and finishRagContext (prewarm-hit path, issue
+// #67) are mocked; detectExplicitPages (issue #61) stays real so the
 // max_tokens scaling is exercised against its true behavior.
 vi.mock("@/lib/rag", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
-  return { ...actual, buildRagContext: vi.fn() };
+  return { ...actual, buildRagContext: vi.fn(), finishRagContext: vi.fn() };
 });
 // The prewarm cache and the in-flight map are module state in the prewarm
 // route; mock both lookups so hit/miss/in-flight is controlled per test.
@@ -82,6 +89,14 @@ const RAG_CONTEXT: RagContext = {
   excerptedPages: [3],
   excerptCoverage: { 3: 1 },
   timings: { expandMs: 12, retrieveMs: 34, rerankMs: 56 },
+};
+
+/** A deterministic head start as the prewarm route caches it (issue #67). */
+const HEAD_START: PrewarmHeadStart = {
+  chunks: [],
+  df: undefined,
+  lexicalCandidates: [],
+  queryType: "victory",
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -131,6 +146,9 @@ beforeEach(() => {
   vi.mocked(logRequest).mockReset();
   vi.mocked(getGame).mockReset().mockResolvedValue(GAME);
   vi.mocked(buildRagContext).mockReset().mockResolvedValue(RAG_CONTEXT);
+  // The prewarm-hit path finishes the cached head start via finishRagContext
+  // (issue #67): mock it to return the same deterministic context.
+  vi.mocked(finishRagContext).mockReset().mockResolvedValue(RAG_CONTEXT);
   vi.mocked(getPrewarm).mockReset().mockReturnValue(null);
   vi.mocked(getInflightPrewarm).mockReset().mockReturnValue(null);
   // The index file and the retrieve module's mtime cache are per-test
@@ -178,11 +196,12 @@ describe("POST /api/chat audit line (issue #55)", () => {
     });
   });
 
-  it("logs prewarmHit=true and empty RAG stages on a prewarm hit", async () => {
+  it("logs prewarmHit=true and the finished pipeline's stages on a prewarm hit", async () => {
+    // The cached payload is a head start marked "fast" (issue #67): the route
+    // finishes the full quality pipeline over it via finishRagContext.
     vi.mocked(getPrewarm).mockReturnValue({
-      context: "prewarmed excerpts",
-      toc: "p. 1: Setup.",
-      confidence: 0.9,
+      headStart: HEAD_START,
+      quality: "fast",
       ts: Date.now(),
     });
     mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
@@ -190,14 +209,21 @@ describe("POST /api/chat audit line (issue #55)", () => {
     const res = await post({ slug: SLUG, question: "How do I win?" });
     await res.text();
 
-    // The RAG pipeline never ran for this request.
+    // The cold path never ran — the hit's head start was finished instead.
     expect(buildRagContext).not.toHaveBeenCalled();
+    expect(finishRagContext).toHaveBeenCalledTimes(1);
 
     const entry = auditEntry();
     expect(entry.status).toBe(200);
     expect(entry.prewarmHit).toBe(true);
-    // A prewarm hit skips the RAG stages, so only firstTokenMs is known.
-    expect(entry.stages).toEqual({ firstTokenMs: expect.any(Number) });
+    // The quality stages ran in this request (finishRagContext), so their
+    // durations are logged alongside firstTokenMs.
+    expect(entry.stages).toEqual({
+      expandMs: 12,
+      retrieveMs: 34,
+      rerankMs: 56,
+      firstTokenMs: expect.any(Number),
+    });
   });
 
   it("omits firstTokenMs when no token ever streamed", async () => {
@@ -305,14 +331,13 @@ describe("POST /api/chat stage events (issue #57)", () => {
     expect(events.some((e) => e.type === "done")).toBe(true);
   });
 
-  it("emits 'retrieving' but skips 'pages-found' on a prewarm hit", async () => {
-    // A prewarm hit has no page list (the cache stores only the context), so
-    // the 'pages-found' stage must be skipped — this guards the `if (pages)`
-    // check in the route against becoming unconditional.
+  it("emits 'retrieving' and 'pages-found' from the finished pipeline on a prewarm hit", async () => {
+    // A prewarm hit's head start is finished via finishRagContext (issue
+    // #67), so — unlike the old skipRerank context — it carries the page
+    // list and the 'pages-found' stage fires from the finished context.
     vi.mocked(getPrewarm).mockReturnValue({
-      context: "prewarmed excerpts",
-      toc: "p. 1: Setup.",
-      confidence: 0.9,
+      headStart: HEAD_START,
+      quality: "fast",
       ts: Date.now(),
     });
     mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
@@ -322,8 +347,9 @@ describe("POST /api/chat stage events (issue #57)", () => {
 
     // 'retrieving' is still the very first frame...
     expect(events[0]).toEqual({ type: "stage", stage: "retrieving" });
-    // ...but no 'pages-found' frame appears.
-    expect(events.find((e) => e.type === "stage" && e.stage === "pages-found")).toBeUndefined();
+    // ...and 'pages-found' carries the finished context's pages.
+    const pagesFound = events.find((e) => e.type === "stage" && e.stage === "pages-found");
+    expect(pagesFound).toEqual({ type: "stage", stage: "pages-found", pages: [3] });
   });
 
   it("skips 'pages-found' when the RAG context has no pages", async () => {
@@ -351,17 +377,18 @@ describe("POST /api/chat stage events (issue #57)", () => {
 
 // ─── In-flight prewarm deduplication (issue #60) ──────────────────────────────
 //
-// A prewarm for this exact question may still be building its context when the
-// real request arrives. The route must await that in-flight promise instead of
-// starting a second RAG build — the fast-path context it produces is what the
-// prewarm cache stores, so it stands in for a prewarm hit.
+// A prewarm for this exact question may still be building its head start when
+// the real request arrives. The route must await that in-flight promise
+// instead of starting a second head-start build, then finish the full quality
+// pipeline over it (issue #67) — the awaited head start stands in for a
+// prewarm hit.
 
 describe("POST /api/chat in-flight prewarm deduplication (issue #60)", () => {
-  it("awaits an in-flight prewarm promise instead of building a second context", async () => {
+  it("awaits an in-flight prewarm promise and finishes its head start", async () => {
     // A prewarm for this question is in flight: its promise resolves after a
-    // small real delay with the fast-path RAG context.
+    // small real delay with the deterministic head start.
     vi.mocked(getInflightPrewarm).mockReturnValue(
-      new Promise((resolve) => setTimeout(() => resolve(RAG_CONTEXT), 10))
+      new Promise((resolve) => setTimeout(() => resolve(HEAD_START), 10))
     );
     mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
 
@@ -370,16 +397,24 @@ describe("POST /api/chat in-flight prewarm deduplication (issue #60)", () => {
 
     // No second RAG build was started for this request...
     expect(buildRagContext).not.toHaveBeenCalled();
-    // ...and the awaited context's pages drive the 'pages-found' stage event.
+    // ...the awaited head start is finished via finishRagContext, and the
+    // finished context's pages drive the 'pages-found' stage event.
+    expect(finishRagContext).toHaveBeenCalledTimes(1);
     expect(text).toContain("type\":\"stage\"");
     expect(text).toContain("pages\":[3]");
 
     const entry = auditEntry();
     expect(entry.status).toBe(200);
-    // The context came from prewarm, so it is audited like a prewarm hit:
-    // prewarmHit=true and no RAG stage durations (this request didn't build).
+    // The head start came from prewarm, so it is audited like a prewarm hit:
+    // prewarmHit=true, with the quality stages' durations (finishRagContext
+    // ran in this request).
     expect(entry.prewarmHit).toBe(true);
-    expect(entry.stages).toEqual({ firstTokenMs: expect.any(Number) });
+    expect(entry.stages).toEqual({
+      expandMs: 12,
+      retrieveMs: 34,
+      rerankMs: 56,
+      firstTokenMs: expect.any(Number),
+    });
   });
 
   it("builds its own context when no in-flight prewarm exists", async () => {
@@ -423,6 +458,62 @@ describe("POST /api/chat in-flight prewarm deduplication (issue #60)", () => {
       rerankMs: 56,
       firstTokenMs: expect.any(Number),
     });
+  });
+});
+
+// ─── Prewarm rejection rule (issue #67) ───────────────────────────────────────
+//
+// A cached prewarm payload is a head start, never a final-answer-ready
+// context: one marked "fast" — or missing the quality flag entirely — is
+// NEVER served verbatim. The route always finishes the full quality pipeline
+// over it via finishRagContext before the excerpts reach the model, so a
+// prewarm hit and a cold request produce identical excerpts.
+
+describe("POST /api/chat prewarm rejection rule (issue #67)", () => {
+  it("never serves a 'fast' cached payload as a final answer — it finishes the full pipeline", async () => {
+    // The cached payload is a head start marked "fast": its raw data must
+    // never reach the model. finishRagContext's return value is what goes
+    // into the prompt.
+    vi.mocked(getPrewarm).mockReturnValue({
+      headStart: HEAD_START,
+      quality: "fast",
+      ts: Date.now(),
+    });
+    vi.mocked(finishRagContext).mockResolvedValue(RAG_CONTEXT);
+    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    await res.text();
+
+    // The head start was passed to finishRagContext...
+    expect(finishRagContext).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(finishRagContext).mock.calls[0][0]).toBe(HEAD_START);
+    // ...and the finished context's excerpts (not the raw head start) are in
+    // the prompt.
+    const body = JSON.parse(String(mockFetch.mock.calls[0][1]?.body)) as Record<string, unknown>;
+    const messages = body.messages as { role: string; content: string }[];
+    expect(messages.some((m) => m.content.includes(RAG_CONTEXT.excerpts))).toBe(true);
+  });
+
+  it("treats a cached payload without a quality flag the same — never served verbatim", async () => {
+    // A legacy entry shape (no quality field at all) must fall through to
+    // finishRagContext too: the rejection rule covers missing flags, not just
+    // "fast".
+    // Cast through unknown: a flagless entry is not representable in the
+    // current PrewarmEntry type (quality is required), but the rejection rule
+    // must still cover it at runtime.
+    vi.mocked(getPrewarm).mockReturnValue({
+      headStart: HEAD_START,
+      ts: Date.now(),
+    } as unknown as PrewarmEntry);
+    vi.mocked(finishRagContext).mockResolvedValue(RAG_CONTEXT);
+    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    await res.text();
+
+    expect(finishRagContext).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(finishRagContext).mock.calls[0][0]).toBe(HEAD_START);
   });
 });
 

@@ -1265,6 +1265,229 @@ export function boostSectionPages(
 }
 
 /**
+ * Finish the quality stages of the enhanced RAG pipeline over a pre-built
+ * deterministic head start (issue #67): boosts, the retrieve-first quality
+ * gate + expansion, re-rank, cross-reference following, adaptive context
+ * budget, confidence, and hierarchical TOC. This is the exact tail of
+ * `buildRagContext` — both paths share this code, so a prewarm hit (head start
+ * + finish) and a cold request (`buildRagContext`) produce byte-identical
+ * excerpts for the same question when the model is deterministic (CI).
+ *
+ * The head start (see PrewarmHeadStart) already contains the deterministic
+ * prefix — index load, DF table, base retrieval, keyword classification — so
+ * this function skips exactly that prefix and runs everything else. It makes
+ * the SAME model calls `buildRagContext` would: when `useDecisionModel` is
+ * enabled it classifies with the decision model and re-ranks with it;
+ * otherwise it uses the keyword type from the head start and the LLM re-rank.
+ *
+ * Parity note (issue #67): with the decision model disabled (the CI
+ * configuration), classification is the deterministic keyword heuristic and
+ * every stage is a pure function of (head start, options), so a prewarm hit and
+ * a cold request are byte-identical. With the decision model ENABLED in
+ * production, both paths still run the same pipeline configuration and stages;
+ * the head start skips only the deterministic prefix, and the (non-deterministic)
+ * model verdicts are computed identically on both paths — so parity means "same
+ * configuration and stages," not necessarily byte-identical text.
+ *
+ * @param classifyPromise The classification promise, fired by the caller in
+ *   parallel with the head start build (`buildRagContext` does this). When
+ *   omitted it is fired here — used by the prewarm-hit path, where there is no
+ *   index load to hide behind.
+ */
+export async function finishRagContext(
+  headStart: PrewarmHeadStart,
+  slug: string,
+  question: string,
+  apiKey: string,
+  expansionNames?: string[],
+  options?: RagOptions,
+  classifyPromise?: Promise<{ queryType: QueryType; needsExpansion: boolean } | null>
+): Promise<RagContext> {
+  const useDecision = options?.useDecisionModel === true;
+  // Lexical scoring mode for the re-retrieval stage (must match the head
+  // start's base retrieval, so both paths score identically).
+  const scoring: ScoringMode = options?.scoring ?? "bm25";
+
+  // Tier 0 measurement (issue #55): wall-clock markers around each stage so
+  // callers can log a per-stage latency breakdown. Stages that are gated off
+  // (no expansion needed, re-rank skipped) report ~0 ms. The base retrieval
+  // already ran in the head start, so retrieveMs starts at 0 and only adds the
+  // re-retrieval span when expansion fires.
+  const timings: RagTimings = { expandMs: 0, retrieveMs: 0, rerankMs: 0 };
+
+  const chunks = headStart.chunks;
+  if (chunks.length === 0) {
+    return {
+      excerpts: "",
+      toc: "",
+      queryType: "general",
+      confidence: 0,
+      pages: [],
+      rankedPages: [],
+      excerptedPages: [],
+      excerptCoverage: {},
+      timings,
+    };
+  }
+
+  const df = headStart.df;
+  let lexicalCandidates = headStart.lexicalCandidates;
+
+  // Resolve classification: the decision model's verdict when available,
+  // otherwise the keyword heuristic from the head start.
+  const decision = await (classifyPromise ??
+    (useDecision ? decisionClassify(question) : Promise.resolve(null)));
+  const queryType: QueryType = decision?.queryType ?? headStart.queryType;
+
+  // 2. Detect explicit page references (e.g. "Tell me about page 14").
+  const explicitPages = detectExplicitPages(question);
+
+  // Decide up front whether the question even needs expansion: skip the call
+  // entirely for short or page-specific queries where retrieval already works
+  // well on its own; when the decision model gave us a verdict, also honor its
+  // "needs rephrasing" signal; on any fallback we keep the original length
+  // heuristic.
+  const baseNeedsExpansion = question.length > 20 && explicitPages.length === 0;
+  const needsExpansion = useDecision
+    ? baseNeedsExpansion && (decision ? decision.needsExpansion : true)
+    : baseNeedsExpansion;
+
+  // Query terms for the original question — used by the quality gate below and,
+  // when expansion is skipped, by the re-rank preview and the adaptive context
+  // budget so all stages judge relevance the same way.
+  const baseTerms = new Set(tokenize(question));
+
+  let candidates = lexicalCandidates;
+
+  // 4. Boost explicitly-referenced pages and mentioned-expansion chunks with
+  // bounded priors (issues #58, #65).
+  candidates = boostCandidates(candidates, chunks, explicitPages, expansionNames, question);
+
+  // 4b. Boost the query type's TOC section pages as bounded priors (issues #63, #65).
+  candidates = boostSectionPages(candidates, chunks, queryType);
+
+  // Base retrieval already ran in the head start, so retrieveMs starts at 0;
+  // the re-retrieval in the weak path below is timed separately and added on,
+  // so the two spans never overlap.
+  let retrieveMs = 0;
+
+  // 5. Quality gate (retrieve-first, issue #58): the same quality test that
+  // skips the re-rank below. When the original question alone already has a
+  // clear winner, proceed without any expansion — easy questions stop paying
+  // for it. Only when the base result is weak AND the question needs expansion
+  // do we fire + await the expansion and re-retrieve with the expanded queries,
+  // exactly as the pre-#58 pipeline did.
+  // The gate filters boosted candidates internally (issue #65): a boost is
+  // a prior, not evidence, so a boosted candidate can never satisfy it on
+  // its own. Explicit-page questions no longer skip the re-rank either —
+  // their bounded prior is correctable by the re-ranker.
+  const basePassesGate = passesQualityGate(lexicalCandidates, baseTerms);
+  // A section-anchored query with SOME genuine evidence (top lexical score ≥ 3)
+  // doesn't need expansion: the section boost is a strong prior that the page
+  // is relevant, so re-retrieving with expanded queries would only add noise
+  // and dilute the context budget. The re-rank gate below remains strict
+  // (issue #65): the LLM still gets a chance to correct weak results.
+  const sectionAnchored = QUERY_TYPE_SECTION[queryType] !== undefined;
+  const expansionSkipped = basePassesGate || (sectionAnchored && (lexicalCandidates[0]?.score ?? 0) >= 3);
+
+  let queries: string[];
+  if (!expansionSkipped && needsExpansion) {
+    // Fire + await the expansion (weak base result). expandQuery catches its own
+    // provider errors and falls back to deterministic expansion, so this await
+    // never rejects — no fire-and-forget guard is needed. The fast path
+    // (issue #60) swaps in `expandQueryDeterministic` directly: no model call,
+    // so prewarm never touches the main model's queue.
+    const expandStart = Date.now();
+    const expanded = options?.expansionMode === "deterministic"
+      ? expandQueryDeterministic(question)
+      : await expandQuery(apiKey, question, queryType);
+    timings.expandMs = Date.now() - expandStart;
+
+    // Re-retrieve with the expanded queries (timed separately so retrieveMs and
+    // expandMs stay disjoint). Track the pre-boost list for the genuine-evidence
+    // checks below (issue #65): boosts are priors, not evidence.
+    const reretrieveStart = Date.now();
+    lexicalCandidates = multiQueryRetrieve(chunks, expanded, 8, df, scoring);
+    candidates = boostCandidates(lexicalCandidates, chunks, explicitPages, expansionNames, question);
+    candidates = boostSectionPages(candidates, chunks, queryType);
+    retrieveMs += Date.now() - reretrieveStart;
+    queries = expanded;
+  } else {
+    // Expansion was gated off (short/explicit-page question) or the base result
+    // passed the gate: retrieval ran on the original question alone.
+    queries = [question];
+  }
+  timings.retrieveMs = retrieveMs;
+
+  // Query terms (tokenized variants) — the expanded phrases when expansion was
+  // awaited, the original question when it wasn't. Reused by the re-rank
+  // preview and the adaptive context budget so both judge relevance the same way.
+  const queryTerms = new Set(queries.flatMap((q) => tokenize(q)));
+
+  // 6. Re-rank — but skip it when it isn't needed: that's a full LLM round
+  // trip (up to 30 s on the local model) saved for easy questions. Skip when
+  // the quality gate fires (see passesQualityGate). Explicit-page questions
+  // are NO LONGER skipped here (issue #65): their bounded prior is correctable
+  // by the re-ranker, so the evidence gets a chance to reorder them. A
+  // section-anchored query with strong genuine evidence (top lexical score ≥ 3)
+  // also skips the re-rank: the section boost is a strong prior that the page
+  // is relevant, and the genuine evidence confirms it — no LLM call needed.
+  // When the decision model is enabled, the quality gate is its fast batched
+  // score call (falling back to the slow LLM re-rank if the model is
+  // unavailable). The fast path (issue #60) skips it unconditionally: prewarm
+  // keeps lexical order and never makes a model call.
+  const rerankStart = Date.now();
+  const rerankSkipped =
+    options?.skipRerank === true ||
+    passesQualityGate(lexicalCandidates, queryTerms) ||
+    (sectionAnchored && (lexicalCandidates[0]?.score ?? 0) >= 3);
+  candidates = rerankSkipped
+    ? candidates
+    : useDecision
+      ? (await decisionRerank(question, candidates, queryTerms, df, chunks.length)) ??
+        await rerank(apiKey, question, candidates, queryTerms, df, chunks.length)
+      : await rerank(apiKey, question, candidates, queryTerms, df, chunks.length);
+  timings.rerankMs = Date.now() - rerankStart;
+
+  // 7. Follow cross-references. The slice matches the candidate pool size
+  // (top-8 from multiQueryRetrieve) so pages ranking 7th and 8th stay in
+  // the final set instead of being dropped before cross-ref following.
+  candidates = followCrossRefs(chunks, candidates.slice(0, 8));
+
+  // 8. Adaptive context budget — with the query terms and DF table so long
+  // chunks are cut on their most relevant sentences, not from the top.
+  const excerpts = adaptiveContext(candidates, CONTEXT_BUDGET, queryTerms, df, chunks.length);
+
+  // 9. Confidence.
+  const confidence = estimateConfidence(candidates);
+
+  // 10. Hierarchical TOC. The flat one-line-per-page map is no longer
+  // included (issue #61): hierarchicalToc groups every chunk's page into a
+  // section, so it already covers the whole rulebook — the flat map was
+  // redundant prefill that doubled the TOC's token cost.
+  const toc = hierarchicalToc(chunks);
+
+  // 10b. Excerpt delivery measurement (issue #63): which pages are actually in
+  // the assembled context, and how much of each page's original text survived
+  // the budget cut — derived from the actual context string, so a returned
+  // page that is not in the excerpts is impossible by construction.
+  const { excerptedPages, excerptCoverage } = measureExcerptDelivery(excerpts, chunks);
+
+  // Pages in retrieval-relevance order (candidate order after re-rank +
+  // cross-ref following), deduplicated with first occurrence kept — this is
+  // the ranking metrics like MRR should be computed over. Only pages that
+  // actually made it into the assembled excerpts are claimed (issue #64): a
+  // page that couldn't fit its minimum window within the budget is dropped
+  // here, so `pages`/`rankedPages` never list text the LLM didn't see.
+  const excerpted = new Set(excerptedPages);
+  const rankedPages = [...new Set(candidates.map((c) => c.page))].filter((p) => excerpted.has(p));
+  // Display order: sorted by page number, as before.
+  const pages = [...rankedPages].sort((a, b) => a - b);
+
+  return { excerpts, toc, queryType, confidence, pages, rankedPages, excerptedPages, excerptCoverage, timings };
+}
+
+/**
  * The full enhanced RAG pipeline:
  * 1. Classify query type
  * 2. Detect explicit page references
@@ -1328,194 +1551,23 @@ export async function buildRagContext(
   // historical log-saturated weighting (see ScoringMode in lib/retrieve.ts).
   const scoring: ScoringMode = options?.scoring ?? "bm25";
 
-  // Tier 0 measurement (issue #55): wall-clock markers around each stage so
-  // callers can log a per-stage latency breakdown. Stages that are gated off
-  // (no expansion needed, re-rank skipped) report ~0 ms.
-  const timings: RagTimings = { expandMs: 0, retrieveMs: 0, rerankMs: 0 };
-
   // 1. Classify. When the decision model is enabled, classify in parallel
-  // with loadIndex() so its ~0.5 s latency hides behind the index read; the
-  // keyword heuristic stays as the fallback. Otherwise classify synchronously
-  // (free) exactly as before.
+  // with the head start build (which does the index load) so its ~0.5 s
+  // latency hides behind the index read; the keyword heuristic stays as the
+  // fallback. Otherwise classify synchronously (free) exactly as before.
   const classifyPromise = useDecision
     ? decisionClassify(question)
     : Promise.resolve(null);
 
-  // 2. Detect explicit page references (e.g. "Tell me about page 14").
-  const explicitPages = detectExplicitPages(question);
+  // Deterministic prefix (issue #67): index load, DF table, base multi-query
+  // retrieval, keyword classification — zero model calls. Shared with the
+  // prewarm route so a cold request and a prewarm hit compute byte-identical
+  // head starts for the same question.
+  const headStart = await buildPrewarmHeadStart(slug, question, scoring);
 
-  const chunks = (await loadIndex()).filter((c) => c.slug === slug);
-  if (chunks.length === 0) {
-    return {
-      excerpts: "",
-      toc: "",
-      queryType: "general",
-      confidence: 0,
-      pages: [],
-      rankedPages: [],
-      excerptedPages: [],
-      excerptCoverage: {},
-      timings,
-    };
-  }
-
-  // Resolve classification: the decision model's verdict when available,
-  // otherwise the keyword heuristic.
-  const decision = await classifyPromise;
-  const queryType: QueryType = decision?.queryType ?? classifyQuery(question);
-
-  // Decide up front whether the question even needs expansion: skip the call
-  // entirely for short or page-specific queries where retrieval already works
-  // well on its own; when the decision model gave us a verdict, also honor its
-  // "needs rephrasing" signal; on any fallback we keep the original length
-  // heuristic.
-  const baseNeedsExpansion = question.length > 20 && explicitPages.length === 0;
-  const needsExpansion = useDecision
-    ? baseNeedsExpansion && (decision ? decision.needsExpansion : true)
-    : baseNeedsExpansion;
-
-  // Precomputed per-slug DF table — avoids re-tokenizing every chunk on each
-  // of the retrieve() calls below.
-  const df = await docFreqFor(slug);
-
-  // Query terms for the original question — used by the quality gate below and,
-  // when expansion is skipped, by the re-rank preview and the adaptive context
-  // budget so all stages judge relevance the same way.
-  const baseTerms = new Set(tokenize(question));
-
-  // 3. Base retrieval on the original question first (no expansion), in the
-  // configured lexical scoring mode (bm25 by default; tfidf when opted in).
-  // `lexicalCandidates` keeps the PRE-BOOST list — genuine lexical evidence
-  // only — so the quality gate below can never be satisfied by a boost
-  // (issue #65).
-  const retrieveStart = Date.now();
-  let lexicalCandidates = multiQueryRetrieve(chunks, [question], 8, df, scoring);
-  let candidates = lexicalCandidates;
-
-  // 4. Boost explicitly-referenced pages and mentioned-expansion chunks with
-  // bounded priors (issues #58, #65).
-  candidates = boostCandidates(candidates, chunks, explicitPages, expansionNames, question);
-
-  // 4b. Boost the query type's TOC section pages as bounded priors (issues #63, #65).
-  candidates = boostSectionPages(candidates, chunks, queryType);
-
-  // Base retrieval + gate time only (disjoint from expandMs). The re-retrieval
-  // in the weak path below is timed separately and added on, so the two spans
-  // never overlap.
-  let retrieveMs = Date.now() - retrieveStart;
-
-  // 5. Quality gate (retrieve-first, issue #58): the same quality test that
-  // skips the re-rank below. When the original question alone already has a
-  // clear winner, proceed without any expansion — easy questions stop paying
-  // for it. Only when the base result is weak AND the question needs expansion
-  // do we fire + await the expansion and re-retrieve with the expanded queries,
-  // exactly as the pre-#58 pipeline did.
-  // The gate filters boosted candidates internally (issue #65): a boost is
-  // a prior, not evidence, so a boosted candidate can never satisfy it on
-  // its own. Explicit-page questions no longer skip the re-rank either —
-  // their bounded prior is correctable by the re-ranker.
-  const basePassesGate = passesQualityGate(lexicalCandidates, baseTerms);
-  // A section-anchored query with SOME genuine evidence (top lexical score ≥ 3)
-  // doesn't need expansion: the section boost is a strong prior that the page
-  // is relevant, so re-retrieving with expanded queries would only add noise
-  // and dilute the context budget. The re-rank gate below remains strict
-  // (issue #65): the LLM still gets a chance to correct weak results.
-  const sectionAnchored = QUERY_TYPE_SECTION[queryType] !== undefined;
-  const expansionSkipped = basePassesGate || (sectionAnchored && (lexicalCandidates[0]?.score ?? 0) >= 3);
-
-  let queries: string[];
-  if (!expansionSkipped && needsExpansion) {
-    // Fire + await the expansion (weak base result). expandQuery catches its own
-    // provider errors and falls back to deterministic expansion, so this await
-    // never rejects — no fire-and-forget guard is needed. The fast path
-    // (issue #60) swaps in `expandQueryDeterministic` directly: no model call,
-    // so prewarm never touches the main model's queue.
-    const expandStart = Date.now();
-    const expanded = options?.expansionMode === "deterministic"
-      ? expandQueryDeterministic(question)
-      : await expandQuery(apiKey, question, queryType);
-    timings.expandMs = Date.now() - expandStart;
-
-    // Re-retrieve with the expanded queries (timed separately so retrieveMs and
-    // expandMs stay disjoint). Track the pre-boost list for the genuine-evidence
-    // checks below (issue #65): boosts are priors, not evidence.
-    const reretrieveStart = Date.now();
-    lexicalCandidates = multiQueryRetrieve(chunks, expanded, 8, df, scoring);
-    candidates = boostCandidates(lexicalCandidates, chunks, explicitPages, expansionNames, question);
-    candidates = boostSectionPages(candidates, chunks, queryType);
-    retrieveMs += Date.now() - reretrieveStart;
-    queries = expanded;
-  } else {
-    // Expansion was gated off (short/explicit-page question) or the base result
-    // passed the gate: retrieval ran on the original question alone.
-    queries = [question];
-  }
-  timings.retrieveMs = retrieveMs;
-
-  // Query terms (tokenized variants) — the expanded phrases when expansion was
-  // awaited, the original question when it wasn't. Reused by the re-rank
-  // preview and the adaptive context budget so both judge relevance the same way.
-  const queryTerms = new Set(queries.flatMap((q) => tokenize(q)));
-
-   // 6. Re-rank — but skip it when it isn't needed: that's a full LLM round
-   // trip (up to 30 s on the local model) saved for easy questions. Skip when
-   // the quality gate fires (see passesQualityGate). Explicit-page questions
-   // are NO LONGER skipped here (issue #65): their bounded prior is correctable
-   // by the re-ranker, so the evidence gets a chance to reorder them. A
-   // section-anchored query with strong genuine evidence (top lexical score ≥ 3)
-   // also skips the re-rank: the section boost is a strong prior that the page
-   // is relevant, and the genuine evidence confirms it — no LLM call needed.
-   // When the decision model is enabled, the quality gate is its fast batched
-   // score call (falling back to the slow LLM re-rank if the model is
-   // unavailable). The fast path (issue #60) skips it unconditionally: prewarm
-   // keeps lexical order and never makes a model call.
-   const rerankStart = Date.now();
-   const rerankSkipped =
-     options?.skipRerank === true ||
-     passesQualityGate(lexicalCandidates, queryTerms) ||
-     (sectionAnchored && (lexicalCandidates[0]?.score ?? 0) >= 3);
-  candidates = rerankSkipped
-    ? candidates
-    : useDecision
-      ? (await decisionRerank(question, candidates, queryTerms, df, chunks.length)) ??
-        await rerank(apiKey, question, candidates, queryTerms, df, chunks.length)
-      : await rerank(apiKey, question, candidates, queryTerms, df, chunks.length);
-  timings.rerankMs = Date.now() - rerankStart;
-
-  // 7. Follow cross-references. The slice matches the candidate pool size
-  // (top-8 from multiQueryRetrieve) so pages ranking 7th and 8th stay in
-  // the final set instead of being dropped before cross-ref following.
-  candidates = followCrossRefs(chunks, candidates.slice(0, 8));
-
-  // 8. Adaptive context budget — with the query terms and DF table so long
-  // chunks are cut on their most relevant sentences, not from the top.
-  const excerpts = adaptiveContext(candidates, CONTEXT_BUDGET, queryTerms, df, chunks.length);
-
-  // 9. Confidence.
-  const confidence = estimateConfidence(candidates);
-
-  // 10. Hierarchical TOC. The flat one-line-per-page map is no longer
-  // included (issue #61): hierarchicalToc groups every chunk's page into a
-  // section, so it already covers the whole rulebook — the flat map was
-  // redundant prefill that doubled the TOC's token cost.
-  const toc = hierarchicalToc(chunks);
-
-  // 10b. Excerpt delivery measurement (issue #63): which pages are actually in
-  // the assembled context, and how much of each page's original text survived
-  // the budget cut — derived from the actual context string, so a returned
-  // page that is not in the excerpts is impossible by construction.
-  const { excerptedPages, excerptCoverage } = measureExcerptDelivery(excerpts, chunks);
-
-  // Pages in retrieval-relevance order (candidate order after re-rank +
-  // cross-ref following), deduplicated with first occurrence kept — this is
-  // the ranking metrics like MRR should be computed over. Only pages that
-  // actually made it into the assembled excerpts are claimed (issue #64): a
-  // page that couldn't fit its minimum window within the budget is dropped
-  // here, so `pages`/`rankedPages` never list text the LLM didn't see.
-  const excerpted = new Set(excerptedPages);
-  const rankedPages = [...new Set(candidates.map((c) => c.page))].filter((p) => excerpted.has(p));
-  // Display order: sorted by page number, as before.
-  const pages = [...rankedPages].sort((a, b) => a - b);
-
-  return { excerpts, toc, queryType, confidence, pages, rankedPages, excerptedPages, excerptCoverage, timings };
+  // Quality stages (issue #67): boosts, retrieve-first gate + expansion,
+  // re-rank, cross-ref following, adaptive budget, confidence, TOC. Shared
+  // with the prewarm-hit path so both produce identical excerpts for the same
+  // question.
+  return finishRagContext(headStart, slug, question, apiKey, expansionNames, options, classifyPromise);
 }
