@@ -1,6 +1,22 @@
 import "@testing-library/jest-dom/vitest";
+import { loadEnv } from "vite";
 import { afterEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
+
+// Load `.env` for every test (Vitest does not auto-load `.env` the way
+// Next.js does at runtime). Populates process.env only for keys that are
+// not already set, so a real environment always wins. This makes the
+// hardcoded base-URL fallback in lib/rag.ts / lib/decision-model.ts a true
+// last resort: live test paths resolve UNSLOTH_BASE_URL from `.env`.
+const fileEnv = loadEnv("development", process.cwd(), [
+  "UNSLOTH_",
+  "DECISION_",
+  "BRAVE_",
+  "RUN_",
+]);
+for (const [k, v] of Object.entries(fileEnv)) {
+  if (!(k in process.env)) process.env[k] = v;
+}
 
 // Auto-cleanup between tests to prevent DOM accumulation.
 afterEach(() => {
