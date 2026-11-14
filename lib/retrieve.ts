@@ -9,6 +9,17 @@ export interface Chunk {
   text: string;
   /** True when this chunk belongs to an expansion (not the base game). */
   isExpansion?: boolean;
+  /**
+   * Hierarchical section path from structural heading detection (issue #71).
+   * Present in schema v2 indexes; absent in v1. Values look like "Rules" or
+   * "Setup > 5.1 Setup Steps". Digest-path entries use "unknown".
+   */
+  sectionPath?: string;
+  /**
+   * Heading texts detected on this page (issue #71). Present in schema v2
+   * indexes; absent in v1. Empty for OCR/fallback pages.
+   */
+  headings?: string[];
 }
 
 let cache: Chunk[] | null = null;

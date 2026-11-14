@@ -1117,11 +1117,34 @@ const SECTION_PATTERNS: { name: string; pattern: RegExp }[] = [
 ];
 
 /**
- * Build a structured outline from the page map: group pages into sections
- * based on content keywords. This gives the model a document structure
- * beyond a flat one-line-per-page list.
+ * Build a structured outline from the page map: group pages into sections.
+ *
+ * Schema v2 (issue #71): when chunks carry a `sectionPath` (from structural
+ * heading detection at index-build time), group by that path directly — it is
+ * more precise than regex-matching the first 200 chars of text. Schema v1
+ * indexes (no sectionPath) fall back to the legacy keyword test.
  */
 export function hierarchicalToc(chunks: Chunk[]): string {
+  // Schema v2: group by sectionPath when available.
+  const hasSectionPath = chunks.some(
+    (c) => typeof c.sectionPath === "string" && c.sectionPath
+  );
+
+  if (hasSectionPath) {
+    const sections = new Map<string, number[]>();
+    for (const c of chunks) {
+      const key = c.sectionPath || "Other";
+      if (!sections.has(key)) sections.set(key, []);
+      if (!sections.get(key)!.includes(c.page)) sections.get(key)!.push(c.page);
+    }
+    const lines: string[] = [];
+    for (const [name, pages] of sections) {
+      lines.push(`${name}: p. ${[...pages].sort((a, b) => a - b).join(", p. ")}`);
+    }
+    return lines.join("\n");
+  }
+
+  // Schema v1 fallback: regex-match the first 200 chars of each page's text.
   const byPage = new Map<number, string>();
   for (const c of chunks) {
     if (!byPage.has(c.page)) byPage.set(c.page, c.text);
@@ -1153,12 +1176,44 @@ export function hierarchicalToc(chunks: Chunk[]): string {
 }
 
 /**
- * Find the pages whose text matches a named section's pattern — the same
- * first-200-char test hierarchicalToc uses — so retrieval can be anchored to
- * a query type's TOC section (issue #63). Returns [] when no pattern is
- * defined for the section name.
+ * Find the pages whose section matches a named TOC section so retrieval can
+ * be anchored to a query type's section (issue #63).
+ *
+ * Schema v2 (issue #71): when chunks carry a `sectionPath`, match by keyword
+ * against that path (the structural heading text is more precise than the
+ * legacy first-200-char regex test). Schema v1 indexes fall back to the
+ * original pattern test. Returns [] when no pattern is defined for the
+ * section name.
  */
 function findSectionPages(chunks: Chunk[], sectionName: string): number[] {
+  // Schema v2: match keywords against sectionPath.
+  const hasSectionPath = chunks.some(
+    (c) => typeof c.sectionPath === "string" && c.sectionPath
+  );
+
+  if (hasSectionPath) {
+    // Map the TOC section name to keywords that may appear in a sectionPath.
+    const KEYWORDS: Record<string, string[]> = {
+      "Setup": ["setup", "set up", "prepare", "beginning", "start"],
+      "Game Structure / Turn Order": ["turn", "round", "phase", "order", "structure"],
+      "Victory / End of Game": ["victory", "win", "end", "score", "scoring", "goal", "defeat", "lose"],
+    };
+    const kws = KEYWORDS[sectionName] || [sectionName.toLowerCase()];
+
+    const pages: number[] = [];
+    const seen = new Set<number>();
+    for (const c of chunks) {
+      if (seen.has(c.page)) continue;
+      const path = (c.sectionPath || "").toLowerCase();
+      if (kws.some((kw) => path.includes(kw))) {
+        pages.push(c.page);
+        seen.add(c.page);
+      }
+    }
+    return pages;
+  }
+
+  // Schema v1 fallback: first-match-wins regex test.
   const entry = SECTION_PATTERNS.find((s) => s.name === sectionName);
   if (!entry) return [];
 

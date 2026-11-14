@@ -5,13 +5,15 @@
 // re-extracted. Games are processed in parallel.
 //
 // The cache is also versioned: extractVersion bumps whenever the extractor
-// changes its output format (issue #70), so stale caches from older
-// extractors are re-extracted even when the PDF itself is unchanged.
-const EXTRACT_VERSION = 2;
+// changes its output format (issue #70 for layout-aware extraction, issue #71
+// for heading/section index), so stale caches from older extractors are
+// re-extracted even when the PDF itself is unchanged.
+const EXTRACT_VERSION = 3;
 import fs from "fs/promises";
 import path from "path";
-import { extractPdfPages } from "../lib/extract-pdf.mjs";
+import { extractPdfPagesWithHeadings } from "../lib/extract-pdf.mjs";
 import { ocrPdfPages } from "../lib/ocr-pdf.mjs";
+import { assignSectionPaths } from "../lib/sections.mjs";
 
 const root = process.cwd();
 const gamesDir = path.join(root, "content", "games");
@@ -30,17 +32,22 @@ async function pdfIdentity(pdfPath) {
   return { size: stat.size, mtimeMs: stat.mtimeMs };
 }
 
-/** Extract page text from a PDF (OCR fallback for scanned files). */
-async function extractPages(slug, pdfName, pdfPath) {
+/**
+ * Extract page text AND heading info from a PDF (OCR fallback for scanned
+ * files). Returns an array of `{ text: string; headings: HeadingInfo[] }`
+ * per page, or null on failure.
+ */
+async function extractPagesWithHeadings(slug, pdfName, pdfPath) {
   try {
-    let pages = await extractPdfPages(pdfPath);
-    if (pages.join("").length < 200) {
+    let pages = await extractPdfPagesWithHeadings(pdfPath);
+    if (pages.map((p) => p.text).join("").length < 200) {
       console.log(`⚠ ${slug}: no text layer in ${pdfName} — falling back to OCR`);
       try {
-        pages = await ocrPdfPages(pdfPath, { maxPages: 12 });
+        const ocrPages = await ocrPdfPages(pdfPath, { maxPages: 12 });
+        pages = ocrPages.map((text) => ({ text, headings: [] }));
       } catch (e) {
         console.error(`✗ ${slug}: OCR failed — ${e.message}`);
-        pages = [];
+        return null;
       }
     }
     return pages;
@@ -93,7 +100,7 @@ async function buildGame(slug, dir) {
       pages = cached.pages;
       console.log(`✓ ${slug}: ${pages.length} pages (cached)`);
     } else {
-      const extracted = await extractPages(slug, pdfName, pdfPath);
+      const extracted = await extractPagesWithHeadings(slug, pdfName, pdfPath);
       if (extracted === null) return [];
       pages = extracted;
       // Atomic write so a crash mid-build can't leave a corrupt cache.
@@ -111,9 +118,12 @@ async function buildGame(slug, dir) {
     );
   }
 
+  // Assign section paths from structural headings (with regex fallback).
+  const sectionPaths = assignSectionPaths(pages);
+
   return pages
-    .map((text, i) => {
-      const clean = (text ?? "").replace(/\s+/g, " ").trim();
+    .map((p, i) => {
+      const clean = (p.text ?? "").replace(/\s+/g, " ").trim();
       if (!clean) return null;
       return {
         id: `${slug}-p${i + 1}`,
@@ -122,6 +132,8 @@ async function buildGame(slug, dir) {
         page: i + 1,
         text: clean,
         isExpansion: false,
+        sectionPath: sectionPaths[i],
+        headings: (p.headings || []).map((h) => h.text),
       };
     })
     .filter(Boolean);
@@ -140,6 +152,12 @@ await fs.mkdir(path.dirname(outPath), { recursive: true });
 // several-fold.
 await fs.writeFile(
   outPath,
-  JSON.stringify({ generatedAt: new Date().toISOString(), entries })
+  JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    schemaVersion: 2,
+    analyzerVersion: "p1.2-heading-v1",
+    embeddingModel: null,
+    entries,
+  })
 );
 console.log(`Wrote ${entries.length} chunks to public/search-index.json`);
