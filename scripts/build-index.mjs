@@ -3,6 +3,11 @@
 // sidecar file (content/games/<slug>/.index-cache.json) keyed by PDF size +
 // mtime, so unchanged rulebooks are skipped and only changed ones are
 // re-extracted. Games are processed in parallel.
+//
+// The cache is also versioned: extractVersion bumps whenever the extractor
+// changes its output format (issue #70), so stale caches from older
+// extractors are re-extracted even when the PDF itself is unchanged.
+const EXTRACT_VERSION = 2;
 import fs from "fs/promises";
 import path from "path";
 import { extractPdfPages } from "../lib/extract-pdf.mjs";
@@ -80,6 +85,7 @@ async function buildGame(slug, dir) {
       cached &&
       cached.pdfName === pdfName &&
       Array.isArray(cached.pages) &&
+      cached.extractVersion === EXTRACT_VERSION &&
       cached.size === identity.size &&
       cached.mtimeMs === identity.mtimeMs;
 
@@ -92,7 +98,10 @@ async function buildGame(slug, dir) {
       pages = extracted;
       // Atomic write so a crash mid-build can't leave a corrupt cache.
       const tmpPath = `${cachePath}.tmp`;
-      await fs.writeFile(tmpPath, JSON.stringify({ pdfName, ...identity, pages }));
+      await fs.writeFile(
+        tmpPath,
+        JSON.stringify({ pdfName, extractVersion: EXTRACT_VERSION, ...identity, pages })
+      );
       await fs.rename(tmpPath, cachePath);
       console.log(`✓ ${slug}: ${pages.length} pages indexed`);
     }
