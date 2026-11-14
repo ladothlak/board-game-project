@@ -1434,8 +1434,9 @@ export async function finishRagContext(
   // is relevant, and the genuine evidence confirms it — no LLM call needed.
   // When the decision model is enabled, the quality gate is its fast batched
   // score call (falling back to the slow LLM re-rank if the model is
-  // unavailable). The fast path (issue #60) skips it unconditionally: prewarm
-  // keeps lexical order and never makes a model call.
+  // unavailable). Prewarm (issue #67) stores only the deterministic head
+  // start and never makes a model call; the chat route always finishes the
+  // rerank via finishRagContext.
   const rerankStart = Date.now();
   const rerankSkipped =
     options?.skipRerank === true ||

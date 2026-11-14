@@ -8,11 +8,14 @@ import { cleanup } from "@testing-library/react";
 // not already set, so a real environment always wins. This makes the
 // hardcoded base-URL fallback in lib/rag.ts / lib/decision-model.ts a true
 // last resort: live test paths resolve UNSLOTH_BASE_URL from `.env`.
+// RUN_* is deliberately excluded: live-gating flags must only come from an
+// explicit environment variable, never from a dotenv file — a stray
+// `RUN_LIVE_BENCH=1` in `.env` would silently flip benchmark/diag tests
+// into live mode.
 const fileEnv = loadEnv("development", process.cwd(), [
   "UNSLOTH_",
   "DECISION_",
   "BRAVE_",
-  "RUN_",
 ]);
 for (const [k, v] of Object.entries(fileEnv)) {
   if (!(k in process.env)) process.env[k] = v;
