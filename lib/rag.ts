@@ -10,7 +10,7 @@ const MODEL =
 /** Resolve the Unsloth base URL at call time (not import time), so a `.env`
  * loaded after module evaluation — as in the benchmark — is honored. */
 function resolveBaseUrl(): string {
-  return process.env.UNSLOTH_BASE_URL ?? "http://192.168.0.80:8888/v1";
+  return process.env.UNSLOTH_BASE_URL ?? "http://localhost:8888/v1";
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -24,7 +24,7 @@ export type QueryType =
   | "victory"
   | "general";
 
-interface ScoredChunk extends Chunk {
+export interface ScoredChunk extends Chunk {
   score: number;
   /**
    * True when this candidate's score is a bounded prior from a boost (an
@@ -148,6 +148,52 @@ export interface RagOptions {
    * remains the quality bar.
    */
   skipRerank?: boolean;
+}
+
+// ─── Prewarm head start (issue #67) ─────────────────────────────────────────
+
+/**
+ * The deterministic prefix of the enhanced RAG pipeline (issue #67): index
+ * load, the per-slug DF table, base multi-query retrieval on the original
+ * question, and keyword classification. A pure function of (slug, question,
+ * scoring) — zero model calls — so a prewarm build and a cold request compute
+ * byte-identical head starts for the same question.
+ *
+ * This is candidate-level work, NOT a final-answer-ready context: it must
+ * never be served as a final answer. The chat route always finishes the
+ * quality stages (re-rank + assembly) over it in /api/chat — see
+ * `finishRagContext` and the quality flag in app/api/chat/prewarm/route.ts.
+ */
+export interface PrewarmHeadStart {
+  /** The slug's index chunks (from loadIndex, filtered by slug). */
+  chunks: Chunk[];
+  /** The precomputed per-slug DF table (undefined when the index is empty). */
+  df: Map<string, number> | undefined;
+  /** Base multi-query retrieval candidates — genuine lexical evidence only,
+   * pre-boost. This is the list the quality gate judges, so a boost can never
+   * satisfy it on its own (issue #65). */
+  lexicalCandidates: ScoredChunk[];
+  /** Keyword classification of the question — the deterministic fallback the
+   * full pipeline uses when the decision model is disabled or unavailable. */
+  queryType: QueryType;
+}
+
+/**
+ * Build the deterministic prefix (see PrewarmHeadStart). Cheap and pure: one
+ * index read (cached by mtime), one DF table (cached per index version), one
+ * BM25 retrieval, one keyword classification — zero model calls. This is the
+ * work the prewarm endpoint saves for real requests (issue #67): a prewarm hit
+ * skips exactly this prefix and finishes everything else in /api/chat.
+ */
+export async function buildPrewarmHeadStart(
+  slug: string,
+  question: string,
+  scoring: ScoringMode = "bm25"
+): Promise<PrewarmHeadStart> {
+  const chunks = (await loadIndex()).filter((c) => c.slug === slug);
+  const df = chunks.length > 0 ? await docFreqFor(slug) : undefined;
+  const lexicalCandidates = multiQueryRetrieve(chunks, [question], 8, df, scoring);
+  return { chunks, df, lexicalCandidates, queryType: classifyQuery(question) };
 }
 
 // ─── LLM Helper ───────────────────────────────────────────────────────────
