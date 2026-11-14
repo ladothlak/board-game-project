@@ -94,17 +94,21 @@ describe("buildRagContext", () => {
     vi.mocked(loadIndex).mockResolvedValue(CHUNKS);
   });
 
-  it("skips LLM expansion for short queries and retrieves directly", async () => {
-    stubLlm();
+  it("fires LLM expansion for short queries with weak retrieval evidence", async () => {
+    // "How do I win?" has only two content terms and its top genuine score is
+    // below the quality threshold, so the evidence-based gate (issue #68)
+    // fires the expansion even though the query is short. The stubbed variants
+    // match the victory chunk strongly enough to pass the quality gate, so the
+    // re-rank is skipped: exactly one LLM call (the expansion itself).
+    stubLlm({ expansion: ["destroy all enemies", "end of the game"] });
     const result = await buildRagContext(SLUG, "How do I win?", KEY);
 
-    // Exactly one LLM call: the re-rank. No expansion call is made.
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(expansionCalls()).toBe(0);
+    expect(expansionCalls()).toBe(1);
 
-    // Retrieval still produced a usable context.
-    expect(result.excerpts).toContain("--- Page 3 ---");
-    expect(result.pages).toContain(3);
+    // The expanded queries rescued retrieval: the victory page leads.
+    expect(result.excerpts.startsWith("--- Page 3 ---")).toBe(true);
+    expect(result.pages).toEqual([1, 3]);
     expect(result.confidence).toBeGreaterThan(0);
   });
 
@@ -163,15 +167,20 @@ describe("buildRagContext", () => {
   });
 
   it("reports low confidence below the fallback threshold when retrieval is weak and re-ranking fails", async () => {
+    // The victory chunk only weakly matches the query's single distinctive term
+    // ("win"), and carries no rulebook wording the deterministic expansion
+    // fallback could reach for (the LLM is down), so even after the evidence
+    // gate (issue #68) fires the expansion, the top score stays below the
+    // quality threshold and the raw (low) score carries through. Pinned to the
+    // legacy "tfidf" scorer: under tfidf this fixture scores 1.174 post-expansion
+    // (confidence 0.117), below the threshold, so it exercises the
+    // low-confidence path. The fallback logic itself is scorer-agnostic
+    // (estimateConfidence + the chat route).
+    vi.mocked(loadIndex).mockResolvedValue([
+      { id: "w1", slug: SLUG, title: "Victory", page: 3, text: "You win when all enemies are destroyed." },
+    ]);
     mockFetch.mockRejectedValue(new Error("provider down"));
 
-    // "How do we win?" only weakly matches the victory chunk (it classifies as
-    // a general question, so no section-anchored boost fires), and with the LLM
-    // unavailable the raw (low) score carries through. Pinned to the legacy
-    // "tfidf" scorer: under tfidf this fixture scores 1.654 (confidence 0.165),
-    // below the threshold, so it exercises the low-confidence path. The
-    // fallback logic itself is scorer-agnostic (estimateConfidence + the chat
-    // route).
     const result = await buildRagContext(SLUG, "How do we win?", KEY, undefined, {
       scoring: "tfidf",
     });
@@ -383,7 +392,9 @@ describe("buildRagContext — excerpt delivery measurement (issue #63)", () => {
   });
 
   it("reports full coverage (1) when a page's entire text is delivered", async () => {
-    stubLlm();
+    // The evidence gate (issue #68) fires the expansion for this short query;
+    // the stubbed variants match the victory chunk so the context is non-empty.
+    stubLlm({ expansion: ["destroy all enemies", "end of the game"] });
     const result = await buildRagContext(SLUG, "How do I win?", KEY);
 
     // The victory chunk is short enough to survive its allocation uncut, so
@@ -472,15 +483,16 @@ describe("buildRagContext — section-anchored boost (issue #63)", () => {
   });
 
   it("boosts the setup section page when lexical retrieval can't discriminate", async () => {
-    // The setup page has NO overlap with the query's distinctive term ("begin").
-    // Only common words (how, do, i) appear on every page — lexical retrieval
-    // can't discriminate. The section boost must pull p. 1 into the context.
+    // The setup page has NO overlap with the query's distinctive term ("begin")
+    // — base retrieval returns no candidates at all, so the evidence gate
+    // (issue #68) fires the expansion. The stubbed variants match the setup
+    // chunk; the section boost must keep p. 1 in the context.
     vi.mocked(loadIndex).mockResolvedValue([
       { id: "s1", slug: SLUG, title: "Setup", page: 1, text: "Start by placing all tokens on the board and dealing the cards." },
       { id: "s2", slug: SLUG, title: "Combat", page: 2, text: "Each turn you may attack with your forces during the game." },
       { id: "s3", slug: SLUG, title: "Victory", page: 3, text: "You win when all enemies are destroyed in the game." },
     ]);
-    stubLlm();
+    stubLlm({ expansion: ["placing tokens", "start the game"] });
 
     const result = await buildRagContext(SLUG, "How do I begin?", KEY);
 
@@ -631,14 +643,19 @@ describe("buildRagContext — prewarm fast path (issue #60)", () => {
   });
 
   it("skips the re-rank entirely when skipRerank is true, keeping lexical order", async () => {
-    // A short query (expansion gated off) whose base result fails the quality
-    // gate — the full pipeline would fire the LLM re-rank here.
+    // A short query whose base result fails the quality gate — the evidence
+    // gate (issue #68) fires the expansion here, so this pins the
+    // deterministic fast path (no model call) plus the skipped re-rank: the
+    // weak candidate still carries through in lexical order.
     vi.mocked(loadIndex).mockResolvedValue([
       { id: "v1", slug: SLUG, title: "", page: 1, text: "You win when all enemies are destroyed." },
     ]);
     mockFetch.mockImplementation(() => new Promise<Response>(() => {}));
 
-    const result = await buildRagContext(SLUG, "how do i win", KEY, undefined, { skipRerank: true });
+    const result = await buildRagContext(SLUG, "how do i win", KEY, undefined, {
+      skipRerank: true,
+      expansionMode: "deterministic",
+    });
 
     // No model call at all...
     expect(mockFetch).not.toHaveBeenCalled();
@@ -882,7 +899,9 @@ describe("buildRagContext with the decision model enabled", () => {
   });
 
   it("skips expansion when the decision model says no rephrasing is needed", async () => {
-    // Long query would normally expand, but the model says it's a clear lookup.
+    // A strong base result (top score ≥ 3, more than two content terms) keeps
+    // the evidence gate (issue #68) closed, so no expansion is needed — and
+    // the model's "no rephrasing" verdict can no longer suppress one either.
     stubBoth({ queryType: "specific-rule", needsExpansion: false });
 
     const result = await buildRagContext(SLUG, "How do I set up the board for the game?", KEY, undefined, {
@@ -895,13 +914,15 @@ describe("buildRagContext with the decision model enabled", () => {
   });
 
   it("uses the decision model's score call for re-ranking instead of the LLM", async () => {
-    // A query where TF-IDF has no clear winner, so a quality gate is needed.
+    // A query with two content terms fires the evidence-based expansion
+    // (issue #68); the stubbed variants match BOTH chunks equally, so the
+    // merged result has no clear winner and a quality gate is needed.
     vi.mocked(loadIndex).mockResolvedValue([
       { id: "r1", slug: SLUG, title: "", page: 1, text: "The board has many tokens and markers." },
       { id: "r2", slug: SLUG, title: "", page: 2, text: "Tokens and markers are placed on the board." },
     ]);
     // The model strongly prefers candidate 0 over candidate 1.
-    stubBoth({ relevance: [4, 0] });
+    stubBoth({ relevance: [4, 0], expansion: ["board markers", "tokens markers"] });
 
     await buildRagContext(SLUG, "where do the tokens go", KEY, undefined, { useDecisionModel: true });
 

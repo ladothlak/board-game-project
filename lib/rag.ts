@@ -423,6 +423,10 @@ const QUERY_SYNONYMS: Record<string, string[]> = {
   plow: ["plow field"],
   trade: ["trading", "offer"],
   setup: ["set up"],
+  // Victory questions ("How do I win?") carry no rulebook terms of their own,
+  // so the n-gram fallback alone can't rescue them (issue #68): map the
+  // question word to the section's rulebook wording.
+  win: ["victory condition", "end of the game"],
 };
 
 /**
@@ -1342,20 +1346,25 @@ export async function finishRagContext(
   // 2. Detect explicit page references (e.g. "Tell me about page 14").
   const explicitPages = detectExplicitPages(question);
 
-  // Decide up front whether the question even needs expansion: skip the call
-  // entirely for short or page-specific queries where retrieval already works
-  // well on its own; when the decision model gave us a verdict, also honor its
-  // "needs rephrasing" signal; on any fallback we keep the original length
-  // heuristic.
-  const baseNeedsExpansion = question.length > 20 && explicitPages.length === 0;
-  const needsExpansion = useDecision
-    ? baseNeedsExpansion && (decision ? decision.needsExpansion : true)
-    : baseNeedsExpansion;
-
   // Query terms for the original question — used by the quality gate below and,
   // when expansion is skipped, by the re-rank preview and the adaptive context
   // budget so all stages judge relevance the same way.
   const baseTerms = new Set(tokenize(question));
+
+  // Decide up front whether the question even needs expansion: skip the call
+  // entirely for queries where retrieval already works well on its own.
+  // Evidence-based gate (issue #68): expand when retrieval evidence is weak —
+  // no lexical candidates, a low top genuine score, or very few content terms —
+  // instead of only for long queries. The decision-model signal can only ADD to
+  // the gate after it fires, never suppress a needed expansion.
+  const topScore = topLexicalScore(lexicalCandidates);
+  const evidenceGate =
+    (lexicalCandidates.length === 0 ||
+      topScore < 3 ||
+      baseTerms.size <= 2) &&
+    explicitPages.length === 0;
+  const needsExpansion =
+    evidenceGate || (useDecision && decision?.needsExpansion === true);
 
   let candidates = lexicalCandidates;
 

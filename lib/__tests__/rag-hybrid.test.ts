@@ -176,12 +176,15 @@ describe("buildRagContext hybrid mode (issue #59)", () => {
 
   it("falls back to the full LLM pipeline when confidence is below the threshold", async () => {
     // Pinned low-confidence fixture (rag-pipeline.test.ts): "How do we win?"
-    // only weakly matches the victory chunk (it classifies as a general
-    // question, so no section-anchored boost fires), and with every fetch
-    // rejected the raw (low) tfidf score carries through — confidence < 0.25.
-    // The question is short, so no expansion fires in any arm; each arm makes
-    // exactly one LLM re-rank attempt (which fails and falls back to the raw
-    // scores).
+    // only weakly matches the victory chunk (a single "win" hit), and with
+    // every fetch rejected even the deterministic expansion fallback can't
+    // lift the top score above the quality gate — confidence < 0.25 in every
+    // arm. The evidence gate (issue #68) fires the expansion in each arm, so
+    // every arm makes one LLM expansion attempt AND one LLM re-rank attempt
+    // (both fail and fall back to the raw scores).
+    vi.mocked(loadIndex).mockResolvedValue([
+      { id: "w1", slug: SLUG, title: "Victory", page: 3, text: "You win when all enemies are destroyed." },
+    ]);
     mockFetch.mockRejectedValue(new Error("provider down"));
 
     // Reference: the full pipeline run on its own.
@@ -190,7 +193,7 @@ describe("buildRagContext hybrid mode (issue #59)", () => {
       scoring: "tfidf",
     });
     expect(direct.confidence).toBeLessThan(HYBRID_CONFIDENCE_THRESHOLD);
-    const directCalls = mockFetch.mock.calls.length; // one LLM re-rank attempt
+    const directCalls = mockFetch.mock.calls.length; // one expansion + one re-rank attempt
 
     // The hybrid run must make the extra decision-model attempts of its first
     // arm AND a second, full-pipeline arm.
@@ -204,31 +207,37 @@ describe("buildRagContext hybrid mode (issue #59)", () => {
     // re-rank score — both rejected...
     expect(decisionCalls()).toBe(2);
     // ...and fell back to the LLM re-rank internally; arm 2 (full pipeline)
-    // made its own LLM re-rank attempt. Two re-rank attempts total proves the
+    // made its own expansion + re-rank attempts. Two of each total proves the
     // fallback arm ran.
     expect(llmRerankCalls()).toBe(2);
-    expect(llmExpandCalls()).toBe(0);
+    expect(llmExpandCalls()).toBe(2);
     expect(hybrid.confidence).toBeLessThan(HYBRID_CONFIDENCE_THRESHOLD);
 
     // The returned result IS the full-pipeline result (timings excluded).
     expect(withoutTimings(hybrid)).toEqual(withoutTimings(direct));
     // Sanity: the reference run really was a single-arm run.
-    expect(directCalls).toBe(1);
+    expect(directCalls).toBe(2);
   });
 
   it("is OFF by default — no options and useHybrid: false behave exactly as before", async () => {
-    // One LLM call (the re-rank) per run; no decision-model contact at all.
+    // One expansion + one re-rank call per run (the evidence gate, issue #68,
+    // fires the expansion for this short query); no decision-model contact at
+    // all.
     mockFetch.mockResolvedValue(llmResponse("[5, 1]"));
 
     const noOptions = await buildRagContext(SLUG, "How do I win?", KEY);
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(decisionCalls()).toBe(0);
 
+    // Re-stub after the reset so the comparison run exercises the same live
+    // path (a bare reset leaves no fetch implementation, forcing the
+    // deterministic expansion fallback and diverging results).
     mockFetch.mockReset();
+    mockFetch.mockResolvedValue(llmResponse("[5, 1]"));
     const explicitOff = await buildRagContext(SLUG, "How do I win?", KEY, undefined, {
       useHybrid: false,
     });
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(decisionCalls()).toBe(0);
 
     // Identical behavior: same result (timings excluded), same call pattern.
