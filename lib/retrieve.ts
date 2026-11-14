@@ -283,6 +283,8 @@ export function retrieve(
  * the entire book without overflowing the context window.
  */
 export function pageMap(chunks: Chunk[]): string[] {
+  // Summarizes each page from its FIRST chunk (passage 0 in a v3 index) —
+  // a representative sample, not the whole page.
   const byPage = new Map<number, string>();
   for (const c of chunks) {
     if (!byPage.has(c.page)) byPage.set(c.page, c.text);
@@ -302,6 +304,7 @@ export function pageMap(chunks: Chunk[]): string[] {
  * page is listed (labelled where we have text), and tapping one jumps there.
  */
 export function pageToc(chunks: Chunk[]): { page: number; label: string }[] {
+  // Labels each page from its FIRST chunk (passage 0 in a v3 index).
   const byPage = new Map<number, string>();
   for (const c of chunks) {
     if (!byPage.has(c.page)) byPage.set(c.page, c.text);
