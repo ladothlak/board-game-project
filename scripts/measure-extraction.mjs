@@ -41,7 +41,10 @@ function startsWithBoilerplate(pageText) {
 }
 
 /** True when a page starts mid-word: first character is lowercase, so the
- * text begins inside a sentence (e.g. a column wrap that dropped the start). */
+ * text begins inside a sentence (e.g. a column wrap that dropped the start).
+ * NOTE: this count is an UPPER BOUND on true corruption — legitimate
+ * lowercase section headings (e.g. "setup", "gameplay") also match, so the
+ * number includes pages that are not actually corrupted. */
 function startsMidWord(pageText) {
   const t = pageText.trim();
   if (!t) return false;

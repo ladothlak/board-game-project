@@ -95,29 +95,115 @@ describe("extractPdfPages — synthetic PDF (issue #70)", () => {
   });
 
   it("reads two columns left-to-right, top-to-bottom within each", async () => {
-    // Left column: 12 lines at x=72, spanning Y 700 down to 100.
-    // Right column: 12 lines at x=350, same Y range.
-    // Spreading across the full body region ensures the gutter gets votes
-    // in most slices (column detection requires ≥6/8 slices).
-    const leftWords = Array.from({ length: 12 }, (_, i) => `L${i}`);
-    const rightWords = Array.from({ length: 12 }, (_, i) => `R${i}`);
+    // Two realistic-width columns: left at x=72, right at x=310, each line a
+    // full phrase so the ink span is wide and the gutter sits near the middle
+    // of the page (a real column gutter, not a far-right inter-word gap).
+    // Spreading across the full body region ensures the gutter gets votes in
+    // most slices (column detection requires ≥6/8 slices).
     const items: Array<{ str: string; x: number; y: number; size: number }> = [];
     for (let i = 0; i < 12; i++) {
-      items.push({ str: leftWords[i], x: 72, y: 700 - i * 50, size: 12 });
-      items.push({ str: rightWords[i], x: 350, y: 700 - i * 50, size: 12 });
+      items.push({ str: `Left text ${i} of the quick brown fox`, x: 72, y: 700 - i * 50, size: 12 });
+      items.push({ str: `Right text ${i} of the lazy dog runs`, x: 310, y: 700 - i * 50, size: 12 });
     }
     const pages = await extractFromItems(items);
     expect(pages).toHaveLength(1);
     const text = pages[0];
     // Left column items come before right column items.
-    const l0Idx = text.indexOf("L0");
-    const l11Idx = text.indexOf("L11");
-    const r0Idx = text.indexOf("R0");
-    const r11Idx = text.indexOf("R11");
+    const l0Idx = text.indexOf("Left text 0");
+    const l11Idx = text.indexOf("Left text 11");
+    const r0Idx = text.indexOf("Right text 0");
+    const r11Idx = text.indexOf("Right text 11");
     expect(l0Idx).toBeLessThan(l11Idx);
     expect(r0Idx).toBeLessThan(r11Idx);
     // Left column before right column.
     expect(l11Idx).toBeLessThan(r0Idx);
+  });
+
+  it("detects the gutter on a two-column page with RAGGED left edges", async () => {
+    // Regression for review finding B1: when the left column's edge is ragged
+    // (each line ends at a different X), the gap CENTER drifts slice-to-slice
+    // and center-based clustering never reaches the vote threshold, fusing the
+    // two columns into one. Clustering by the stable right edge b recovers the
+    // gutter. Left phrases vary in length (ragged right edge); the right column
+    // starts at a fixed x=310 in every line.
+    const leftPhrases = [
+      "Ragged zero",
+      "Ragged one jumps over the lazy dog",
+      "Ragged two",
+      "Ragged three runs through the forest",
+      "Ragged four",
+      "Ragged five leaps over the meadow",
+      "Ragged six",
+      "Ragged seven gallops past the river",
+      "Ragged eight",
+      "Ragged nine dances in the garden",
+      "Ragged ten",
+      "Ragged eleven sprints down the lane",
+    ];
+    const rightPhrases = Array.from({ length: 12 }, (_, i) => `Right ${i} of the alpha beta column`);
+    const items: Array<{ str: string; x: number; y: number; size: number }> = [];
+    for (let i = 0; i < 12; i++) {
+      items.push({ str: leftPhrases[i], x: 72, y: 700 - i * 50, size: 12 });
+      items.push({ str: rightPhrases[i], x: 310, y: 700 - i * 50, size: 12 });
+    }
+    const pages = await extractFromItems(items);
+    expect(pages).toHaveLength(1);
+    const text = pages[0];
+    // The gutter must be detected: the whole left column is read before the
+    // right column (not interleaved line-by-line).
+    const l0Idx = text.indexOf("Ragged zero");
+    const l11Idx = text.indexOf("Ragged eleven");
+    const r0Idx = text.indexOf("Right 0");
+    expect(l0Idx).toBeLessThan(l11Idx);
+    expect(l11Idx).toBeLessThan(r0Idx);
+  });
+
+  it("does not detect a gutter on a single-column page", async () => {
+    // Regression for review finding B1: a single column of ragged-right-edge
+    // text must NOT be split into columns. The observable consequence of a
+    // false gutter is column reordering (a second band joined by "\\n\\n");
+    // with uniform line pitch there are no paragraph breaks, so a correct
+    // single-band extraction contains no "\\n\\n" and reads strictly
+    // top-to-bottom.
+    const phrases = Array.from({ length: 12 }, (_, i) => `Single column line ${i} with a ragged right edge here`);
+    const items: Array<{ str: string; x: number; y: number; size: number }> = [];
+    for (let i = 0; i < 12; i++) {
+      items.push({ str: phrases[i], x: 72, y: 700 - i * 50, size: 12 });
+    }
+    const pages = await extractFromItems(items);
+    expect(pages).toHaveLength(1);
+    const text = pages[0];
+    // No column split: a single band means no "\\n\\n" paragraph separator.
+    expect(text).not.toContain("\n\n");
+    // Strictly top-to-bottom order.
+    for (let i = 0; i < 11; i++) {
+      expect(text.indexOf(`line ${i}`)).toBeLessThan(text.indexOf(`line ${i + 1}`));
+    }
+  });
+
+  it("places a drop-cap glyph at the start of its line, not mid-page", async () => {
+    // Regression for review finding B2: a large drop cap (size ~3x body) has
+    // its baseline at the bottom of the multi-line span it occupies. Y-based
+    // joining with a size-scaled tolerance used to plant it on the line above
+    // its baseline, resurfacing mid-page. It must be placed by top edge so the
+    // dropped letter leads the first line ("You've...", not "ou've...").
+    const items: Array<{ str: string; x: number; y: number; size: number }> = [
+      { str: "ou've always liked plants.", x: 100, y: 700, size: 12 },
+      { str: "Y", x: 72, y: 685, size: 36 }, // drop cap spanning lines 1-2
+      { str: "text on the second line", x: 72, y: 685, size: 12 },
+      { str: "text on the third line", x: 72, y: 670, size: 12 },
+      { str: "text on the fourth line", x: 72, y: 655, size: 12 },
+    ];
+    const pages = await extractFromItems(items);
+    expect(pages).toHaveLength(1);
+    const text = pages[0].trim();
+    // The dropped "Y" leads the first line ("You..."), not mid-page. Assert on
+    // the prefix so the test is independent of how pdfjs encodes the apostrophe.
+    expect(text.startsWith("You")).toBe(true);
+    expect(text.indexOf("always liked plants")).toBeGreaterThan(0);
+    // Body lines follow in order.
+    expect(text.indexOf("second line")).toBeLessThan(text.indexOf("third line"));
+    expect(text.indexOf("third line")).toBeLessThan(text.indexOf("fourth line"));
   });
 
   it("repairs hyphenation across line breaks", async () => {
