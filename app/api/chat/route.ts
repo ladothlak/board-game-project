@@ -12,7 +12,7 @@ import { getPrewarm, getInflightPrewarm, type PrewarmEntry } from "./prewarm/rou
 
 // Unsloth runs locally (Unsloth Studio / `unsloth run`) and exposes an
 // OpenAI-compatible API, typically on http://localhost:8888.
-const BASE_URL = process.env.UNSLOTH_BASE_URL ?? "http://localhost:8888/v1";
+const BASE_URL = process.env.UNSLOTH_BASE_URL ?? "http://192.168.0.80:8888/v1";
 const MODEL =
   process.env.UNSLOTH_MODEL ?? "ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF";
 
@@ -23,11 +23,12 @@ interface HistoryMessage {
 
 function dedupePages(answer: string): { page: number }[] {
   const seen = new Set<number>();
-  // Match "(p. 16)", bare "p. 18", "page 12", and "pages 8-11" (→ first page).
-  const pattern = /(?:\()?p\.?\s*(\d+)\)?|pages?\s+(\d+)(?:-\d+)?/gi;
+  // Match "(p. 16)", bare "p. 18", "pp. 3-4" (→ first page), "page 12", and
+  // "pages 8-11" (→ first page).
+  const pattern = /(?:\()?pp\.\s*(\d+)(?:-\d+)?\)?|(?:\()?p\.?\s*(\d+)\)?|pages?\s+(\d+)(?:-\d+)?/gi;
   const pages: number[] = [];
   for (const m of answer.matchAll(pattern)) {
-    const p = Number(m[1] ?? m[2]);
+    const p = Number(m[1] ?? m[2] ?? m[3]);
     if (p > 0 && !seen.has(p)) {
       seen.add(p);
       pages.push(p);
@@ -95,11 +96,11 @@ function invalidCitations(answer: string, validPages: Set<number>): number[] {
  * collapsed so the text stays readable.
  */
 function stripInvalidCitations(answer: string, validPages: Set<number>): string {
-  const pattern = /(?:\()?p\.?\s*(\d+)\)?|pages?\s+(\d+)(?:-\d+)?/gi;
-  const stripped = answer.replace(pattern, (match, g1, g2) =>
-    validPages.has(Number(g1 ?? g2)) ? match : ""
+  const pattern = /(?:\()?pp\.\s*(\d+)(?:-\d+)?\)?|(?:\()?p\.?\s*(\d+)\)?|pages?\s+(\d+)(?:-\d+)?/gi;
+  const stripped = answer.replace(pattern, (match, g1, g2, g3) =>
+    validPages.has(Number(g1 ?? g2 ?? g3)) ? match : ""
   );
-  return stripped.replace(/\s{2,}/g, " ").replace(/\s+([.,;])/g, "$1");
+  return stripped.replace(/\s{2,}/g, " ").replace(/\s+([.,;])/g, "$1").trim();
 }
 
 /** Split buffered text into token-sized chunks for the SSE protocol (issue #69). */
@@ -421,13 +422,21 @@ export async function POST(req: Request) {
             );
             const second = await callProvider(apiKey, retryMessages, maxTokens);
             if (second.ok) {
-              full = second.content;
-              if (invalidCitations(full, validPages).length === 0) {
-                validationOutcome = "repaired";
+              if (second.content.trim()) {
+                full = second.content;
+                if (invalidCitations(full, validPages).length === 0) {
+                  validationOutcome = "repaired";
+                } else {
+                  // The retry also cited pages outside the excerpts: strip those
+                  // markers and flag the answer so no invalid citation reaches
+                  // the client silently.
+                  full = stripInvalidCitations(full, validPages);
+                  flagged = true;
+                  validationOutcome = "stripped";
+                }
               } else {
-                // The retry also cited pages outside the excerpts: strip those
-                // markers and flag the answer so no invalid citation reaches
-                // the client silently.
+                // The retry returned no usable text: strip the first answer's
+                // citations and flag it — nothing replaced them.
                 full = stripInvalidCitations(full, validPages);
                 flagged = true;
                 validationOutcome = "stripped";

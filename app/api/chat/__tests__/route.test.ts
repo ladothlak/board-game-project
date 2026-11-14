@@ -701,4 +701,79 @@ describe("POST /api/chat citation validation (issue #69)", () => {
     expect(done.citations).toEqual([{ page: 7 }]);
     expect(done.citationsFlagged).toBeUndefined();
   });
+
+  it("handles 'pp.' style citations — strips the full marker when invalid", async () => {
+    // First answer cites "pp. 99-100" (page 99 is not in excerptedPages [3]).
+    let call = 0;
+    mockFetch.mockImplementation(() => {
+      call++;
+      return Promise.resolve(
+        call === 1
+          ? jsonProviderResponse("See pp. 99-100 for this.")
+          : jsonProviderResponse("See pp. 3-4 for this.")
+      );
+    });
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    const events = await sseEvents(res);
+
+    // The retry cited pages 3-4 (first page 3 is valid) — repaired.
+    expect(providerCalls()).toBe(2);
+    const entry = auditEntry();
+    expect(entry.citationValidation).toBe("repaired");
+
+    // The done frame carries the citation for page 3 (first of the range)...
+    const done = events.find((e) => e.type === "done")!;
+    expect(done.citations).toEqual([{ page: 3 }]);
+    expect(done.citationsFlagged).toBeUndefined();
+  });
+
+  it("strips 'pp.' markers cleanly when the retry also fails — no dangling fragment", async () => {
+    // Both attempts cite "pp. 99-100" (page 99 is not in excerptedPages [3]).
+    mockFetch.mockImplementation(() => Promise.resolve(jsonProviderResponse("See pp. 99-100 for this.")));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    const events = await sseEvents(res);
+
+    expect(providerCalls()).toBe(2);
+    const entry = auditEntry();
+    expect(entry.citationValidation).toBe("stripped");
+
+    // The stripped text has no dangling "p" fragment from "pp."...
+    const tokenText = events.filter((e) => e.type === "token").map((e) => e.content as string).join("");
+    expect(tokenText).not.toContain("99");
+    expect(tokenText).not.toMatch(/\bp\b/); // no bare "p" left over
+    // ...and the done frame is flagged with no citations.
+    const done = events.find((e) => e.type === "done")!;
+    expect(done.citationsFlagged).toBe(true);
+    expect(done.citations).toEqual([]);
+  });
+
+  it("logs 'stripped' (not 'repaired') when the retry returns an empty body", async () => {
+    // First answer cites page 99 (invalid); the retry returns an empty string.
+    let call = 0;
+    mockFetch.mockImplementation(() => {
+      call++;
+      return Promise.resolve(
+        call === 1 ? jsonProviderResponse("The rule is on page 99.") : jsonProviderResponse("")
+      );
+    });
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    const events = await sseEvents(res);
+
+    // The retry produced no usable text — the first answer's citations are
+    // stripped and the outcome is "stripped", not "repaired".
+    expect(providerCalls()).toBe(2);
+    const entry = auditEntry();
+    expect(entry.citationValidation).toBe("stripped");
+
+    // The stripped first answer still has content ("The rule is on.") so tokens
+    // stream, but the done frame is flagged and carries no citations.
+    const tokenText = events.filter((e) => e.type === "token").map((e) => e.content as string).join("");
+    expect(tokenText).not.toContain("99");
+    const done = events.find((e) => e.type === "done")!;
+    expect(done.citationsFlagged).toBe(true);
+    expect(done.citations).toEqual([]);
+  });
 });
