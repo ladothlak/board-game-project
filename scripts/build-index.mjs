@@ -17,13 +17,18 @@
 // paragraph structure (`\n\n` breaks, headings as their own paragraphs), so
 // caches written by older extractors — whose text may lack that structure —
 // must be re-extracted before they are chunked; the bump forces that.
-const EXTRACT_VERSION = 5;
+// v6: full OCR coverage (issue #74) — scanned PDFs are now OCR'd page by page
+// with no cap (previously the first 12 pages only), and partially covered
+// OCR pages carry `ocrPartial` on their index entries. Stale v5 caches for
+// scanned rulebooks hold only the capped pages and lack the flag, so they
+// must be re-extracted; text-layer games are unaffected by the bump.
+const EXTRACT_VERSION = 6;
 import fs from "fs/promises";
 import path from "path";
 import { extractPdfPagesWithHeadings } from "../lib/extract-pdf.mjs";
 import { ocrPdfPages } from "../lib/ocr-pdf.mjs";
 import { assignSectionPaths } from "../lib/sections.mjs";
-import { splitPassages } from "../lib/passages.mjs";
+import { buildPassageEntries } from "../lib/index-entries.mjs";
 import { computeGameHealth, findFailingGames } from "../lib/page-health.mjs";
 
 const root = process.cwd();
@@ -87,8 +92,11 @@ async function extractPagesWithHeadings(slug, pdfName, pdfPath) {
     if (pages.map((p) => p.text).join("").length < 200) {
       console.log(`⚠ ${slug}: no text layer in ${pdfName} — falling back to OCR`);
       try {
-        const ocrPages = await ocrPdfPages(pdfPath, { maxPages: 12 });
-        pages = ocrPages.map((text) => ({ text, headings: [] }));
+        // No page cap (issue #74): every scanned page is OCR'd, and pages whose
+        // OCR text is empty or very short are flagged `ocrPartial` so the index
+        // marks their coverage as incomplete.
+        const ocrPages = await ocrPdfPages(pdfPath);
+        pages = ocrPages.map((p) => ({ text: p.text, headings: [], ocrPartial: p.ocrPartial }));
       } catch (e) {
         console.error(`✗ ${slug}: OCR failed — ${e.message}`);
         return null;
@@ -185,32 +193,9 @@ async function buildGame(slug, dir) {
   // page-based: `parentPage` (kept equal to `page` for backward compatibility)
   // is what lib/rag.ts derives excerptedPages from. OCR fallback pages flow
   // through the same splitter — its sentence/word boundary fallbacks handle
-  // unstructured text.
-  const entries = pages.flatMap((p, i) => {
-    const raw = (p.text ?? "").trim();
-    if (!raw) return [];
-    const sectionPath = sectionPaths[i];
-    const headings = (p.headings || []).map((h) => h.text);
-    return splitPassages(raw)
-      .map((passage, s) => {
-        const clean = passage.text.replace(/\s+/g, " ").trim();
-        if (!clean) return null;
-        return {
-          id: `${slug}-p${i + 1}-s${s}`,
-          slug,
-          title: meta.title ?? slug,
-          page: i + 1,
-          parentPage: i + 1,
-          passageIndex: s,
-          tokenCount: passage.tokenCount,
-          text: clean,
-          isExpansion: false,
-          sectionPath,
-          headings,
-        };
-      })
-      .filter(Boolean);
-  });
+  // unstructured text. Partially covered OCR pages (issue #74) carry
+  // `ocrPartial: true` on every entry derived from them.
+  const entries = buildPassageEntries(slug, meta.title ?? slug, pages, sectionPaths);
 
   return { slug, title: meta.title ?? slug, pages, health, entries };
 }

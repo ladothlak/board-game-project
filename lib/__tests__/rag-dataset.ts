@@ -136,6 +136,12 @@ export const DATASET: Case[] = [
   // Kingdomino
   { slug: "how-to-play-kingdomino-official-rules-ultraboardgames", question: "How do I set up the game?", expectedType: "setup", expectedPages: [2] },
   { slug: "how-to-play-kingdomino-official-rules-ultraboardgames", question: "How do I place a domino?", expectedType: "specific-rule", expectedPages: [3] },
+  // Monopoly (scanned rulebook — OCR fallback, issue #74 / plan §5.3: the
+  // dataset must cover at least one scanned/OCR rulebook). Expected pages are
+  // from the standard Monopoly rules layout; verify in live benchmark mode,
+  // which is where OCR quality (tesseract) actually matters.
+  { slug: "monopoly", question: "How do I set up the game?", expectedType: "setup", expectedPages: [2] },
+  { slug: "monopoly", question: "How do I win?", expectedType: "victory", expectedPages: [1, 2] },
   // Munchkin
   { slug: "munchkin", question: "What happens when I look for trouble?", expectedType: "specific-rule", expectedPages: [2] },
   // Oasis
@@ -157,6 +163,11 @@ export const DATASET: Case[] = [
   { slug: "scythe", question: "How do I set up the game?", expectedType: "setup", expectedPages: [6, 7] },
   { slug: "scythe", question: "What is the goal of the game?", expectedType: "victory", expectedPages: [1, 29] },
   { slug: "scythe", question: "How does the action selection work?", expectedType: "turn-structure", expectedPages: [10] },
+  // Spirit Island (scanned rulebook — OCR fallback, issue #74 / plan §5.3).
+  // Second scanned/OCR case; expected pages are from the standard Spirit
+  // Island rules layout and are verified in live benchmark mode.
+  { slug: "spirit-island", question: "How do I set up the game?", expectedType: "setup", expectedPages: [5] },
+  { slug: "spirit-island", question: "How do I win?", expectedType: "victory", expectedPages: [3] },
   // Splendor
   { slug: "splendor", question: "How do I set up the game?", expectedType: "setup", expectedPages: [3] },
   { slug: "splendor", question: "How do I win?", expectedType: "victory", expectedPages: [3] },
