@@ -1117,6 +1117,17 @@ const SECTION_PATTERNS: { name: string; pattern: RegExp }[] = [
 ];
 
 /**
+ * Map a TOC section name to keywords that may appear in a schema v2
+ * `sectionPath`. Used by findSectionPages (hoisted from the function body so
+ * it is not recreated on every call).
+ */
+const KEYWORDS: Record<string, string[]> = {
+  "Setup": ["setup", "set up", "prepare", "beginning", "start"],
+  "Game Structure / Turn Order": ["turn", "round", "phase", "order", "structure"],
+  "Victory / End of Game": ["victory", "win", "end", "score", "scoring", "goal", "defeat", "lose"],
+};
+
+/**
  * Build a structured outline from the page map: group pages into sections.
  *
  * Schema v2 (issue #71): when chunks carry a `sectionPath` (from structural
@@ -1192,12 +1203,7 @@ function findSectionPages(chunks: Chunk[], sectionName: string): number[] {
   );
 
   if (hasSectionPath) {
-    // Map the TOC section name to keywords that may appear in a sectionPath.
-    const KEYWORDS: Record<string, string[]> = {
-      "Setup": ["setup", "set up", "prepare", "beginning", "start"],
-      "Game Structure / Turn Order": ["turn", "round", "phase", "order", "structure"],
-      "Victory / End of Game": ["victory", "win", "end", "score", "scoring", "goal", "defeat", "lose"],
-    };
+    // Match the TOC section's keywords against each chunk's sectionPath.
     const kws = KEYWORDS[sectionName] || [sectionName.toLowerCase()];
 
     const pages: number[] = [];

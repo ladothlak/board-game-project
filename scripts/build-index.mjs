@@ -8,7 +8,9 @@
 // changes its output format (issue #70 for layout-aware extraction, issue #71
 // for heading/section index), so stale caches from older extractors are
 // re-extracted even when the PDF itself is unchanged.
-const EXTRACT_VERSION = 3;
+// v4: bold-heading tightening (review of #71) — fewer flagged headings, so
+// stale v3 caches must be re-extracted.
+const EXTRACT_VERSION = 4;
 import fs from "fs/promises";
 import path from "path";
 import { extractPdfPagesWithHeadings } from "../lib/extract-pdf.mjs";

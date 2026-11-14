@@ -37,4 +37,7 @@ console.log(`Schema version: ${data.schemaVersion ?? "v1 (no field)"}`);
 console.log(`Total pages: ${total}`);
 console.log(`"Other" pages: ${otherCount} (${pct}%)`);
 console.log(`Target: < 15%`);
-console.log(otherCount / total < 0.15 ? "✓ PASS" : "✗ FAIL");
+const pass = otherCount / total < 0.15;
+console.log(pass ? "✓ PASS" : "✗ FAIL");
+// Exit non-zero on failure so CI can gate on the < 15% target.
+if (!pass) process.exit(1);

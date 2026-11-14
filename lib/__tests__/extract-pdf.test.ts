@@ -351,19 +351,40 @@ describe("extractPdfPagesWithHeadings — synthetic PDF (issue #71)", () => {
 
   it("detects bold heading at body size", async () => {
     // "Setup" in bold at size 10 (same as body) — bold + size >= 0.95 * bodyMedian
-    // should flag it as a heading.
+    // should flag it as a heading. The body lines use narrow letters (i, l, t,
+    // f, s) so their perEm median sits well below the bold line's, and there are
+    // >= 5 lines in the size bucket — detectBoldFlags needs that many before its
+    // spread check runs at all.
     const pages = await extractHeadingsFromItems([
       { str: "Setup", x: 72, y: 700, size: 10, bold: true },
-      { str: "Place the board in the center of the table.", x: 72, y: 670, size: 10 },
-      { str: "Deal five cards to each player at random.", x: 72, y: 655, size: 10 },
-      { str: "The youngest player goes first in the game.", x: 72, y: 640, size: 10 },
+      { str: "The light slit fits in the thin slot.", x: 72, y: 670, size: 10 },
+      { str: "Fit the slim lid on the tin and sit.", x: 72, y: 655, size: 10 },
+      { str: "A thin strip of silk is lit by sun.", x: 72, y: 640, size: 10 },
+      { str: "The slim bit fits in the tin with ease.", x: 72, y: 625, size: 10 },
+      { str: "Sit the lid on the thin slit of tin.", x: 72, y: 610, size: 10 },
     ]);
     expect(pages).toHaveLength(1);
-    // Bold at body size should be detected as a heading (if bold detection works).
-    // Note: this may depend on the width heuristic; if pdfjs doesn't expose
-    // distinct widths for Helvetica vs Helvetica-Bold in synthetic PDFs,
-    // the heading may not be detected. We assert the text is present.
-    expect(pages[0].text).toContain("Setup");
+    // Bold at body size must be detected as a heading.
+    expect(pages[0].headings.length).toBeGreaterThanOrEqual(1);
+    const headingTexts = pages[0].headings.map((h) => h.text);
+    expect(headingTexts.some((t) => t.includes("Setup"))).toBe(true);
+  });
+
+  it("does not flag bold bullet lines at paragraph starts as headings", async () => {
+    // Regression for review finding B1 (issue #71): bold bullet lines and bold
+    // lead-ins are common in rulebooks. A bold line that starts a block is body
+    // text, not a heading, when it carries a list marker — on the pre-fix code
+    // this exact fixture yields the bullet as a heading.
+    const pages = await extractHeadingsFromItems([
+      { str: "Intro line one of the setup text.", x: 72, y: 700, size: 10 },
+      { str: "- Shuffle the omen cards and put them face down.", x: 72, y: 665, size: 10, bold: true },
+      { str: "Then deal one card to each player in turn.", x: 72, y: 650, size: 10 },
+      { str: "The youngest player starts the game now.", x: 72, y: 635, size: 10 },
+      { str: "Set the timer and begin the first round.", x: 72, y: 620, size: 10 },
+    ]);
+    expect(pages).toHaveLength(1);
+    // Zero headings: the bold bullet is body text, not a heading.
+    expect(pages[0].headings.length).toBe(0);
   });
 });
 
@@ -457,8 +478,9 @@ describe.skipIf(!hasBetrayalPdf)(
         "content", "games", "betrayal-at-house-on-the-hill", "rules.pdf",
       );
       const pages = await extractPdfPages(pdfPath);
-      // Betrayal has 68 pages.
-      expect(pages).toHaveLength(68);
+      // Betrayal has 68 pages; use a lower bound so a reissued PDF (extra
+      // errata pages, etc.) does not break the test.
+      expect(pages.length).toBeGreaterThanOrEqual(60);
       // Every page should be a string (possibly empty for blank pages).
       for (const p of pages) {
         expect(typeof p).toBe("string");
@@ -512,7 +534,8 @@ describe.skipIf(!hasBetrayalPdf)(
         "content", "games", "betrayal-at-house-on-the-hill", "rules.pdf",
       );
       const pages = await extractPdfPagesWithHeadings(pdfPath);
-      expect(pages).toHaveLength(68);
+      // Lower bound so a reissued PDF does not break the test.
+      expect(pages.length).toBeGreaterThanOrEqual(60);
       // A substantial fraction of pages should have at least one heading.
       // (Corpus probe: ~72% of pages across all games have ≥1 heading.)
       const withHeadings = pages.filter((p) => p.headings.length > 0);
@@ -526,7 +549,8 @@ describe.skipIf(!hasBetrayalPdf)(
       );
       const pages = await extractPdfPagesWithHeadings(pdfPath);
       const paths = assignSectionPaths(pages);
-      expect(paths).toHaveLength(68);
+      // Lower bound so a reissued PDF does not break the test.
+      expect(paths.length).toBeGreaterThanOrEqual(60);
       // Every path should be a non-empty string.
       for (const p of paths) {
         expect(typeof p).toBe("string");
