@@ -20,6 +20,18 @@ export interface Chunk {
    * indexes; absent in v1. Empty for OCR/fallback pages.
    */
   headings?: string[];
+  /**
+   * The page number this passage belongs to (issue #72). Present in schema v3
+   * indexes, where one page is several passage entries; always equal to
+   * `page`, so existing code that cites `chunk.page` keeps working. Absent in
+   * v1/v2 page-level indexes (and in digest-written entries), where `page`
+   * alone is authoritative.
+   */
+  parentPage?: number;
+  /** 0-based index of this passage within its page (issue #72). Absent in v1/v2. */
+  passageIndex?: number;
+  /** Approximate token (word) count of the passage text (issue #72). Absent in v1/v2. */
+  tokenCount?: number;
 }
 
 let cache: Chunk[] | null = null;

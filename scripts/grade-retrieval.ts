@@ -20,14 +20,23 @@
  * Run: `npx tsx scripts/grade-retrieval.ts` (or `npm run grade`).
  * Exit code: 0 when every case passes, 1 when any case fails.
  */
-import { buildRagContext } from "../lib/rag";
-import { loadIndex } from "../lib/retrieve";
+import { buildRagContext, multiQueryRetrieve } from "../lib/rag";
+import { loadIndex, docFreqFor } from "../lib/retrieve";
 
 interface GradeCase {
   slug: string;
   question: string;
   expectedPages: number[];
 }
+
+/**
+ * Raw-retrieval recall cutoff (RAG-PIPELINE-IMPROVEMENT-PLAN.md §P2: "raw
+ * recall@20 ≥ 95%"). The passage-level and page-level recalls below measure
+ * the BASE lexical retrieval over passages — before boosts, expansion,
+ * re-rank, or assembly — so they isolate the corpus/chunking quality (issue
+ * #72) from the pipeline stages that act on top of it.
+ */
+const RECALL_K = 20;
 
 /**
  * The "full-coverage hit" threshold (RAG-PIPELINE-IMPROVEMENT-PLAN.md §5.2):
@@ -162,9 +171,10 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Original page text length per slug (first chunk per page — the same
-  // convention measureExcerptDelivery uses) so each case's delivered char
-  // count can be reported alongside the coverage ratio.
+  // Original page text length per slug (SUM of all passages' lengths for the
+  // page — the same convention measureExcerptDelivery uses since issue #72)
+  // so each case's delivered char count can be reported alongside the
+  // coverage ratio.
   const originalLength = new Map<string, Map<number, number>>();
   for (const c of index) {
     let m = originalLength.get(c.slug);
@@ -172,7 +182,27 @@ async function main(): Promise<void> {
       m = new Map();
       originalLength.set(c.slug, m);
     }
-    if (!m.has(c.page)) m.set(c.page, c.text.length);
+    const p = c.parentPage ?? c.page;
+    m.set(p, (m.get(p) ?? 0) + c.text.length);
+  }
+
+  // Passage ids per slug/page: the "expected passages" for a case are all
+  // passages of its expected pages — the unit the passage-level recall is
+  // computed over (issue #72).
+  const passagesByPage = new Map<string, Map<number, Set<string>>>();
+  for (const c of index) {
+    let byPage = passagesByPage.get(c.slug);
+    if (!byPage) {
+      byPage = new Map();
+      passagesByPage.set(c.slug, byPage);
+    }
+    const p = c.parentPage ?? c.page;
+    let ids = byPage.get(p);
+    if (!ids) {
+      ids = new Set();
+      byPage.set(p, ids);
+    }
+    ids.add(c.id);
   }
 
   const rows: {
@@ -182,6 +212,8 @@ async function main(): Promise<void> {
     coverages: number[];
     missingCount: number;
     deliveredChars: number;
+    pageRecall: number;
+    passageRecall: number;
     pass: boolean;
   }[] = [];
   for (const c of GRADE_CASES) {
@@ -201,7 +233,24 @@ async function main(): Promise<void> {
       (sum, p) => sum + Math.round((result.excerptCoverage[p] ?? 0) * (originalLength.get(c.slug)?.get(p) ?? 0)),
       0
     );
-    rows.push({ c, type: result.queryType, pages: result.pages, coverages, missingCount, deliveredChars, pass });
+
+    // Raw-retrieval recall over the BASE lexical candidates (top-K passages,
+    // no boosts/expansion/re-rank — pure corpus/chunking signal, issue #72):
+    //  - pageRecall:     expected pages present among the retrieved
+    //                     passages' parentPages.
+    //  - passageRecall:  expected page-passages (ALL passages of an expected
+    //                     page) present in the top-K, over all such passages.
+    const slugChunks = index.filter((ch) => ch.slug === c.slug);
+    const retrieved = multiQueryRetrieve(slugChunks, [c.question], RECALL_K, await docFreqFor(c.slug), "bm25");
+    const retrievedPages = new Set(retrieved.map((ch) => ch.parentPage ?? ch.page));
+    const pageHits = c.expectedPages.filter((p) => retrievedPages.has(p)).length;
+    const expectedPassageIds = c.expectedPages.flatMap((p) => [...(passagesByPage.get(c.slug)?.get(p) ?? [])]);
+    const retrievedIds = new Set(retrieved.map((ch) => ch.id));
+    const passageHits = expectedPassageIds.filter((id) => retrievedIds.has(id)).length;
+    const pageRecall = c.expectedPages.length > 0 ? pageHits / c.expectedPages.length : 0;
+    const passageRecall = expectedPassageIds.length > 0 ? passageHits / expectedPassageIds.length : 0;
+
+    rows.push({ c, type: result.queryType, pages: result.pages, coverages, missingCount, deliveredChars, pageRecall, passageRecall, pass });
   }
 
   console.log("\n──────── Retrieval grade ────────");
@@ -228,6 +277,16 @@ async function main(): Promise<void> {
   console.log(`in-excerpts hit rate (membership only): ${inExcerpts}/${rows.length} (${(100 * inExcerpts / rows.length).toFixed(1)}%)`);
   console.log(`average expected-page coverage: ${(100 * avgCoverage).toFixed(1)}%`);
   console.log(`expected pages absent from excerpts: ${absentPages}/${totalExpected} (${(100 * absentPages / totalExpected).toFixed(1)}%)`);
+
+  // Raw-retrieval recall over the base lexical candidates (top-K, no boosts /
+  // expansion / re-rank) — measured over BOTH units so the passage chunking
+  // (issue #72) can be judged independently of the pipeline stages: page-level
+  // (expected pages among retrieved parentPages) and passage-level (expected
+  // page-passages in the top-K). The plan's §P2 bar is raw recall@20 ≥ 95%.
+  const avgPageRecall = rows.length > 0 ? rows.reduce((a, r) => a + r.pageRecall, 0) / rows.length : 0;
+  const avgPassageRecall = rows.length > 0 ? rows.reduce((a, r) => a + r.passageRecall, 0) / rows.length : 0;
+  console.log(`raw page-level recall@${RECALL_K} (base retrieval): ${(100 * avgPageRecall).toFixed(1)}%`);
+  console.log(`raw passage-level recall@${RECALL_K} (base retrieval): ${(100 * avgPassageRecall).toFixed(1)}%`);
 
   process.exit(passed === rows.length ? 0 : 1);
 }

@@ -10,12 +10,20 @@
 // re-extracted even when the PDF itself is unchanged.
 // v4: bold-heading tightening (review of #71) — fewer flagged headings, so
 // stale v3 caches must be re-extracted.
-const EXTRACT_VERSION = 4;
+// v5: passage chunking (issue #72) — pages are split into 300–600-token
+// passages at paragraph/heading boundaries with a ~12% overlap, and the index
+// stores one entry per passage (carrying parentPage/passageIndex/tokenCount)
+// instead of one per whole page. Passage splitting depends on the extractor's
+// paragraph structure (`\n\n` breaks, headings as their own paragraphs), so
+// caches written by older extractors — whose text may lack that structure —
+// must be re-extracted before they are chunked; the bump forces that.
+const EXTRACT_VERSION = 5;
 import fs from "fs/promises";
 import path from "path";
 import { extractPdfPagesWithHeadings } from "../lib/extract-pdf.mjs";
 import { ocrPdfPages } from "../lib/ocr-pdf.mjs";
 import { assignSectionPaths } from "../lib/sections.mjs";
+import { splitPassages } from "../lib/passages.mjs";
 
 const root = process.cwd();
 const gamesDir = path.join(root, "content", "games");
@@ -123,22 +131,39 @@ async function buildGame(slug, dir) {
   // Assign section paths from structural headings (with regex fallback).
   const sectionPaths = assignSectionPaths(pages);
 
-  return pages
-    .map((p, i) => {
-      const clean = (p.text ?? "").replace(/\s+/g, " ").trim();
-      if (!clean) return null;
-      return {
-        id: `${slug}-p${i + 1}`,
-        slug,
-        title: meta.title ?? slug,
-        page: i + 1,
-        text: clean,
-        isExpansion: false,
-        sectionPath: sectionPaths[i],
-        headings: (p.headings || []).map((h) => h.text),
-      };
-    })
-    .filter(Boolean);
+  // Index PASSAGES, not whole pages (issue #72): each page's text is split into
+  // 300–600-token passages at paragraph/heading boundaries with a ~12%
+  // overlap. The raw text keeps its newlines so the splitter can find those
+  // boundaries; each passage is flattened for storage. Citations stay
+  // page-based: `parentPage` (kept equal to `page` for backward compatibility)
+  // is what lib/rag.ts derives excerptedPages from. OCR fallback pages flow
+  // through the same splitter — its sentence/word boundary fallbacks handle
+  // unstructured text.
+  return pages.flatMap((p, i) => {
+    const raw = (p.text ?? "").trim();
+    if (!raw) return [];
+    const sectionPath = sectionPaths[i];
+    const headings = (p.headings || []).map((h) => h.text);
+    return splitPassages(raw)
+      .map((passage, s) => {
+        const clean = passage.text.replace(/\s+/g, " ").trim();
+        if (!clean) return null;
+        return {
+          id: `${slug}-p${i + 1}-s${s}`,
+          slug,
+          title: meta.title ?? slug,
+          page: i + 1,
+          parentPage: i + 1,
+          passageIndex: s,
+          tokenCount: passage.tokenCount,
+          text: clean,
+          isExpansion: false,
+          sectionPath,
+          headings,
+        };
+      })
+      .filter(Boolean);
+  });
 }
 
 const results = await Promise.all(
@@ -152,14 +177,19 @@ const entries = results.flat();
 await fs.mkdir(path.dirname(outPath), { recursive: true });
 // Minified: the index is machine-consumed, and pretty-printing inflates it
 // several-fold.
+// Schema v3 (issue #72): entries are PASSAGES, not whole pages — each carries
+// parentPage/passageIndex/tokenCount alongside the page-level fields kept for
+// backward compatibility (`page` === `parentPage`, so existing consumers of
+// chunk.page keep working). Consumers that read only `page` + `text` (v1/v2
+// shape) are unaffected.
 await fs.writeFile(
   outPath,
   JSON.stringify({
     generatedAt: new Date().toISOString(),
-    schemaVersion: 2,
-    analyzerVersion: "p1.2-heading-v1",
+    schemaVersion: 3,
+    analyzerVersion: "p1.3-passage-v1",
     embeddingModel: null,
     entries,
   })
 );
-console.log(`Wrote ${entries.length} chunks to public/search-index.json`);
+console.log(`Wrote ${entries.length} passages to public/search-index.json`);

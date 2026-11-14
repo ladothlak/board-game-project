@@ -1020,7 +1020,11 @@ export function adaptiveContext(
     }
   }
 
-  return feasible.map((c, i) => `--- Page ${c.page} ---\n${delivered[i]}`).join("\n\n");
+  // Blocks are labelled by the citation unit — the PAGE (issue #72): with a
+  // passage index each candidate is a passage, and its `parentPage` (kept
+  // equal to `page`) is what the block header names. `?? c.page` keeps v1/v2
+  // page-level indexes working unchanged.
+  return feasible.map((c, i) => `--- Page ${c.parentPage ?? c.page} ---\n${delivered[i]}`).join("\n\n");
 }
 
 /**
@@ -1031,19 +1035,25 @@ export function adaptiveContext(
  * impossible by construction.
  *
  * - `excerptedPages`: the pages present, sorted by page number. A page with
- *   multiple chunks (base + expansion) contributes the sum of its blocks'
- *   delivered chars.
+ *   multiple chunks (passages of one page, base + expansion) contributes the
+ *   sum of its blocks' delivered chars. With a passage index (issue #72) the
+ *   blocks are labelled by `parentPage`, so this is exactly the set of
+ *   parentPage values of the selected passages that delivered text.
  * - `excerptCoverage`: per excerpted page, delivered chars / original page
- *   text length, clamped 0..1. The original page text is the first chunk for
- *   that page in index order — the same convention hierarchicalToc uses. A
- *   page with no index entry (or empty text) gets 0.
+ *   text length, clamped 0..1. The original page text is the SUM of all
+ *   passages' lengths for that page in index order — with a passage index one
+ *   page is several chunks, so the first chunk alone would undercount it; for
+ *   v1/v2 indexes (one chunk per page) this reduces to the old first-chunk
+ *   convention. A page with no index entry (or empty text) gets 0.
  */
 export function measureExcerptDelivery(
   excerpts: string,
   chunks: Chunk[]
 ): { excerptedPages: number[]; excerptCoverage: Record<number, number> } {
   // Delivered chars per page, parsed from the actual context blocks (the same
-  // block split the pipeline tests use to inspect assembled contexts).
+  // block split the pipeline tests use to inspect assembled contexts). Block
+  // headers name the citation unit — the page (`parentPage`, kept equal to
+  // `page`), not the passage.
   const delivered = new Map<number, number>();
   for (const part of excerpts.split(/\n\n(?=--- Page \d+ ---)/)) {
     const m = part.match(/^--- Page (\d+) ---\n([\s\S]*)$/);
@@ -1054,16 +1064,18 @@ export function measureExcerptDelivery(
 
   const excerptedPages = [...delivered.keys()].sort((a, b) => a - b);
 
-  // Original page text: first chunk per page in index order (the same
-  // convention hierarchicalToc uses).
-  const pageText = new Map<number, string>();
+  // Original page text length: sum of ALL passages' lengths per page in index
+  // order (issue #72). `?? c.page` keeps v1/v2 page-level indexes — which have
+  // no parentPage — on the old first-chunk convention.
+  const pageTextLen = new Map<number, number>();
   for (const c of chunks) {
-    if (!pageText.has(c.page)) pageText.set(c.page, c.text);
+    const p = c.parentPage ?? c.page;
+    pageTextLen.set(p, (pageTextLen.get(p) ?? 0) + c.text.length);
   }
 
   const excerptCoverage: Record<number, number> = {};
   for (const page of excerptedPages) {
-    const original = pageText.get(page)?.length ?? 0;
+    const original = pageTextLen.get(page) ?? 0;
     excerptCoverage[page] = original === 0 ? 0 : Math.min(1, delivered.get(page)! / original);
   }
 
@@ -1550,9 +1562,11 @@ export async function finishRagContext(
   // the ranking metrics like MRR should be computed over. Only pages that
   // actually made it into the assembled excerpts are claimed (issue #64): a
   // page that couldn't fit its minimum window within the budget is dropped
-  // here, so `pages`/`rankedPages` never list text the LLM didn't see.
+  // here, so `pages`/`rankedPages` never list text the LLM didn't see. With a
+  // passage index (issue #72) candidates are passages, so their citation unit
+  // is `parentPage` (`?? c.page` keeps v1/v2 indexes working).
   const excerpted = new Set(excerptedPages);
-  const rankedPages = [...new Set(candidates.map((c) => c.page))].filter((p) => excerpted.has(p));
+  const rankedPages = [...new Set(candidates.map((c) => c.parentPage ?? c.page))].filter((p) => excerpted.has(p));
   // Display order: sorted by page number, as before.
   const pages = [...rankedPages].sort((a, b) => a - b);
 
