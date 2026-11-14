@@ -89,21 +89,16 @@ const RAG_CONTEXT: RagContext = {
 
 const mockFetch = vi.fn<(input: string | URL | Request, init?: RequestInit) => Promise<Response>>();
 
-/** One SSE token frame in the provider's wire format. */
-function sseChunk(content: string): string {
-  return `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`;
-}
-
-/** A streaming SSE response made of raw frames (token frames + [DONE]). */
-function sseResponse(frames: string[]): Response {
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (const frame of frames) controller.enqueue(encoder.encode(frame));
-      controller.close();
-    },
+/**
+ * A non-streaming provider response in the OpenAI wire format (issue #69):
+ * the route now requests `stream: false`, so the full answer arrives as a
+ * single JSON body, not SSE frames.
+ */
+function jsonProviderResponse(content: string): Response {
+  return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
   });
-  return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
 }
 
 function post(body: unknown): Promise<Response> {
@@ -159,11 +154,7 @@ afterEach(() => {
 describe("POST /api/chat answer cache (issue #56)", () => {
   it("replays a repeat question from cache with zero LLM calls", async () => {
     // First request: a miss that builds the context and generates the answer.
-    mockFetch.mockResolvedValue(sseResponse([
-      sseChunk("You win when all"),
-      sseChunk(" enemies are destroyed. (p. 3)"),
-      "data: [DONE]\n\n",
-    ]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("You win when all enemies are destroyed. (p. 3)"));
     const first = await post({ slug: SLUG, question: "How do I win?" });
     await first.text();
 
@@ -191,10 +182,7 @@ describe("POST /api/chat answer cache (issue #56)", () => {
   });
 
   it("flows a miss through the normal pipeline, then hits on the repeat", async () => {
-    mockFetch.mockResolvedValue(sseResponse([
-      sseChunk("Setup is easy."),
-      "data: [DONE]\n\n",
-    ]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Setup is easy."));
 
     const first = await post({ slug: SLUG, question: "How do I set up the game?" });
     await first.text();
@@ -215,7 +203,7 @@ describe("POST /api/chat answer cache (issue #56)", () => {
   });
 
   it("invalidates the cache when a re-digest advances the index mtime", async () => {
-    mockFetch.mockResolvedValue(sseResponse([sseChunk("Answer one."), "data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Answer one."));
     const first = await post({ slug: SLUG, question: "How do I win?" });
     await first.text();
 
@@ -235,7 +223,7 @@ describe("POST /api/chat answer cache (issue #56)", () => {
   });
 
   it("treats case/whitespace variants of the same question as one cache entry", async () => {
-    mockFetch.mockResolvedValue(sseResponse([sseChunk("You win."), "data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("You win."));
     await (await post({ slug: SLUG, question: "How do I win?" })).text();
 
     const variant = await post({ slug: SLUG, question: "  hOW   do i WIN?  " });
@@ -248,7 +236,7 @@ describe("POST /api/chat answer cache (issue #56)", () => {
 
   it("runs the injection guard before the cache: blocked requests are never replayed", async () => {
     // Seed the answer cache with a valid answer for this slug.
-    mockFetch.mockResolvedValue(sseResponse([sseChunk("You win."), "data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("You win."));
     await (await post({ slug: SLUG, question: "How do I win?" })).text();
 
     // A guard-blocked question must 400 — it is rejected before the cache is
@@ -266,7 +254,7 @@ describe("POST /api/chat answer cache (issue #56)", () => {
 
   it("never caches the 'ran out of room' fallback answer", async () => {
     // The provider answers 200 but streams no content deltas at all.
-    mockFetch.mockResolvedValue(sseResponse(["data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse(""));
 
     const first = await post({ slug: SLUG, question: "How do I win?" });
     const firstText = await first.text();

@@ -36,6 +36,77 @@ function dedupePages(answer: string): { page: number }[] {
   return pages.sort((a, b) => a - b).map((page) => ({ page }));
 }
 
+/**
+ * One non-streaming provider call (issue #69). Returns the full answer text
+ * on success, or the HTTP status + body excerpt on a provider 4xx/5xx. A
+ * network failure (unreachable server) rejects, so callers can distinguish
+ * "the model refused" from "we never reached the model".
+ *
+ * We request `stream: false` deliberately: citation validation (issue #69)
+ * needs the COMPLETE answer before any token reaches the client, so we buffer
+ * the whole generation and trade time-to-first-token for citation accuracy.
+ * For P0 that is the right trade — a wrong page number is worse than a slower
+ * first token.
+ */
+async function callProvider(
+  apiKey: string,
+  messages: { role: string; content: string }[],
+  maxTokens: number,
+): Promise<{ ok: true; content: string } | { ok: false; status: number; text: string }> {
+  const res = await withQueue(() =>
+    fetch(`${BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages,
+        temperature: 0.3,
+        // Budget scales with question type (issue #61) — set by the caller.
+        max_tokens: maxTokens,
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(60_000),
+    })
+  );
+  if (!res.ok) {
+    return { ok: false, status: res.status, text: (await res.text()).slice(0, 200) };
+  }
+  const json = await res.json();
+  return { ok: true, content: json.choices?.[0]?.message?.content ?? "" };
+}
+
+/**
+ * The pages cited in `answer` that are NOT in `validPages` (issue #69). An
+ * empty result means every citation is valid.
+ */
+function invalidCitations(answer: string, validPages: Set<number>): number[] {
+  return dedupePages(answer)
+    .filter((c) => !validPages.has(c.page))
+    .map((c) => c.page);
+}
+
+/**
+ * Remove citation markers for pages not in `validPages` (issue #69). Uses the
+ * same pattern as `dedupePages`, so a marker is stripped exactly when it would
+ * have been flagged as invalid. Leftover whitespace from a removed marker is
+ * collapsed so the text stays readable.
+ */
+function stripInvalidCitations(answer: string, validPages: Set<number>): string {
+  const pattern = /(?:\()?p\.?\s*(\d+)\)?|pages?\s+(\d+)(?:-\d+)?/gi;
+  const stripped = answer.replace(pattern, (match, g1, g2) =>
+    validPages.has(Number(g1 ?? g2)) ? match : ""
+  );
+  return stripped.replace(/\s{2,}/g, " ").replace(/\s+([.,;])/g, "$1");
+}
+
+/** Split buffered text into token-sized chunks for the SSE protocol (issue #69). */
+function* chunkText(text: string, size = 64): Generator<string> {
+  for (let i = 0; i < text.length; i += size) yield text.slice(i, i + size);
+}
+
 export async function POST(req: Request) {
   const denied = requireAuth(req as any);
   if (denied) return denied;
@@ -166,6 +237,9 @@ export async function POST(req: Request) {
         let ragConfidence: number | undefined;
         // The pages retrieval surfaced, for the "pages-found" stage event.
         let pages: number[] | null = null;
+        // The pages actually loaded into the excerpts (issue #63) — the valid
+        // set for citation validation (issue #69).
+        let excerptedPages: number[] = [];
 
         // A cached payload is a head start (quality "fast"), never a
         // final-answer-ready context (issue #67 rejection rule): on a hit we
@@ -209,6 +283,7 @@ export async function POST(req: Request) {
           ragConfidence = rag.confidence;
           ragTimings = rag.timings;
           pages = rag.pages;
+          excerptedPages = rag.excerptedPages;
         } else {
           const rag = await buildRagContext(slug, question.trim(), apiKey, expNames, {
             useDecisionModel,
@@ -218,6 +293,7 @@ export async function POST(req: Request) {
           ragConfidence = rag.confidence;
           ragTimings = rag.timings;
           pages = rag.pages;
+          excerptedPages = rag.excerptedPages;
         }
 
         // Stage event (issue #57): right after the RAG context is ready, so the
@@ -236,12 +312,16 @@ export async function POST(req: Request) {
         // Optional cross-game comparison: pull a second game's most relevant pages.
         let compareContext = "";
         let compareTitle = "";
+        // The second game's retrieved page numbers (issue #69): a comparison
+        // answer may legitimately cite these, so they join the valid set.
+        let comparePages: number[] = [];
         if (compareSlug && compareSlug !== slug) {
           const other = await getGame(compareSlug);
           if (other) {
             compareTitle = other.title;
             const otherChunks = (await loadIndex()).filter((c) => c.slug === compareSlug);
             const otherTop = retrieve(otherChunks, question, 3, await docFreqFor(compareSlug));
+            comparePages = otherTop.map((c) => c.page);
             compareContext = otherTop
               .map((c) => `--- ${compareTitle}, page ${c.page} ---\n${c.text}`)
               .join("\n\n");
@@ -295,29 +375,25 @@ export async function POST(req: Request) {
         const explicitPages = detectExplicitPages(question.trim());
         const maxTokens = explicitPages.length > 0 ? 1000 : 2000;
 
-        // Single-flight queue + 60s timeout to prevent resource exhaustion.
-        const res = await withQueue(() =>
-          fetch(`${BASE_URL}/chat/completions`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${apiKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model: MODEL,
-              messages,
-              temperature: 0.3,
-              // Budget scales with question type (issue #61) — see note above.
-              max_tokens: maxTokens,
-              stream: true,
-            }),
-            signal: AbortSignal.timeout(60_000),
-          })
-        );
+        // ── Citation validation (issue #69) ────────────────────────────────
+        // The set of pages a citation may legitimately reference: the pages
+        // actually loaded into the excerpts (excerptedPages), plus — for
+        // cross-game comparison requests — the second game's retrieved pages,
+        // which the model is allowed to cite.
+        const validPages = new Set<number>(excerptedPages);
+        for (const p of comparePages) validPages.add(p);
 
-        if (!res.ok) {
-          const text = await res.text();
-          send({ type: "error", message: `Provider error ${res.status}: ${text.slice(0, 200)}` });
+        let validationOutcome: "clean" | "repaired" | "stripped" = "clean";
+        let flagged = false;
+
+        // Buffered generation (issue #69): request the FULL answer up front
+        // (stream: false) so citations can be validated before any token
+        // reaches the client. This trades time-to-first-token for citation
+        // accuracy — acceptable for P0, where a wrong page number is worse
+        // than a slower first token.
+        const first = await callProvider(apiKey, messages, maxTokens);
+        if (!first.ok) {
+          send({ type: "error", message: `Provider error ${first.status}: ${first.text}` });
           controller.close();
           // A provider 4xx/5xx is a full request failure — audit it like the
           // other failure paths (issue #55). No token ever streamed, so only
@@ -326,56 +402,85 @@ export async function POST(req: Request) {
           logRequest({ ip, route: "/api/chat", method: "POST", status: 502, durationMs: Date.now() - start, prewarmHit, stages });
           return;
         }
+        full = first.content;
 
-        const reader = res.body!.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          // Process only complete SSE lines.
-          let newline;
-          while ((newline = buffer.indexOf("\n")) !== -1) {
-            const line = buffer.slice(0, newline).trim();
-            buffer = buffer.slice(newline + 1);
-            if (!line.startsWith("data:")) continue;
-            const payload = line.slice(5).trim();
-            if (payload === "[DONE]") continue;
-            try {
-              const j = JSON.parse(payload);
-              const delta: string = j.choices?.[0]?.delta?.content ?? "";
-              if (delta) {
-                full += delta;
-                if (firstTokenAt === null) firstTokenAt = Date.now();
-                send({ type: "token", content: delta });
+        // Validate the cited pages. An empty answer has nothing to check.
+        if (full.trim()) {
+          const invalid = invalidCitations(full, validPages);
+          if (invalid.length > 0) {
+            // Repair: retry ONCE with a strict reminder naming exactly which
+            // pages may be cited. The model has no memory of its first attempt
+            // (each provider call is independent), so the constraint is stated
+            // fresh.
+            const validList = [...validPages].sort((a, b) => a - b).join(", ");
+            const reminder =
+              `\n\nSTRICT CITATION RULE: Cite ONLY these pages: ${validList}. ` +
+              "If the answer is not in the loaded excerpts, say so plainly — do not guess any other page number.";
+            const retryMessages = messages.map((m, i) =>
+              i === messages.length - 1 ? { ...m, content: m.content + reminder } : m
+            );
+            const second = await callProvider(apiKey, retryMessages, maxTokens);
+            if (second.ok) {
+              full = second.content;
+              if (invalidCitations(full, validPages).length === 0) {
+                validationOutcome = "repaired";
+              } else {
+                // The retry also cited pages outside the excerpts: strip those
+                // markers and flag the answer so no invalid citation reaches
+                // the client silently.
+                full = stripInvalidCitations(full, validPages);
+                flagged = true;
+                validationOutcome = "stripped";
               }
-            } catch {
-              /* ignore malformed keep-alive frames */
+            } else {
+              // The retry hit a provider error: keep the first answer but strip
+              // its bad citations and flag it, so no invalid marker reaches the
+              // client silently.
+              full = stripInvalidCitations(full, validPages);
+              flagged = true;
+              validationOutcome = "stripped";
             }
           }
         }
 
-        const answer = full.trim()
-          ? full
-          : "Hmm, I ran out of room to think that one through — try asking again, or break the question into smaller parts.";
-        const citations = dedupePages(answer);
-        send({ type: "done", citations });
-        controller.close();
-        // Cache only successful answers with real content (issue #56) — never
-        // the fallback answer above. Stamped with the current index mtime so a
-        // re-digest invalidates it; evicts the oldest entry when over cap.
+        // Make the flag visible in the text itself (issue #69): a stripped
+        // answer says so plainly instead of silently dropping a citation.
+        if (flagged) {
+          full += " (Note: some cited pages could not be verified against the loaded rulebook and were removed.)";
+        }
+
+        // Stream the buffered answer as token events so the client protocol is
+        // unchanged (issue #69). Only when there is real content — an empty
+        // provider response delivers the fallback via `done` alone, as before.
         if (full.trim()) {
-          storeAnswer(slug, question.trim(), answer, citations);
+          if (firstTokenAt === null) firstTokenAt = Date.now();
+          for (const chunk of chunkText(full)) {
+            send({ type: "token", content: chunk });
+          }
+        }
+
+        const citations = dedupePages(full);
+        // `citationsFlagged` is additive (issue #69): old clients that ignore
+        // unknown fields keep working; new clients can surface the warning.
+        send({ type: "done", citations, ...(flagged ? { citationsFlagged: true } : {}) });
+        controller.close();
+        // Cache only cleanly-validated answers with real content (issues #56,
+        // #69): a stripped/flagged answer's text was altered, and a repaired
+        // answer cost an extra generation — neither is cached, so a replayed
+        // answer is always the exact, unaltered original whose citations are
+        // all valid. Stamped with the current index mtime so a re-digest
+        // invalidates it; evicts the oldest entry when over cap.
+        if (full.trim() && validationOutcome === "clean") {
+          storeAnswer(slug, question.trim(), full, citations);
         }
         // Per-stage breakdown for the audit log (Tier 0, issue #55): the
         // quality stages' durations (expand/retrieve/rerank) — known on every
         // path since both the prewarm-hit and cold paths run finishRagContext
-        // (issue #67) — plus time to first token.
+        // (issue #67) — plus time to first token, plus the citation-validation
+        // outcome (issue #69).
         const stages: Record<string, number> = { ...(ragTimings ?? {}) };
         if (firstTokenAt !== null) stages.firstTokenMs = firstTokenAt - start;
-        logRequest({ ip, route: "/api/chat", method: "POST", status: 200, durationMs: Date.now() - start, prewarmHit, stages });
+        logRequest({ ip, route: "/api/chat", method: "POST", status: 200, durationMs: Date.now() - start, prewarmHit, stages, citationValidation: validationOutcome });
       } catch (e) {
         send({
           type: "error",

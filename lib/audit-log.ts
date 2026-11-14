@@ -37,6 +37,13 @@ interface AuditEntry {
   prewarmHit?: boolean;
   /** True when the request was served from the final-answer cache (issue #56). */
   answerCacheHit?: boolean;
+  /**
+   * Citation-validation outcome for /api/chat (issue #69): "clean" (every
+   * cited page was in the loaded excerpts on the first pass), "repaired"
+   * (one strict-reminder retry made all citations valid), or "stripped"
+   * (invalid markers were removed and the answer flagged).
+   */
+  citationValidation?: "clean" | "repaired" | "stripped";
 }
 
 /**

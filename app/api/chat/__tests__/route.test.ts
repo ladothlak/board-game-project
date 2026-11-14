@@ -103,21 +103,16 @@ const HEAD_START: PrewarmHeadStart = {
 
 const mockFetch = vi.fn<(input: string | URL | Request, init?: RequestInit) => Promise<Response>>();
 
-/** One SSE token frame in the provider's wire format. */
-function sseChunk(content: string): string {
-  return `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`;
-}
-
-/** A streaming SSE response made of raw frames (token frames + [DONE]). */
-function sseResponse(frames: string[]): Response {
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (const frame of frames) controller.enqueue(encoder.encode(frame));
-      controller.close();
-    },
+/**
+ * A non-streaming provider response in the OpenAI wire format (issue #69):
+ * the route now requests `stream: false`, so the full answer arrives as a
+ * single JSON body, not SSE frames.
+ */
+function jsonProviderResponse(content: string): Response {
+  return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
   });
-  return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
 }
 
 function post(body: unknown): Promise<Response> {
@@ -170,11 +165,7 @@ afterEach(() => {
 
 describe("POST /api/chat audit line (issue #55)", () => {
   it("logs stages + firstTokenMs when tokens stream (RAG built by this request)", async () => {
-    mockFetch.mockResolvedValue(sseResponse([
-      sseChunk("Hel"),
-      sseChunk("lo there (p. 3)."),
-      "data: [DONE]\n\n",
-    ]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Hello there (p. 3)."));
 
     const res = await post({ slug: SLUG, question: "How do I win?" });
     // Consuming the body runs the stream to completion (and the audit log).
@@ -204,7 +195,7 @@ describe("POST /api/chat audit line (issue #55)", () => {
       quality: "fast",
       ts: Date.now(),
     });
-    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Hi"));
 
     const res = await post({ slug: SLUG, question: "How do I win?" });
     await res.text();
@@ -229,7 +220,7 @@ describe("POST /api/chat audit line (issue #55)", () => {
   it("omits firstTokenMs when no token ever streamed", async () => {
     // The provider answers 200 but streams no content deltas at all (e.g. the
     // model burned its budget thinking and produced nothing).
-    mockFetch.mockResolvedValue(sseResponse(["data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse(""));
 
     const res = await post({ slug: SLUG, question: "How do I win?" });
     const text = await res.text();
@@ -293,10 +284,7 @@ describe("POST /api/chat stage events (issue #57)", () => {
   }
 
   it("emits 'retrieving' before any token and 'pages-found' with the context's pages", async () => {
-    mockFetch.mockResolvedValue(sseResponse([
-      sseChunk("Hello"),
-      "data: [DONE]\n\n",
-    ]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Hello"));
 
     const res = await post({ slug: SLUG, question: "How do I win?" });
     const events = await sseEvents(res);
@@ -314,10 +302,7 @@ describe("POST /api/chat stage events (issue #57)", () => {
 
   it("emits no stage events on an answer-cache hit", async () => {
     // Prime the final-answer cache with a successful request (issue #56).
-    mockFetch.mockResolvedValue(sseResponse([
-      sseChunk("You win when all enemies are destroyed."),
-      "data: [DONE]\n\n",
-    ]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("You win when all enemies are destroyed."));
     const primed = await post({ slug: SLUG, question: "How do I win?" });
     await primed.text();
 
@@ -340,7 +325,7 @@ describe("POST /api/chat stage events (issue #57)", () => {
       quality: "fast",
       ts: Date.now(),
     });
-    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Hi"));
 
     const res = await post({ slug: SLUG, question: "How do I win?" });
     const events = await sseEvents(res);
@@ -357,10 +342,7 @@ describe("POST /api/chat stage events (issue #57)", () => {
     // `pages: []`. The route must not emit a useless `pages: []` frame — the
     // protocol says 'pages-found' is skipped when pages is empty.
     vi.mocked(buildRagContext).mockResolvedValue({ ...RAG_CONTEXT, pages: [] });
-    mockFetch.mockResolvedValue(sseResponse([
-      sseChunk("Hello"),
-      "data: [DONE]\n\n",
-    ]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Hello"));
 
     const res = await post({ slug: SLUG, question: "How do I win?" });
     const events = await sseEvents(res);
@@ -390,7 +372,7 @@ describe("POST /api/chat in-flight prewarm deduplication (issue #60)", () => {
     vi.mocked(getInflightPrewarm).mockReturnValue(
       new Promise((resolve) => setTimeout(() => resolve(HEAD_START), 10))
     );
-    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Hi"));
 
     const res = await post({ slug: SLUG, question: "How do I win?" });
     const text = await res.text();
@@ -420,7 +402,7 @@ describe("POST /api/chat in-flight prewarm deduplication (issue #60)", () => {
   it("builds its own context when no in-flight prewarm exists", async () => {
     // getInflightPrewarm returns null (the beforeEach default): the route
     // falls through to buildRagContext exactly as before.
-    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Hi"));
 
     const res = await post({ slug: SLUG, question: "How do I win?" });
     await res.text();
@@ -435,7 +417,7 @@ describe("POST /api/chat in-flight prewarm deduplication (issue #60)", () => {
     vi.mocked(getInflightPrewarm).mockReturnValue(
       Promise.reject(new Error("prewarm build failed"))
     );
-    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Hi"));
 
     const res = await post({ slug: SLUG, question: "How do I win?" });
     const text = await res.text();
@@ -480,7 +462,7 @@ describe("POST /api/chat prewarm rejection rule (issue #67)", () => {
       ts: Date.now(),
     });
     vi.mocked(finishRagContext).mockResolvedValue(RAG_CONTEXT);
-    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Hi"));
 
     const res = await post({ slug: SLUG, question: "How do I win?" });
     await res.text();
@@ -507,7 +489,7 @@ describe("POST /api/chat prewarm rejection rule (issue #67)", () => {
       ts: Date.now(),
     } as unknown as PrewarmEntry);
     vi.mocked(finishRagContext).mockResolvedValue(RAG_CONTEXT);
-    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Hi"));
 
     const res = await post({ slug: SLUG, question: "How do I win?" });
     await res.text();
@@ -533,7 +515,7 @@ describe("POST /api/chat generation prompt trim (issue #61)", () => {
   }
 
   it("sends max_tokens 1000 for an explicit-page question", async () => {
-    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Hi"));
 
     const res = await post({ slug: SLUG, question: "What does page 3 say?" });
     await res.text();
@@ -542,7 +524,7 @@ describe("POST /api/chat generation prompt trim (issue #61)", () => {
   });
 
   it("sends max_tokens 2000 for a question without an explicit page", async () => {
-    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Hi"));
 
     const res = await post({ slug: SLUG, question: "How do I win?" });
     await res.text();
@@ -551,7 +533,7 @@ describe("POST /api/chat generation prompt trim (issue #61)", () => {
   });
 
   it("carries the hierarchical TOC in the system prompt without the flat page map", async () => {
-    mockFetch.mockResolvedValue(sseResponse([sseChunk("Hi"), "data: [DONE]\n\n"]));
+    mockFetch.mockResolvedValue(jsonProviderResponse("Hi"));
 
     const res = await post({ slug: SLUG, question: "How do I win?" });
     await res.text();
@@ -569,5 +551,154 @@ describe("POST /api/chat generation prompt trim (issue #61)", () => {
     for (const content of systemMessages) {
       expect(content.match(flatMapLine)).toBeNull();
     }
+  });
+});
+
+// ─── Citation validation (issue #69) ────────────────────────────────────────
+//
+// The route buffers generation (stream: false) so it can validate every cited
+// page against the loaded excerpts BEFORE any token reaches the client. A bad
+// citation triggers exactly ONE strict-reminder retry; if that also fails, the
+// invalid markers are stripped and the answer is flagged. The outcome is logged
+// per request, and only cleanly-validated answers are cached (so a replayed
+// answer's citations are always valid).
+
+describe("POST /api/chat citation validation (issue #69)", () => {
+  /** Parse the SSE frames out of a streamed response body, in wire order. */
+  async function sseEvents(res: Response): Promise<Record<string, unknown>[]> {
+    const text = await res.text();
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => JSON.parse(line.slice(5).trim()));
+  }
+
+  /** The number of provider calls the route made so far in this test. */
+  function providerCalls(): number {
+    return vi.mocked(mockFetch).mock.calls.length;
+  }
+
+  it("makes exactly ONE provider call for a clean answer and caches it", async () => {
+    // Page 3 is in excerptedPages, so (p. 3) is valid — no retry needed.
+    mockFetch.mockResolvedValue(jsonProviderResponse("You win when all enemies are destroyed (p. 3)."));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    const events = await sseEvents(res);
+
+    // No repair was needed...
+    expect(providerCalls()).toBe(1);
+    // ...the outcome is logged as clean...
+    const entry = vi.mocked(logRequest).mock.calls[0][0] as Record<string, unknown>;
+    expect(entry.citationValidation).toBe("clean");
+    // ...and the done frame carries the valid citation, unflagged.
+    const done = events.find((e) => e.type === "done")!;
+    expect(done.citations).toEqual([{ page: 3 }]);
+    expect(done.citationsFlagged).toBeUndefined();
+
+    // A clean answer is cached: a repeat question replays without a provider call.
+    const res2 = await post({ slug: SLUG, question: "How do I win?" });
+    await res2.text();
+    expect(providerCalls()).toBe(1); // still one — the repeat hit the cache
+  });
+
+  it("triggers exactly ONE retry when the first answer cites an invalid page", async () => {
+    // First attempt cites page 99 (not in excerptedPages [3]); the strict-reminder
+    // retry cites only page 3. Every call after the first returns the valid answer.
+    let call = 0;
+    mockFetch.mockImplementation(() => {
+      call++;
+      return Promise.resolve(
+        call === 1 ? jsonProviderResponse("The rule is on page 99.") : jsonProviderResponse("The rule is on page 3.")
+      );
+    });
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    const events = await sseEvents(res);
+
+    // Exactly one retry...
+    expect(providerCalls()).toBe(2);
+    // ...and the outcome is logged as repaired.
+    const entry = vi.mocked(logRequest).mock.calls[0][0] as Record<string, unknown>;
+    expect(entry.citationValidation).toBe("repaired");
+
+    // The final text cites only the valid page 3...
+    const done = events.find((e) => e.type === "done")!;
+    expect(done.citations).toEqual([{ page: 3 }]);
+    expect(done.citationsFlagged).toBeUndefined();
+    // ...and the strict reminder was appended to the retry's user message.
+    const retryBody = JSON.parse(String(vi.mocked(mockFetch).mock.calls[1][1]?.body)) as Record<string, unknown>;
+    const retryUser = (retryBody.messages as { role: string; content: string }[]).find((m) => m.role === "user")!;
+    expect(retryUser.content).toContain("STRICT CITATION RULE");
+    expect(retryUser.content).toContain("3");
+
+    // A repaired answer is NOT cached: a repeat question hits the provider again.
+    const res2 = await post({ slug: SLUG, question: "How do I win?" });
+    await res2.text();
+    expect(providerCalls()).toBe(3); // one more provider call — no cache hit
+  });
+
+  it("strips the invalid marker and flags the answer when the retry also cites an invalid page", async () => {
+    // Both attempts cite page 99 (not in excerptedPages [3]).
+    mockFetch.mockImplementation(() => Promise.resolve(jsonProviderResponse("The rule is on page 99.")));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    const events = await sseEvents(res);
+
+    // Exactly one retry...
+    expect(providerCalls()).toBe(2);
+    // ...and the outcome is logged as stripped.
+    const entry = vi.mocked(logRequest).mock.calls[0][0] as Record<string, unknown>;
+    expect(entry.citationValidation).toBe("stripped");
+
+    // The final text contains NO invalid marker (page 99 is gone)...
+    const tokenText = events.filter((e) => e.type === "token").map((e) => e.content as string).join("");
+    expect(tokenText).not.toContain("99");
+    // ...the done frame is flagged...
+    const done = events.find((e) => e.type === "done")!;
+    expect(done.citationsFlagged).toBe(true);
+    // ...and carries no citations (the only one was invalid and stripped).
+    expect(done.citations).toEqual([]);
+
+    // A stripped answer is NOT cached: a repeat question hits the provider again.
+    const res2 = await post({ slug: SLUG, question: "How do I win?" });
+    await res2.text();
+    expect(providerCalls()).toBe(4); // two more provider calls — no cache hit
+  });
+
+  it("logs the citation-validation outcome on every successful request", async () => {
+    mockFetch.mockResolvedValue(jsonProviderResponse("You win when all enemies are destroyed (p. 3)."));
+
+    const res = await post({ slug: SLUG, question: "How do I win?" });
+    await res.text();
+
+    const entry = auditEntry();
+    expect(entry.status).toBe(200);
+    expect(entry.citationValidation).toBe("clean");
+  });
+
+  it("treats a comparison page as valid — no retry for a cross-game citation", async () => {
+    // The second game's index has a chunk on page 7; the question matches it, so
+    // retrieve surfaces page 7 and it joins the valid set.
+    indexFile.raw = JSON.stringify({
+      entries: [
+        { id: "compare-game-7", slug: "compare-game", title: "Compare Game", page: 7, text: "To win the game, destroy all enemies." },
+      ],
+    });
+    // The answer cites page 7 (the comparison page), which is valid.
+    mockFetch.mockResolvedValue(jsonProviderResponse("In Compare Game you win on page 7."));
+
+    const res = await post({ slug: SLUG, question: "How do I win?", compareSlug: "compare-game" });
+    const events = await sseEvents(res);
+
+    // No retry was needed — the comparison page is a valid citation...
+    expect(providerCalls()).toBe(1);
+    // ...and the outcome is clean.
+    const entry = auditEntry();
+    expect(entry.citationValidation).toBe("clean");
+    // The done frame carries the comparison page's citation, unflagged.
+    const done = events.find((e) => e.type === "done")!;
+    expect(done.citations).toEqual([{ page: 7 }]);
+    expect(done.citationsFlagged).toBeUndefined();
   });
 });
