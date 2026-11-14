@@ -182,17 +182,26 @@ describe("extractPdfPages — synthetic PDF (issue #70)", () => {
   });
 
   it("places a drop-cap glyph at the start of its line, not mid-page", async () => {
-    // Regression for review finding B2: a large drop cap (size ~3x body) has
-    // its baseline at the bottom of the multi-line span it occupies. Y-based
-    // joining with a size-scaled tolerance used to plant it on the line above
-    // its baseline, resurfacing mid-page. It must be placed by top edge so the
-    // dropped letter leads the first line ("You've...", not "ou've...").
+    // Regression for review finding B2 (second round): a large drop cap whose
+    // em far exceeds its visual span has its baseline at the BOTTOM of the
+    // multi-line span it occupies. The original implementation joined every
+    // item by baseline with a tolerance scaled to the item's own size, so a
+    // 48pt cap earned a ~21pt tolerance and was planted on the line at its
+    // baseline (the last line of the span), resurfacing mid-page and dropping
+    // the first character. The cap must be anchored by baseline to the TOPMOST
+    // line of its span so the dropped letter leads the first line ("You've...",
+    // not "ou've...").
+    // Geometry: three body lines at pitch 10 (visual span ~32pt); the cap's em
+    // (48) far exceeds that span; the cap's baseline (y=685) aligns with the
+    // third line, whose text is emitted before the cap in item order. On the
+    // original code this geometry yields "...third lineY" (cap on the last
+    // line), so `startsWith("You")` fails; on the fixed code it yields
+    // "You've..." and passes.
     const items: Array<{ str: string; x: number; y: number; size: number }> = [
-      { str: "ou've always liked plants.", x: 100, y: 700, size: 12 },
-      { str: "Y", x: 72, y: 685, size: 36 }, // drop cap spanning lines 1-2
-      { str: "text on the second line", x: 72, y: 685, size: 12 },
-      { str: "text on the third line", x: 72, y: 670, size: 12 },
-      { str: "text on the fourth line", x: 72, y: 655, size: 12 },
+      { str: "ou've always liked plants.", x: 100, y: 705, size: 12 },
+      { str: "text on the second line", x: 72, y: 695, size: 12 },
+      { str: "text on the third line", x: 72, y: 685, size: 12 },
+      { str: "Y", x: 72, y: 685, size: 48 }, // drop cap spanning lines 1-3
     ];
     const pages = await extractFromItems(items);
     expect(pages).toHaveLength(1);
@@ -201,9 +210,9 @@ describe("extractPdfPages — synthetic PDF (issue #70)", () => {
     // the prefix so the test is independent of how pdfjs encodes the apostrophe.
     expect(text.startsWith("You")).toBe(true);
     expect(text.indexOf("always liked plants")).toBeGreaterThan(0);
-    // Body lines follow in order.
+    // Body lines follow in order, each exactly once.
     expect(text.indexOf("second line")).toBeLessThan(text.indexOf("third line"));
-    expect(text.indexOf("third line")).toBeLessThan(text.indexOf("fourth line"));
+    expect(text.match(/third line/g)).toHaveLength(1);
   });
 
   it("repairs hyphenation across line breaks", async () => {
