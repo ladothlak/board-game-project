@@ -350,13 +350,14 @@ describe("extractPdfPagesWithHeadings — synthetic PDF (issue #71)", () => {
   });
 
   it("detects bold heading at body size", async () => {
-    // "Setup" in bold at size 10 (same as body) — bold + size >= 0.95 * bodyMedian
+    // "Set Up" in bold at size 10 (same as body) — bold + size >= 0.95 * bodyMedian
     // should flag it as a heading. The body lines use narrow letters (i, l, t,
     // f, s) so their perEm median sits well below the bold line's, and there are
     // >= 5 lines in the size bucket — detectBoldFlags needs that many before its
-    // spread check runs at all.
+    // spread check runs at all. The heading is a complete multi-word phrase:
+    // single-word bold candidates are dropped (third review of #71).
     const pages = await extractHeadingsFromItems([
-      { str: "Setup", x: 72, y: 700, size: 10, bold: true },
+      { str: "Set Up", x: 72, y: 700, size: 10, bold: true },
       { str: "The light slit fits in the thin slot.", x: 72, y: 670, size: 10 },
       { str: "Fit the slim lid on the tin and sit.", x: 72, y: 655, size: 10 },
       { str: "A thin strip of silk is lit by sun.", x: 72, y: 640, size: 10 },
@@ -367,7 +368,7 @@ describe("extractPdfPagesWithHeadings — synthetic PDF (issue #71)", () => {
     // Bold at body size must be detected as a heading.
     expect(pages[0].headings.length).toBeGreaterThanOrEqual(1);
     const headingTexts = pages[0].headings.map((h) => h.text);
-    expect(headingTexts.some((t) => t.includes("Setup"))).toBe(true);
+    expect(headingTexts.some((t) => t.includes("Set Up"))).toBe(true);
   });
 
   it("does not flag bold bullet lines at paragraph starts as headings", async () => {
